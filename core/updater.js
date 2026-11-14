@@ -168,6 +168,43 @@ function resolveAsset(spec, repoBase) {
   return { url, size: Number(spec.size) || 0, sha256: String(spec.sha256 || '') };
 }
 
+/**
+ * Адрес со «свежим» параметром. raw.githubusercontent отдаёт файлы с кэшем
+ * в пять минут: сразу после релиза по старому адресу прилетал предыдущий архив,
+ * не сходилась sha256, и обновление падало («файл повреждён»). С nonce кэш
+ * промахивается и отдаёт настоящий файл.
+ */
+function bust(url) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('_', `${Date.now()}${Math.random().toString(36).slice(2, 8)}`);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Скачивание с обходом кэша и проверкой sha256.
+ * Если сумма не сошлась — значит CDN отдал старую копию: качаем ещё раз
+ * по новому адресу. Только после второй неудачи отдаём ошибку.
+ *
+ * @returns {Promise<{file:string,size:number,sha256:string,attempts:number}>}
+ */
+async function downloadChecked(url, dest, opts = {}) {
+  const want = String(opts.sha256 || '');
+  let lastError = '';
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const target = bust(url);
+    const r = await download(target, dest, opts);
+    const got = sha256File(dest);
+    if (!want || got === want) return { ...r, sha256: got, attempts: attempt };
+    lastError = `контрольная сумма не совпала (ждали ${want.slice(0, 12)}…, получили ${got.slice(0, 12)}…)`;
+    if (attempt === 1) await new Promise((res) => setTimeout(res, 1200));
+  }
+  throw new Error(lastError || 'файл не скачался');
+}
+
 /** update.json из ветки репозитория. */
 async function fromManifest({ repo, branch = 'main', token }) {
   const base = `${rawBase()}/${repo}/${branch}`;
@@ -471,6 +508,7 @@ function pruneBackups(backupDir, keep = 2) {
 }
 
 module.exports = {
+  bust, downloadChecked,
   parseVersion,
   compareVersions,
   normalizeRepo,

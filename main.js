@@ -1085,16 +1085,14 @@ function wireIpc() {
     try {
       const file = path.join(updDownloadDir(), updater.CODE_ASSET);
       updSend('upd:progress', { phase: 'download', received: 0, total: last.code.size || 0 });
-      await updater.download(last.code.url, file, {
+      /* downloadChecked обходит пятиминутный кэш raw.githubusercontent и повторяет
+         скачивание, если CDN отдал предыдущую версию файла */
+      const got = await updater.downloadChecked(last.code.url, file, {
         token: accountToken(),
+        sha256: last.code.sha256 || '',
         onProgress: (p) => updSend('upd:progress', { phase: 'download', ...p }),
       });
-      if (last.code.sha256) {
-        const got = updater.sha256File(file);
-        if (got !== last.code.sha256) {
-          return { ok: false, error: 'контрольная сумма не совпала — файл повреждён, попробуй снова' };
-        }
-      }
+      if (got.attempts > 1) updSend('upd:progress', { phase: 'retry' });
       updSend('upd:progress', { phase: 'install' });
       const res = updater.applyCode({
         appDir: app.getAppPath(),
@@ -1144,25 +1142,21 @@ function wireIpc() {
       if (last.setup) {
         const name = last.setup.name || `OmniPanel-Setup-${last.latest}.exe`;
         const setupFile = path.join(updDownloadDir(), name);
-        await updater.download(last.setup.url, setupFile, {
+        await updater.downloadChecked(last.setup.url, setupFile, {
           token: accountToken(),
+          sha256: last.setup.sha256 || '',
           onProgress: (p) => updSend('upd:progress', { phase: 'full', ...p }),
         });
-        if (last.setup.sha256 && updater.sha256File(setupFile) !== last.setup.sha256) {
-          return { ok: false, error: 'контрольная сумма установщика не совпала' };
-        }
         updSend('upd:progress', { phase: 'full-done' });
         shell.showItemInFolder(setupFile);
         return { ok: true, setup: true, archive: setupFile, version: last.latest };
       }
       const file = path.join(updDownloadDir(), updater.FULL_ASSET);
-      await updater.download(last.full.url, file, {
+      await updater.downloadChecked(last.full.url, file, {
         token: accountToken(),
+        sha256: last.full.sha256 || '',
         onProgress: (p) => updSend('upd:progress', { phase: 'full', ...p }),
       });
-      if (last.full.sha256 && updater.sha256File(file) !== last.full.sha256) {
-        return { ok: false, error: 'контрольная сумма не совпала' };
-      }
       const res = updater.saveFullPackage({
         zipPath: file,
         exeDir: path.dirname(app.getPath('exe')),

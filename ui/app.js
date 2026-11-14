@@ -5563,6 +5563,8 @@ function bindUpdates() {
         const pct = p.total ? Math.min(100, Math.round((p.received / p.total) * 100)) : 8;
         bar.querySelector('i').style.width = pct + '%';
         if (p.phase === 'full') $('updState').textContent = `качаю полную сборку… ${updFmtMB(p.received)}`;
+      } else if (p.phase === 'retry') {
+        $('updState').textContent = 'кэш GitHub отдал старую копию — качаю заново…';
       } else if (p.phase === 'install') {
         bar.classList.remove('hidden');
         bar.querySelector('i').style.width = '100%';
