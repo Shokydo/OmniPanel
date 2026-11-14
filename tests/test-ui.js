@@ -73,7 +73,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
     const visible = await page.$eval(`.prefs-cat[data-cat="${c}"]`, (e) => !e.classList.contains('hidden'));
     ok(visible, `категория «${c}» открывается`);
   }
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-prefs-categories.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-prefs-categories.png' });
 
   console.log('\n=== ТУМБЛЕРЫ ВМЕСТО ГАЛОЧЕК ===');
   const sw = await page.evaluate(() => {
@@ -92,7 +92,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   await page.waitForTimeout(300);
   const recent = await page.$$eval('#wallRecent .wall-cell', (els) => els.length);
   ok(recent >= 2, 'выбранные фоны попали в историю', 'элементов: ' + recent);
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-wallpapers.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-wallpapers.png' });
 
   await page.click('#prefsNav .prefs-tab[data-cat="look"]');
   await page.waitForTimeout(200);
@@ -131,11 +131,11 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   for (const c of ['look', 'fx', 'win', 'notif']) {
     await page.click(`#prefsNav .prefs-tab[data-cat="${c}"]`);
     await page.waitForTimeout(250);
-    await page.screenshot({ path: `/home/user/OmniPanel/screenshot-prefs-${c}.png` });
+    await page.screenshot({ path: `/home/user/OmniPanel/docs/screens/screenshot-prefs-${c}.png` });
   }
   await page.click('#prefsNav .prefs-tab[data-cat="gh"]');
   await page.waitForTimeout(250);
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-github-auth.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-github-auth.png' });
   console.log('\n=== ОБНОВЛЕНИЯ ===');
   await clearToasts(page);
   await page.click('#prefsNav .prefs-tab[data-cat="upd"]');
@@ -156,7 +156,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   ok(updNotes.includes('Обновление из GitHub'), 'описание обновления показано', updNotes.split('\n')[0]);
   ok(!(await page.$eval('#updApplyBtn', (e) => e.disabled)), 'кнопка «Обновить» включилась');
   ok(await page.$eval('#updFullBtn', (e) => e.disabled), 'полной сборки в канале нет — кнопка выключена');
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-updates.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-updates.png' });
 
   ok(await page.$eval('.prefs-tab[data-cat="upd"]', (e) => e.classList.contains('has-new')), 'на вкладке появился маркер обновления');
   await clearToasts(page);
@@ -183,7 +183,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   const d2 = await page.evaluate(() => ({ v: document.getElementById('scanDepthVal').textContent, dots: document.querySelectorAll('#scanDepthDots i.on').length }));
   ok(d1.v !== d2.v, 'кнопка переключает глубину', `${d1.v} → ${d2.v}`);
   ok(d2.dots === d1.dots + 1, 'индикатор ступеней растёт вместе с глубиной', `${d1.dots} → ${d2.dots}`);
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-scan-depth.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-scan-depth.png' });
 
   await page.click('#scanClose');
   await page.waitForTimeout(300);
@@ -197,7 +197,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   await page.waitForTimeout(300);
   const zoom = await page.evaluate(() => getComputedStyle(document.documentElement).zoom);
   ok(zoom === '1.15', 'масштаб применился', zoom);
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-prefs-win.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-prefs-win.png' });
   await page.click('#scaleGrid .chip[data-scale="100"]');
   await page.waitForTimeout(200);
   await page.click('#prefsDone');
@@ -216,7 +216,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   ok(dl.includes('o/r'), 'репозиторий предложен в подсказке списка', JSON.stringify(dl));
   await page.$eval('#modal .modal-body', (e) => { e.scrollTop = e.scrollHeight; });
   await page.waitForTimeout(400);
-  await page.screenshot({ path: '/home/user/OmniPanel/screenshot-sync-scope.png' });
+  await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-sync-scope.png' });
   await page.keyboard.press('Escape');
   await page.waitForTimeout(300);
 
