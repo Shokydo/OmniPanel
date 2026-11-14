@@ -210,8 +210,7 @@ const prefs = {
   startMode: localStorage.getItem('lsp.startMode') || 'window',
   // 0 — под размер окна. Новый ключ: у старых версий масштаб был зафиксирован,
   // поэтому один раз переводим настройку в «под окно».
-  scale: Number((localStorage.getItem('lsp.scale2')
-    ?? (localStorage.getItem('lsp.scale') === null ? '0' : '0')) || 0),
+  density: localStorage.getItem('lsp.density') || 'normal',
   notifSound: localStorage.getItem('lsp.notifSound') !== '0',
   notifMs: Number(localStorage.getItem('lsp.notifMs') || 4200),
   // фон панели: id встроенных обоев, 'custom' или 'none'
@@ -247,8 +246,7 @@ const prefs = {
     localStorage.setItem('lsp.theme', this.theme);
     localStorage.setItem('lsp.radius', this.radius);
     localStorage.setItem('lsp.startMode', this.startMode);
-    localStorage.setItem('lsp.scale', String(this.scale));
-    localStorage.setItem('lsp.scale2', String(this.scale));
+    localStorage.setItem('lsp.density', this.density);
     localStorage.setItem('lsp.notifSound', this.notifSound ? '1' : '0');
     localStorage.setItem('lsp.notifMs', String(this.notifMs));
     localStorage.setItem('lsp.wall', this.wall);
@@ -910,6 +908,8 @@ function drawChart(host, points, opts = {}) {
 
 /* ═════════════════════ редактор файлов ═════════════════════ */
 
+const FM_MAX_TABS = 16;   // сколько файлов можно держать открытыми сразу
+
 const FM = {
   bound: false,
   root: '',          // рабочая папка открытого сервера
@@ -919,16 +919,34 @@ const FM = {
   kind: 'text',
   binary: false,
   expanded: new Set(),
+  tabs: [],          // открытые файлы: {path, kind, binary, content, saved, dirty, view, archive, image, message}
+  activeIdx: -1,
+  view: 'text',      // text | image | archive | binary
+  lastDir: '',       // папка, в которой создаём файлы (последняя выбранная в дереве)
+  dragPath: '',      // что тащим мышкой
   wikiOpen: false,
   searchTimer: null,
 };
+
+/** Открытый файл (вкладка) или null. */
+function fmActive() {
+  return FM.activeIdx >= 0 ? FM.tabs[FM.activeIdx] || null : null;
+}
+
+/** Папка файла: 'plugins/A/x.yml' → 'plugins/A'. */
+function fmDirOf(rel) {
+  const clean = String(rel || '').replace(/\/+$/, '');
+  const i = clean.lastIndexOf('/');
+  return i < 0 ? '' : clean.slice(0, i);
+}
 
 /** Иконка элемента дерева файлов (SVG, а не эмодзи). */
 function fmIcon(kind, isDir, expanded) {
   if (isDir) return ico(expanded ? 'folderOpen' : 'folder', 13, 1.6);
   if (kind === 'yaml' || kind === 'json' || kind === 'js') return ico('fileCode', 13, 1.6);
   if (kind === 'properties') return ico('fileCog', 13, 1.6);
-  if (kind === 'binary') return ico('fileArchive', 13, 1.6);
+  if (kind === 'archive' || kind === 'archive-other' || kind === 'binary') return ico('fileArchive', 13, 1.6);
+  if (kind === 'image') return ico('image', 13, 1.6);
   return ico('file', 13, 1.6);
 }
 
@@ -943,6 +961,10 @@ function fmOpenServer() {
     FM.content = '';
     FM.saved = '';
     FM.expanded = new Set();
+    FM.tabs = [];
+    FM.activeIdx = -1;
+    FM.lastDir = '';
+    fmRenderTabs();
     fmEl('fmText').value = '';
     fmEl('fmText').disabled = true;
     fmEl('fmCrumb').textContent = 'файл не выбран';
@@ -986,6 +1008,7 @@ async function fmRenderDir(rel, host, depth, isRoot = false) {
     row.className = 'fm-row' + (it.path === FM.openPath ? ' active' : '');
     row.dataset.path = it.path;
     row.dataset.dir = it.isDir ? '1' : '';
+    row.draggable = true;
     if (it.isDir) row.dataset.dropRel = it.path;
     const pad = 7 + depth * 12;
     row.style.paddingLeft = pad + 'px';
@@ -1030,7 +1053,65 @@ async function fmRenderDir(rel, host, depth, isRoot = false) {
       menu.push({ label: 'Открыть в проводнике', disabled: !IS_DESKTOP, act: () => API.filesOpenExternal(current().id, it.path) });
       showMenu(ev, menu);
     };
+
+    /* ── перетаскивание файлов и папок между папками ── */
+    row.addEventListener('dragstart', (ev) => {
+      FM.dragPath = it.path;
+      row.classList.add('dragging');
+      try {
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/plain', it.path);
+      } catch { /* старые движки */ }
+    });
+    row.addEventListener('dragend', () => {
+      FM.dragPath = '';
+      row.classList.remove('dragging');
+      for (const el of document.querySelectorAll('.fm-row.drop-on')) el.classList.remove('drop-on');
+      fmEl('fmTree').classList.remove('drop-on');
+    });
+    if (it.isDir) {
+      row.addEventListener('dragover', (ev) => {
+        if (!FM.dragPath) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = 'move';
+        row.classList.add('drop-on');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-on'));
+      row.addEventListener('drop', async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        row.classList.remove('drop-on');
+        await fmMoveInto(it.path);
+      });
+    }
   }
+}
+
+/** Перенос перетаскиванием: FM.dragPath → toDir. */
+async function fmMoveInto(toDir) {
+  const s = current();
+  const from = FM.dragPath;
+  if (!s || !from) return;
+  if (from === toDir) return;
+  if (toDir === fmDirOf(from)) return;                 // уже там
+  if (toDir.startsWith(from + '/')) {
+    toast('Нельзя перенести папку внутрь себя', 'err');
+    return;
+  }
+  FM.dragPath = '';
+  const res = await API.filesMove(s.id, from, toDir);
+  if (!res || res.ok === false || res.error) {
+    toast((res && res.error) || 'Не удалось перенести', 'err');
+    return;
+  }
+  const tab = FM.tabs.find((t) => t.path === from);
+  if (tab) tab.path = res.path;
+  if (FM.openPath === from) FM.openPath = res.path;
+  FM.expanded.add(toDir);
+  FM.lastDir = toDir;
+  await fmLoadTree();
+  Sound.play('ok');
+  toast(`Перенесено в «${toDir || 'корень сервера'}»`, 'ok');
 }
 
 function fmSize(bytes) {
@@ -1040,54 +1121,273 @@ function fmSize(bytes) {
   return (bytes / 1048576).toFixed(1).replace('.', ',') + ' МБ';
 }
 
+/** Сохраняет то, что сейчас в редакторе, в активную вкладку. */
+function fmSnapshot() {
+  const t = fmActive();
+  if (!t) return;
+  if (FM.view === 'text' || FM.view === 'binary') {
+    t.content = fmEl('fmText').value;
+    t.dirty = !t.binary && t.content !== t.saved;
+  }
+}
+
+function fmRenderTabs() {
+  const host = fmEl('fmTabs');
+  if (!host) return;
+  if (!FM.tabs.length) {
+    host.innerHTML = '';
+    host.classList.add('hidden');
+    return;
+  }
+  host.classList.remove('hidden');
+  host.innerHTML = FM.tabs.map((t, i) => {
+    const name = t.path.split('/').pop();
+    const cls = ['fm-tab'];
+    if (i === FM.activeIdx) cls.push('active');
+    if (t.dirty) cls.push('dirty');
+    const mark = t.kind === 'archive' ? ico('fileArchive', 11, 1.6)
+      : t.kind === 'image' ? ico('image', 11, 1.6)
+        : '';
+    return `<div class="${cls.join(' ')}" data-tab="${i}">`
+      + `<span class="ft-ico">${mark}</span>`
+      + `<span class="ft-nm">${esc(name)}</span>`
+      + `<span class="ft-x" data-close="${i}">${ico('close', 10, 2)}</span>`
+      + '</div>';
+  }).join('') + `<span class="fm-tab-count">${FM.tabs.length}/${FM_MAX_TABS}</span>`;
+}
+
+/** Показывает активную вкладку: текст, картинку или содержимое архива. */
+function fmRenderView() {
+  const t = fmActive();
+  const gutter = document.querySelector('.fm-gutter');
+  const wrap = document.querySelector('.fm-codewrap');
+  const arcBox = fmEl('fmArchive');
+  const imgBox = fmEl('fmImageBox');
+  const ta = fmEl('fmText');
+  const extractBtn = fmEl('fmExtractAll');
+
+  const show = (which) => {
+    if (gutter) gutter.classList.toggle('hidden', which !== 'text');
+    if (wrap) wrap.classList.toggle('hidden', which !== 'text');
+    arcBox.classList.toggle('hidden', which !== 'archive');
+    imgBox.classList.toggle('hidden', which !== 'image');
+    if (extractBtn) extractBtn.classList.toggle('hidden', which !== 'archive');
+  };
+
+  if (!t) {
+    show('text');
+    ta.value = '';
+    ta.disabled = true;
+    ta.placeholder = 'Выбери файл слева';
+    FM.view = 'text';
+    FM.openPath = '';
+    fmEl('fmCrumb').textContent = 'файл не выбран';
+    fmEl('fmKind').textContent = '—';
+    fmEl('fmSize').textContent = '—';
+    fmRenderHighlight();
+    fmRenderGutter();
+    fmSetDirty(false);
+    return;
+  }
+
+  FM.openPath = t.path;
+  FM.kind = t.kind;
+  FM.binary = !!t.binary;
+  FM.view = t.view;
+  fmEl('fmCrumb').textContent = t.path;
+  fmEl('fmPath').textContent = t.path;
+  fmEl('fmPos').classList.toggle('hidden', t.view !== 'text');
+  fmEl('fmKind').textContent = t.view === 'archive' ? 'архив'
+    : t.view === 'image' ? 'картинка'
+      : t.binary ? 'binary' : t.kind;
+  fmEl('fmSize').textContent = fmSize(t.size);
+
+  if (t.view === 'archive') {
+    show('archive');
+    fmRenderArchive();
+  } else if (t.view === 'image') {
+    show('image');
+    fmEl('fmImage').src = t.image || '';
+  } else {
+    show('text');
+    ta.disabled = !!t.binary;
+    ta.value = t.content || '';
+    ta.placeholder = t.binary ? (t.message || 'Двоичный файл — только просмотр') : 'Выбери файл слева';
+    fmRenderHighlight();
+    fmRenderGutter();
+    fmUpdatePos();
+  }
+  fmSetDirty(!!t.dirty);
+  for (const row of document.querySelectorAll('#fmTree .fm-row')) {
+    row.classList.toggle('active', row.dataset.path === t.path);
+  }
+  fmRenderTabs();
+}
+
+/** Список файлов внутри zip-архива с кнопками распаковки. */
+function fmRenderArchive() {
+  const t = fmActive();
+  const host = fmEl('fmArchive');
+  if (!t) return;
+  const a = t.archive;
+  if (!a || a.ok === false || a.error) {
+    host.innerHTML = `<div class="fm-empty">${esc((a && a.error) || t.message || 'Архив не открылся')}</div>`;
+    return;
+  }
+  const rows = a.entries.slice(0, 800).map((e) => `<div class="far-row" data-name="${esc(e.name)}">`
+    + `<span class="fa-nm">${esc(e.name)}</span>`
+    + `<span class="fa-sz">${fmSize(e.size)}</span>`
+    + `<button class="btn btn-mini" data-unpack="${esc(e.name)}">Распаковать</button>`
+    + '</div>').join('');
+  host.innerHTML = '<div class="far-head">'
+    + `<span class="fh-name">Содержимое архива</span>`
+    + `<span class="fh-meta">${a.total} файлов · внутри ${fmSize(a.raw)} · архив ${fmSize(a.size)}</span>`
+    + '</div>'
+    + `<div class="far-list">${rows}${a.entries.length > 800 ? '<div class="far-more">показаны первые 800 файлов</div>' : ''}</div>`
+    + '<div id="fmArchivePreview" class="far-preview hidden"></div>';
+}
+
+/** Просмотр одного файла из архива — по клику по строке. */
+async function fmArchivePreview(name) {
+  const t = fmActive();
+  const s = current();
+  if (!t || !s) return;
+  const host = fmEl('fmArchivePreview');
+  host.classList.remove('hidden');
+  host.innerHTML = '<div class="fm-empty">Читаю…</div>';
+  const res = await API.archiveRead(s.id, t.path, name);
+  if (!res || res.ok === false || res.error) {
+    host.innerHTML = `<div class="fm-empty">${esc((res && res.error) || 'Не удалось прочитать файл')}</div>`;
+    return;
+  }
+  host.innerHTML = `<div class="far-preview-head"><span>${esc(name)}</span><button class="btn btn-mini" id="fmArchivePreviewClose">Закрыть</button></div>`;
+  fmEl('fmArchivePreviewClose').onclick = () => host.classList.add('hidden');
+  if (res.kind === 'image') {
+    const img = document.createElement('img');
+    img.className = 'far-preview-img';
+    img.src = res.dataUrl;
+    host.appendChild(img);
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'far-preview-text';
+    pre.textContent = res.content || '';
+    host.appendChild(pre);
+  }
+}
+
+/** Распаковка архива: весь или один файл — рядом с архивом. */
+async function fmExtractArchive(onlyName) {
+  const t = fmActive();
+  const s = current();
+  if (!t || !s) return;
+  const dest = fmDirOf(t.path);
+  const res = await API.archiveExtract(s.id, t.path, dest, onlyName || '');
+  if (!res || res.ok === false || res.error) {
+    toast((res && res.error) || 'Не удалось распаковать', 'err');
+    return;
+  }
+  await fmLoadTree();
+  Sound.play('ok');
+  toast(onlyName ? `Распакован ${onlyName}` : `Распаковано ${res.files} файлов в «${dest || 'корень сервера'}»`, 'ok');
+}
+
 async function fmOpenFile(rel) {
-  if (!(await fmConfirmLeave())) return;
   const s = current();
   if (!s) return;
+  const existing = FM.tabs.findIndex((t) => t.path === rel);
+  if (existing >= 0) {
+    await fmSelectTab(existing);
+    return;
+  }
+  if (FM.tabs.length >= FM_MAX_TABS) {
+    toast(`Открыто ${FM_MAX_TABS} файлов — закрой одну вкладку`, 'err');
+    return;
+  }
   const res = await API.filesRead(s.id, rel);
   if (!res || res.ok === false || res.error) {
     toast((res && res.error) || 'Не удалось открыть файл', 'err');
     return;
   }
-  FM.openPath = res.path || rel;
-  FM.kind = res.kind || 'text';
-  FM.binary = !!res.binary;
-  FM.content = res.content || '';
-  FM.saved = FM.content;
+  const tab = {
+    path: res.path || rel,
+    kind: res.kind || 'text',
+    binary: !!res.binary,
+    content: res.content || '',
+    saved: res.content || '',
+    dirty: false,
+    size: res.size || 0,
+    message: res.message || '',
+    view: 'text',
+    archive: null,
+    image: '',
+  };
 
-  const ta = fmEl('fmText');
-  ta.disabled = !!res.binary;
-  ta.value = FM.content;
-  ta.scrollTop = 0;
-  ta.scrollLeft = 0;
-
-  fmEl('fmCrumb').textContent = FM.openPath;
-  fmEl('fmPath').textContent = FM.openPath;
-  fmEl('fmKind').textContent = res.binary ? 'binary' : FM.kind;
-  fmEl('fmSize').textContent = fmSize(res.size) + (res.binary ? ' — не редактируется' : '');
-  fmEl('fmSave').disabled = true;
-  fmSetDirty(false);
-  fmRenderHighlight();
-  fmRenderGutter();
-  fmUpdatePos();
-
-  for (const row of document.querySelectorAll('#fmTree .fm-row')) {
-    row.classList.toggle('active', row.dataset.path === FM.openPath);
+  if (tab.kind === 'archive' || tab.kind === 'archive-other') {
+    tab.view = 'archive';
+    tab.archive = await API.archiveOpen(s.id, tab.path);
+  } else if (tab.kind === 'image') {
+    tab.view = 'image';
+    const img = await API.filesImage(s.id, tab.path);
+    if (img && img.ok !== false && !img.error) tab.image = img.dataUrl;
+    else tab.message = (img && img.error) || 'Картинка не открылась';
+  } else if (tab.binary) {
+    tab.view = 'text';
   }
 
+  FM.tabs.push(tab);
+  await fmSelectTab(FM.tabs.length - 1);
+
   // у файлов MythicMobs сразу показываем шпаргалку
-  if (/mythicmobs/i.test(FM.openPath) && !FM.wikiOpen) fmToggleWiki(true);
+  if (/mythicmobs/i.test(tab.path) && !FM.wikiOpen) fmToggleWiki(true);
   Sound.play('click');
+}
+
+/** Переключение на вкладку по номеру. */
+async function fmSelectTab(idx) {
+  fmSnapshot();
+  if (idx < 0 || idx >= FM.tabs.length) {
+    FM.activeIdx = -1;
+    fmRenderView();
+    fmRenderTabs();
+    return;
+  }
+  FM.activeIdx = idx;
+  fmRenderView();
+  fmEl('fmText').scrollTop = 0;
+  fmEl('fmText').scrollLeft = 0;
+  fmSyncScroll();
+}
+
+/** Закрытие вкладки (с проверкой несохранённых правок). */
+async function fmCloseTab(idx) {
+  if (idx !== FM.activeIdx) fmSnapshot();
+  const t = FM.tabs[idx];
+  if (!t) return;
+  if (t.dirty && idx === FM.activeIdx) {
+    const sure = await askConfirm({
+      title: 'Есть несохранённые правки',
+      text: `Файл «${t.path}» изменён. Закрыть без сохранения?`,
+      okLabel: 'Не сохранять',
+    });
+    if (!sure) return;
+  }
+  FM.tabs.splice(idx, 1);
+  if (!FM.tabs.length) FM.activeIdx = -1;
+  else if (FM.activeIdx >= idx) FM.activeIdx = Math.max(0, FM.activeIdx - 1);
+  await fmSelectTab(FM.activeIdx);
 }
 
 function fmSetDirty(dirty) {
   const d = !!dirty;
   const changed = d !== (FM.dirty || false);
   FM.dirty = d;
+  const t = fmActive();
+  if (t) t.dirty = d;
   const mark = fmEl('fmDirty');
   mark.innerHTML = d ? ico('dotFill', 9) : '';
   mark.classList.toggle('hidden', !d);
   fmEl('fmSave').disabled = !d || FM.binary || !FM.openPath;
+  fmRenderTabs();
   if (changed && d) Sound.play('type');
 }
 
@@ -1113,24 +1413,44 @@ async function fmSave() {
   }
   FM.saved = fmEl('fmText').value;
   FM.content = FM.saved;
+  const tab = fmActive();
+  if (tab) {
+    tab.saved = FM.saved;
+    tab.content = FM.saved;
+    tab.size = res.size;
+    tab.dirty = false;
+  }
   fmSetDirty(false);
   fmEl('fmSize').textContent = fmSize(res.size);
   Sound.play('ok');
   toast(`Сохранено: ${FM.openPath.split('/').pop()}`, 'ok');
 }
 
+/** В какой папке создавать файл: выбранная в дереве или папка открытого файла. */
+function fmTargetDir(explicit) {
+  if (explicit != null && explicit !== '') return explicit;
+  if (FM.lastDir) return FM.lastDir;
+  return fmDirOf(FM.openPath);
+}
+
 async function fmNewFile(parentRel = '') {
   const s = current();
   if (!s) return;
+  const dir = fmTargetDir(parentRel);
   const name = await askText({
     title: 'Новый файл',
-    text: 'Можно указать путь с папками, например Skills/MySkill.yml — папки создадутся сами.',
-    value: parentRel ? parentRel + '/NewFile.yml' : 'NewFile.yml',
+    text: dir ? `Появится в папке «${dir}»` : 'Появится в корне папки сервера',
+    value: 'NewFile.yml',
     okLabel: 'Создать',
   });
   if (!name) return;
-  const rel = name.trim().replace(/^[/\\]+/, '');
-  if (!rel) return;
+  const clean = name.trim().replace(/^[/\\]+/, '');
+  if (!clean) return;
+  if (clean.includes('/')) {
+    toast('Нужно только имя файла — папку выбери в дереве слева', 'err');
+    return;
+  }
+  const rel = dir ? dir + '/' + clean : clean;
   const res = await API.filesWrite(s.id, rel, fmTemplateFor(rel));
   if (!res || res.ok === false || res.error) {
     toast((res && res.error) || 'Не удалось создать файл', 'err');
@@ -1145,21 +1465,28 @@ async function fmNewFile(parentRel = '') {
 async function fmNewFolder() {
   const s = current();
   if (!s) return;
+  const dir = fmTargetDir('');
   const name = await askText({
     title: 'Новая папка',
-    text: 'Можно указать вложенный путь, например Skills/Sub.',
+    text: dir ? `Появится в папке «${dir}»` : 'Появится в корне папки сервера',
     value: 'NewFolder',
     okLabel: 'Создать',
   });
   if (!name) return;
-  const rel = name.trim().replace(/^[/\\]+/, '');
-  if (!rel) return;
+  const clean = name.trim().replace(/^[/\\]+/, '');
+  if (!clean) return;
+  if (clean.includes('/')) {
+    toast('Нужно только имя папки — место выбери в дереве слева', 'err');
+    return;
+  }
+  const rel = dir ? dir + '/' + clean : clean;
   const res = await API.filesMkdir(s.id, rel);
   if (!res || res.ok === false || res.error) {
     toast((res && res.error) || 'Не удалось создать папку', 'err');
     return;
   }
-  FM.expanded = new Set([...FM.expanded, ...fmParents(rel + '/x')]);
+  FM.expanded = new Set([...FM.expanded, ...fmParents(rel + '/x'), rel]);
+  FM.lastDir = rel;
   await fmLoadTree();
   Sound.play('ok');
 }
@@ -1198,10 +1525,13 @@ async function fmRename(item) {
     toast((res && res.error) || 'Не удалось переименовать', 'err');
     return;
   }
-  if (FM.openPath === item.path) {
+  const tab = FM.tabs.find((t) => t.path === item.path);
+  if (tab) {
+    tab.path = res.path;
     FM.openPath = res.path;
     fmEl('fmCrumb').textContent = res.path;
     fmEl('fmPath').textContent = res.path;
+    fmRenderTabs();
   }
   await fmLoadTree();
   Sound.play('ok');
@@ -1222,16 +1552,12 @@ async function fmDelete(item) {
     toast((res && res.error) || 'Не удалось удалить', 'err');
     return;
   }
-  if (FM.openPath === item.path || FM.openPath.startsWith(item.path + '/')) {
-    FM.openPath = '';
+  const killed = FM.tabs.findIndex((t) => t.path === item.path || t.path.startsWith(item.path + '/'));
+  if (killed >= 0) {
+    FM.tabs = FM.tabs.filter((t) => !(t.path === item.path || t.path.startsWith(item.path + '/')));
+    FM.activeIdx = FM.tabs.length ? Math.min(FM.activeIdx, FM.tabs.length - 1) : -1;
     FM.dirty = false;
-    fmEl('fmText').value = '';
-    fmEl('fmText').disabled = true;
-    fmEl('fmCrumb').textContent = 'файл не выбран';
-    fmEl('fmText').placeholder = 'Выбери файл слева';
-    fmRenderHighlight();
-    fmRenderGutter();
-    fmSetDirty(false);
+    await fmSelectTab(FM.activeIdx);
   }
   await fmLoadTree();
   Sound.play('stop');
@@ -1349,6 +1675,8 @@ function fmInsert(text) {
 function fmOnInput() {
   if (!FM.openPath) return;
   fmSetDirty(fmEl('fmText').value !== FM.saved);
+  const tab = fmActive();
+  if (tab) tab.content = fmEl('fmText').value;
   fmRenderHighlight();
   fmRenderGutter();
   fmUpdatePos();
@@ -1452,6 +1780,56 @@ function fmBind() {
   const newFolderBtn = fmEl('fmNewFolder');
   if (newFolderBtn) newFolderBtn.onclick = () => fmNewFolder();
   fmEl('fmWikiBtn').onclick = () => fmToggleWiki();
+
+  /* вкладки открытых файлов */
+  fmEl('fmTabs').addEventListener('click', async (ev) => {
+    const closeEl = ev.target.closest('[data-close]');
+    if (closeEl) {
+      ev.stopPropagation();
+      await fmCloseTab(Number(closeEl.dataset.close));
+      return;
+    }
+    const tabEl = ev.target.closest('[data-tab]');
+    if (tabEl) {
+      const idx = Number(tabEl.dataset.tab);
+      if (idx !== FM.activeIdx) await fmSelectTab(idx);
+    }
+  });
+  fmEl('fmTabs').addEventListener('auxclick', async (ev) => {
+    if (ev.button !== 1) return;
+    const tabEl = ev.target.closest('[data-tab]');
+    if (tabEl) await fmCloseTab(Number(tabEl.dataset.tab));
+  });
+
+  /* кнопка «Распаковать сюда» и работа со списком архива */
+  const extractAll = fmEl('fmExtractAll');
+  if (extractAll) extractAll.onclick = () => fmExtractArchive('');
+  fmEl('fmArchive').addEventListener('click', async (ev) => {
+    const unpack = ev.target.closest('[data-unpack]');
+    if (unpack) {
+      ev.stopPropagation();
+      await fmExtractArchive(unpack.dataset.unpack);
+      return;
+    }
+    const row = ev.target.closest('.far-row');
+    if (row) await fmArchivePreview(row.dataset.name);
+  });
+
+  /* перетаскивание в корень папки сервера */
+  const tree = fmEl('fmTree');
+  tree.addEventListener('dragover', (ev) => {
+    if (!FM.dragPath) return;
+    ev.preventDefault();
+    tree.classList.add('drop-on');
+  });
+  tree.addEventListener('dragleave', (ev) => {
+    if (ev.target === tree) tree.classList.remove('drop-on');
+  });
+  tree.addEventListener('drop', async (ev) => {
+    ev.preventDefault();
+    tree.classList.remove('drop-on');
+    await fmMoveInto('');
+  });
   fmEl('fmWikiClose').onclick = () => fmToggleWiki(false);
   fmEl('fmOpenExt').onclick = async () => {
     if (!FM.openPath) return toast('Файл не выбран', 'err');
@@ -1730,8 +2108,7 @@ function setTab(name) {
   const activeTab = document.querySelector('.tabs .tab.active');
   if (activeTab && activeTab.scrollIntoView) activeTab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   Sound.play('nav');
-  if (name === 'perf') renderPerf();
-  if (name === 'tps') loadTpsTab();
+  if (name === 'perf') { renderPerf(); loadTpsTab(); }
   if (name === 'backups') loadBackups();
   if (name === 'files') fmLoadTree();
   if (name === 'players') renderPlayers();
@@ -1765,18 +2142,78 @@ function renderPerf() {
   drawChart(el.ramChart, hist.filter((p) => p.rss).map((p) => ({ t: p.t, v: p.rss / 1048576 })));
 }
 
-/* ═════════════════ вкладка истории TPS ═════════════════ */
+/* ═════════════════ TPS внутри «Производительности» ═════════════════ */
 
-async function loadTpsTab() {
+let tpsTimerId = null;
+let tpsLastTick = 0;
+
+/** Автообновление истории TPS: период задаётся прямо на вкладке. */
+function tpsSchedule() {
+  clearInterval(tpsTimerId);
+  tpsTimerId = null;
+  const sel = $('tpsRefresh');
+  const sec = sel ? Number(sel.value) || 0 : 0;
+  if (!sec) {
+    const lbl = $('tpsTimer');
+    if (lbl) lbl.textContent = 'таймер: выключен';
+    return;
+  }
+  tpsTimerId = setInterval(async () => {
+    if (S.tab !== 'perf' || !current()) return;
+    tpsLastTick = Date.now();
+    await loadTpsTab(true);
+  }, sec * 1000);
+  tpsTick();
+}
+
+function tpsTick() {
+  const lbl = $('tpsTimer');
+  if (!lbl) return;
+  const sel = $('tpsRefresh');
+  const sec = sel ? Number(sel.value) || 0 : 0;
+  if (!sec) { lbl.textContent = 'таймер: выключен'; return; }
+  const left = Math.max(0, sec - Math.floor((Date.now() - (tpsLastTick || Date.now())) / 1000));
+  lbl.textContent = `таймер: обновление через ${left} с`;
+}
+
+async function loadTpsTab(force) {
   const s = current();
   if (!s) return;
   let points = S.tpsFull.get(s.id);
-  if (!points) {
+  if (!points || force) {
     try { points = await API.tpsHistory(s.id); } catch { points = []; }
     if (!Array.isArray(points)) points = [];
     S.tpsFull.set(s.id, points);
   }
   renderTpsTab();
+  tpsFillMonitor();
+}
+
+/** Поля «как панель узнаёт TPS» — берём из настроек сервера. */
+function tpsFillMonitor() {
+  const s = current();
+  const cmd = $('tpsCmd');
+  const every = $('tpsEvery');
+  if (!s || !cmd || !every) return;
+  if (document.activeElement === cmd || document.activeElement === every) return;
+  cmd.value = s.tpsCommand == null ? '' : s.tpsCommand;
+  every.value = s.tpsInterval || 30;
+}
+
+async function tpsSaveMonitor() {
+  const s = current();
+  if (!s) return;
+  const tpsCommand = ($('tpsCmd').value || '').trim();
+  const tpsInterval = Math.max(5, Math.min(3600, Number($('tpsEvery').value) || 30));
+  const res = await API.update(s.id, { tpsCommand, tpsInterval });
+  if (!res || res.ok === false || res.error) {
+    toast((res && res.error) || 'Не удалось сохранить', 'err');
+    return;
+  }
+  s.tpsCommand = tpsCommand;
+  s.tpsInterval = tpsInterval;
+  toast(tpsCommand ? `Панель будет спрашивать «${tpsCommand}» каждые ${tpsInterval} с` : 'TPS-монитор выключен', 'ok');
+  Sound.play('ok');
 }
 
 function renderTpsTab() {
@@ -1788,11 +2225,12 @@ function renderTpsTab() {
   const points = all.filter((p) => p.t >= since).map((p) => ({ t: p.t, v: p.v }));
 
   drawChart(el.tpsChart, points, { min: 0, fixedMax: 20, color: 'var(--white)' });
+  tpsTick();
 
   if (!points.length) {
     el.tpsStats.textContent = s.tpsCommand
       ? 'Пока нет замеров — сервер должен поработать и ответить на команду TPS.'
-      : 'TPS-монитор выключен. Включи его в настройках сервера (команда tps).';
+      : 'TPS-монитор выключен. Впиши команду ниже — панель начнёт снимать TPS.';
     return;
   }
   const vals = points.map((p) => p.v);
@@ -2869,7 +3307,7 @@ function renderView() {
   if (!s) {
     el.empty.classList.remove('hidden');
     el.view.classList.add('hidden');
-    if (typeof fsbUpdate === 'function') fsbUpdate();
+    if (typeof topbarUpdate === 'function') topbarUpdate();
     return;
   }
   el.empty.classList.add('hidden');
@@ -2883,7 +3321,7 @@ function renderView() {
   const state = s.state || 'stopped';
   el.dot.className = 'dot ' + (state === 'running' ? 'running' : state === 'stopping' ? 'stopping' : '');
   el.stateText.textContent = STATE_LABEL[state] || state;
-  if (typeof fsbUpdate === 'function') fsbUpdate();
+  if (typeof topbarUpdate === 'function') topbarUpdate();
   setUptime(s);
   el.pid.textContent = s.pid ? 'PID ' + s.pid : '—';
 
@@ -3028,6 +3466,7 @@ function openModal(server) {
   $('f_syncScope').value = sc.scope || 'all';
   $('f_syncPull').checked = sc.pullOnStart !== false;
   $('f_syncPush').checked = sc.pushOnStop !== false;
+  if ($('f_syncMode')) $('f_syncMode').checked = sc.mode === 'archive';
   syncToggleBody();
   syncStatusReset(server);
   loadAutoFolder(server);
@@ -3120,6 +3559,7 @@ async function saveModal() {
       scope: $('f_syncScope').value,
       pullOnStart: $('f_syncPull').checked,
       pushOnStop: $('f_syncPush').checked,
+      mode: ($('f_syncMode') && $('f_syncMode').checked) ? 'archive' : 'files',
     },
   };
   if (data.sync.enabled) {
@@ -3461,10 +3901,10 @@ function applyPrefs() {
   for (const chip of document.querySelectorAll('#startGrid .chip')) {
     chip.classList.toggle('active', chip.dataset.start === prefs.startMode);
   }
-  for (const chip of document.querySelectorAll('#scaleGrid .chip')) {
-    chip.classList.toggle('active', Number(chip.dataset.scale) === prefs.scale);
+  for (const chip of document.querySelectorAll('#densityGrid .chip')) {
+    chip.classList.toggle('active', chip.dataset.density === prefs.density);
   }
-  applyScale();
+  applyDensity();
   const volEl = $('pVolVal');
   if (volEl) volEl.textContent = Math.round(prefs.volume * 100) + '%';
   $('pNotif').checked = !!prefs.notif;
@@ -3475,46 +3915,26 @@ function applyPrefs() {
   }
 }
 
-/** Масштаб интерфейса: «под размер окна» или выбранный вручную. */
 /**
- * Под окно: базовый размер, при котором интерфейс ещё читается — 1120×700.
- * Всё, что больше, растягивает интерфейс (до 150 %), что меньше — сжимает (до 80 %).
+ * Плотность интерфейса.
+ *
+ * Масштаб-зум убран совсем: он сжимал всю раскладку и на маленьком окне делал
+ * текст нечитаемым, а на большом оставлял пустые поля. Теперь интерфейс
+ * растягивается сам (резиновые панели + перестроение), а здесь меняется только
+ * плотность строк и размер шрифта.
  */
-const SCALE_BASE_W = 1120;
-const SCALE_BASE_H = 700;
-
-function autoScalePercent() {
-  const w = window.innerWidth || 1440;
-  const h = window.innerHeight || 900;
-  const k = Math.min(w / SCALE_BASE_W, h / SCALE_BASE_H);
-  const pct = Math.round((Math.max(0.8, Math.min(1.5, k)) * 100) / 5) * 5;
-  return Math.max(80, Math.min(150, pct));
-}
-
-function currentScalePercent() {
-  return prefs.scale > 0 ? prefs.scale : autoScalePercent();
-}
-
-function applyScale() {
-  const pct = currentScalePercent();
-  const k = pct / 100;
-  document.documentElement.style.zoom = pct === 100 ? '' : String(k);
-  document.documentElement.style.setProperty('--ui-zoom', String(k));
+function applyDensity() {
+  const value = ['compact', 'normal', 'large'].includes(prefs.density) ? prefs.density : 'normal';
+  document.documentElement.dataset.density = value;
+  document.documentElement.style.zoom = '';
+  document.documentElement.style.removeProperty('--ui-zoom');
   if (typeof pushAddonTheme === 'function') pushAddonTheme();
-  document.documentElement.dataset.scale = String(pct);
+  if (typeof topbarUpdate === 'function') topbarUpdate();
 }
 
-let scaleResizeTimer = null;
-function scaleOnResize() {
-  if (prefs.scale > 0) return;
-  clearTimeout(scaleResizeTimer);
-  scaleResizeTimer = setTimeout(() => {
-    applyScale();
-    if (typeof fsbUpdate === 'function') fsbUpdate();
-  }, 140);
-}
-window.addEventListener('resize', scaleOnResize);
-document.addEventListener('fullscreenchange', scaleOnResize);
+window.addEventListener('resize', () => {
+  if (typeof topbarUpdate === 'function') topbarUpdate();
+});
 
 /** Глубина сканирования: одна кнопка, четыре ступени. */
 const SCAN_DEPTHS = [4, 5, 7, 10];
@@ -4072,8 +4492,12 @@ function bindActions() {
   if (prefsBtn) prefsBtn.onclick = () => openPrefs();
   $('winClose').onclick = doCloseApp;
   $('winMax').onclick = async () => {
-    const st = await API.winToggleMax();
-    setWinIcons(st);
+    /* в полном экране та же кнопка выводит из него, а не разворачивает окно */
+    if (document.body.classList.contains('is-fullscreen')) {
+      setWinIcons(await API.winToggleFull());
+      return;
+    }
+    setWinIcons(await API.winToggleMax());
   };
   if (API.onWinState) API.onWinState((st) => setWinIcons(st));
   // двойной клик по пустому месту шапки — развернуть/восстановить
@@ -4081,7 +4505,8 @@ function bindActions() {
   if (tb) {
     tb.addEventListener('dblclick', async (e) => {
       if (e.target.closest('.win-ctrl') || e.target.closest('.tb-left')) return;
-      setWinIcons(await API.winToggleMax());
+      if (document.body.classList.contains('is-fullscreen')) setWinIcons(await API.winToggleFull());
+      else setWinIcons(await API.winToggleMax());
     });
   }
   // F11 — полный экран, Esc — выйти из него, Ctrl+W — свернуть в трей
@@ -4190,7 +4615,7 @@ function bindActions() {
   bindGithubDevice();
   bindGithubAdd();
   bindPropsFull();
-  bindFsBar();
+  topbarUpdate();
 
   // сохранение собственной темы
   $('themeSave').onclick = () => {
@@ -4247,9 +4672,9 @@ function bindActions() {
       if (API.winSetStartMode) await API.winSetStartMode(prefs.startMode);
     };
   }
-  for (const chip of document.querySelectorAll('#scaleGrid .chip')) {
+  for (const chip of document.querySelectorAll('#densityGrid .chip')) {
     chip.onclick = () => {
-      prefs.scale = Number(chip.dataset.scale);
+      prefs.density = chip.dataset.density;
       prefs.save();
       applyPrefs();
       Sound.play('click');
@@ -4372,15 +4797,23 @@ function bindActions() {
     const btn = $('backupCreate');
     btn.disabled = true;
     btn.textContent = 'Архивирую…';
+    let made = null;
     try {
-      await API.backupCreate(s.id, {});
-      toast('Бэкап создан', 'ok');
+      const res = await API.backupCreate(s.id, {});
+      if (res && res.ok === false) throw new Error(res.error || 'не удалось упаковать папку');
+      made = res && res.name ? res : null;
+      toast(made ? `Бэкап создан: ${made.name}` : 'Бэкап создан', 'ok');
     } catch (e) {
       toast('Не удалось создать бэкап: ' + e.message, 'err');
     } finally {
       btn.disabled = false;
       btn.textContent = 'Создать бэкап';
-      loadBackups();
+      await loadBackups();
+      /* архив пишется на диск не мгновенно — если его ещё нет в списке, обновим ещё раз */
+      if (made && !S.backups.some((b) => b.name === made.name)) {
+        await new Promise((r) => setTimeout(r, 500));
+        await loadBackups();
+      }
     }
   };
   $('backupReveal').onclick = async () => {
@@ -4493,10 +4926,10 @@ function bindActions() {
 
 
 
-/* ═════════════════ полоса полного экрана (F11) ═════════════════ */
+/* ═════════════════ шапка (одна и та же в окне и в полном экране) ═════════════════ */
 
-/** Слева — иконка, по центру — «Сервер — состояние», справа — три кнопки. */
-function fsbUpdate() {
+/** По центру — «Сервер — состояние»; обновляется и в окне, и в полном экране. */
+function topbarUpdate() {
   const s = S.servers.find((x) => x.id === S.currentId);
   const text = (() => {
     if (!s) return 'OmniPanel — сервер не выбран';
@@ -4504,7 +4937,7 @@ function fsbUpdate() {
     const up = s.state === 'running' && s.startedAt ? ` · ${fmtUptime(Date.now() - s.startedAt)}` : '';
     return `${s.name} — ${state}${up}`;
   })();
-  for (const id of ['fsbText', 'tbText']) {
+  for (const id of ['tbText']) {
     const box = $(id);
     if (!box) continue;
     box.textContent = text;
@@ -4515,17 +4948,9 @@ function fsbUpdate() {
   }
 }
 
-function bindFsBar() {
-  const st = $('fsbSettings');
-  if (st) st.onclick = () => openPrefs();
-  const hd = $('fsbHide');
-  if (hd) hd.onclick = () => API.winClose();
-  const mn = $('fsbMin');
-  if (mn) mn.onclick = () => { if (API.winMinimize) API.winMinimize(); };
-  const ex = $('fsbExit');
-  if (ex) ex.onclick = async () => { setWinIcons(await API.winToggleFull()); };
-  document.addEventListener('fullscreenchange', fsbUpdate);
-  fsbUpdate();
+/** Совместимость: раньше полоса полного экрана обновлялась отдельно. */
+function fsbUpdate() {
+  topbarUpdate();
 }
 
 
@@ -5978,6 +6403,16 @@ function addonTheme() {
     text: get('--text', '#e8eaf0'),
     dim: get('--dim', '#9aa0ae'),
     accent: get('--accent-bar', '#8ab4ff'),
+    /* скругления — чтобы панель аддона жила по тем же правилам, что и вся панель */
+    radius: {
+      xs: get('--r-xs', '4px'),
+      sm: get('--r-sm', '8px'),
+      md: get('--r-md', '12px'),
+      lg: get('--r-lg', '16px'),
+      pill: get('--r-pill', '999px'),
+      circle: get('--r-circle', '50%'),
+      card: get('--radius-card', '12px'),
+    },
   };
 }
 
@@ -6186,7 +6621,7 @@ function bindAddonsPage() {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (S.tab === 'perf') renderPerf();
-      if (S.tab === 'tps') renderTpsTab();
+      if (S.tab === 'perf') renderTpsTab();
     }, 180);
   });
 })();

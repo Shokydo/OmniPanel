@@ -1,5 +1,5 @@
-// Проверки 1.18.0: аддоны панели (вкл/выкл, вкладка, мост), вход в GitHub без спама,
-// масштаб «под окно», широкие настройки.
+// Проверки 1.19: аддоны панели (по умолчанию, вкл/выкл, вкладка, мост),
+// вики и адаптация кода MythicMobs, белый список, вход в GitHub без спама.
 // Запуск: xvfb-run -a node tests/test-addons.js <playwright> <electron>
 const pwPath = process.argv[2] || 'playwright';
 const electronPath = process.argv[3] || '/home/user/.cache/bld/node_modules/electron/dist/electron';
@@ -22,8 +22,9 @@ fs.mkdirSync(path.join(SRV, 'MythicMobs/Mobs'), { recursive: true });
 fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/SkeletonKing.yml'), [
   'SkeletonKing:',
   '  Type: SKELETON',
-  '  Display: \'Король скелетов\'',
+  "  Display: 'Король скелетов'",
   '  Health: 120',
+  '  Skills: []',
 ].join('\n'));
 fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/Broken.yml'), 'Broken:\n\tType: ZOMBIE\n');
 fs.writeFileSync(path.join(SRV, 'server.properties'), 'server-port=25565\nwhite-list=false\nmax-players=20\n');
@@ -37,6 +38,22 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   { id: 's1', name: 'Мир друзей', command: 'sleep 300', cwd: SRV, encoding: 'auto' },
 ]));
 
+/** Ждёт, пока панель аддона нарисует нужное условие. */
+async function waitAddon(page, id, test) {
+  for (let i = 0; i < 50; i += 1) {
+    const res = await page.evaluate(({ addonId, expr }) => {
+      const f = document.querySelector(`.addon-frame[data-addon-id="${addonId}"]`);
+      if (!f || !f.contentDocument) return null;
+      const doc = f.contentDocument;
+      // eslint-disable-next-line no-new-func
+      return new Function('doc', `return (${expr});`)(doc);
+    }, { addonId: id, expr: test });
+    if (res) return res;
+    await page.waitForTimeout(150);
+  }
+  return null;
+}
+
 (async () => {
   const app = await electron.launch({
     executablePath: electronPath,
@@ -45,15 +62,18 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
     timeout: 60000,
   });
   const page = await app.firstWindow();
+  const errs = [];
+  page.on('pageerror', (e) => errs.push(e.message));
   await page.waitForSelector('.profile-name');
   await page.waitForTimeout(1200);
 
-  /* ─────────── 1. список аддонов ─────────── */
-  console.log('\n=== аддоны: список и переключатели ===');
+  /* ─────────── 1. что включено по умолчанию ─────────── */
+  console.log('\n=== аддоны: список и значения по умолчанию ===');
   const list = await page.evaluate(() => window.desktop.addonsList());
-  ok(Array.isArray(list) && list.length >= 2, 'встроенные аддоны найдены', list.map((a) => a.id).join(','));
-  ok(list.every((a) => a.builtin), 'они помечены как встроенные');
-  ok(list.every((a) => a.enabled), 'по умолчанию включены');
+  const byId = Object.fromEntries((list || []).map((a) => [a.id, a]));
+  ok(Array.isArray(list) && list.length >= 2, 'встроенные аддоны найдены', (list || []).map((a) => a.id).join(','));
+  ok(byId['mythic-mobs'] && byId['mythic-mobs'].enabled === false, '«Мифические мобы» выключены по умолчанию');
+  ok(byId.whitelist && byId.whitelist.enabled === true, '«Белый список» включён по умолчанию');
 
   const manager = await page.evaluate(async () => {
     openPrefs();
@@ -64,102 +84,128 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
       rows: rows.length,
       toggles: document.querySelectorAll('#addonManager input[type="checkbox"]').length,
       names: rows.map((r) => r.querySelector('.am-name').textContent),
-      checked: rows.every((r) => r.querySelector('input').checked),
+      states: rows.map((r) => r.querySelector('input').checked),
       hasFolder: !!document.getElementById('addonsFolder'),
     };
   });
   ok(manager.rows >= 2 && manager.toggles === manager.rows, 'в настройках список с переключателями', manager.names.join(', '));
-  ok(manager.checked, 'переключатели включены');
+  ok(manager.states.filter(Boolean).length === 1, 'включён ровно один — белый список', JSON.stringify(manager.states));
   ok(manager.hasFolder, 'есть кнопка «Открыть папку аддонов»');
+
+  /* включаем «Мифических мобов» переключателем, как это делает человек */
+  const turnedOn = await page.evaluate(async () => {
+    const row = [...document.querySelectorAll('#addonManager .addon-manage-row')]
+      .find((r) => /Мифические/.test(r.textContent));
+    row.querySelector('input').click();
+    await new Promise((r) => setTimeout(r, 700));
+    return {
+      tabs: [...document.querySelectorAll('#view .tabs .tab')].map((t) => t.dataset.tab),
+      rowsOn: [...document.querySelectorAll('#addonManager .addon-manage-row input')].filter((i) => i.checked).length,
+    };
+  });
+  ok(turnedOn.rowsOn === 2, 'переключатель включил второй аддон');
+  ok(turnedOn.tabs.includes('addon:mythic-mobs'), 'появилась вкладка «Мифические мобы»', turnedOn.tabs.join(','));
   await page.evaluate(() => closePrefs());
 
-  /* ─────────── 2. вкладка аддона ─────────── */
-  console.log('\n=== вкладка аддона и его панель ===');
-  const tabs = await page.evaluate(() => {
-    renderAddonTabs();
-    return [...document.querySelectorAll('#view .tabs .tab')].map((t) => t.dataset.tab);
-  });
-  ok(tabs.includes('addon:mythic-mobs'), 'появилась вкладка «Мифические мобы»', tabs.join(','));
-  ok(tabs.includes('addon:whitelist'), 'появилась вкладка «Белый список»');
-
-  const panel = await page.evaluate(async () => {
-    setTab('addon:mythic-mobs');
-    for (let i = 0; i < 40; i += 1) {
-      await new Promise((r) => setTimeout(r, 150));
-      const f = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]');
-      if (f && f.dataset.loaded === '1' && f.contentDocument) {
-        const doc = f.contentDocument;
-        const cards = doc.querySelectorAll('.mob').length;
-        if (cards) return { loaded: true, cards, sub: doc.getElementById('sub').textContent };
-      }
-    }
-    const f = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]');
-    return { loaded: !!(f && f.dataset.loaded === '1'), cards: 0, sub: '' };
-  });
-  ok(panel.loaded, 'панель аддона загрузилась в изолированном окне');
-  ok(panel.cards === 2, 'аддон прочитал файлы MythicMobs/Mobs', 'карточек: ' + panel.cards + ' · ' + panel.sub);
-
-  const inside = await page.evaluate(async () => {
-    const f = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]');
-    const doc = f.contentDocument;
-    doc.getElementById('scan').click();
-    await new Promise((r) => setTimeout(r, 400));
-    const status = doc.getElementById('status');
-    const body = doc.body.innerText;
-    const bg = getComputedStyle(doc.body).backgroundColor;
-    return { status: status.textContent, cls: status.className, bg };
-  });
-  ok(/проблемы/.test(inside.status), 'проверка файлов нашла кривой моб', inside.status.slice(0, 80));
-  ok(inside.bg !== 'rgb(255, 255, 255)', 'панель аддона в цветах темы', inside.bg);
-
-  const write = await page.evaluate(async () => {
+  /* ─────────── 2. вика MythicMobs ─────────── */
+  console.log('\n=== аддон «Мифические мобы»: вика ===');
+  await page.evaluate(() => setTab('addon:mythic-mobs'));
+  const cards = await waitAddon(page, 'mythic-mobs', "doc.querySelectorAll('#wikiList .card').length || 0");
+  ok(cards >= 5, 'вика показала разделы', 'разделов: ' + cards);
+  const hasCode = await page.evaluate(() => {
     const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
-    doc.getElementById('newName').value = 'TestMob';
-    doc.getElementById('new').click();
-    await new Promise((r) => setTimeout(r, 1400));
-    return doc.querySelectorAll('.mob').length;
+    const pre = doc.querySelector('#wikiList pre');
+    return { text: pre ? pre.textContent : '', bg: getComputedStyle(doc.body).backgroundColor };
   });
-  ok(fs.existsSync(path.join(SRV, 'MythicMobs/Mobs/TestMob.yml')), 'аддон создал файл моба через мост');
-  ok(write >= 3, 'список обновился после создания', 'карточек: ' + write);
+  ok(/Type:\s*ZOMBIE/.test(hasCode.text), 'в вики есть готовый пример моба');
+  ok(hasCode.bg !== 'rgb(255, 255, 255)', 'панель аддона в цветах темы', hasCode.bg);
 
-  /* ─────────── 3. белый список ─────────── */
-  console.log('\n=== аддон «Белый список» ===');
-  const wl = await page.evaluate(async () => {
-    setTab('addon:whitelist');
+  /* ─────────── 3. адаптация кода ─────────── */
+  console.log('\n=== адаптация кода MythicMobs ===');
+  const adapt = await page.evaluate(async () => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
+    doc.getElementById('tabFix').click();
+    await new Promise((r) => setTimeout(r, 150));
+    doc.getElementById('src').value = 'BadMob:\n\tType: ZOMBIE\n\tSkill:\n\t\t- ignite{ticks=40} @Target ~onAttack';
+    doc.getElementById('savePath').value = '';
+    doc.getElementById('fixBtn').click();
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      verdict: doc.getElementById('verdict').textContent,
+      out: doc.getElementById('out').textContent,
+      savePath: doc.getElementById('savePath').value,
+    };
+  });
+  ok(/табуляц/i.test(adapt.verdict), 'нашёл табуляцию', adapt.verdict.slice(0, 90));
+  ok(!/\t/.test(adapt.out), 'табуляция заменена пробелами');
+  ok(/Skills:/.test(adapt.out) && !/^\s*Skill:/m.test(adapt.out), 'Skill: исправлен на Skills:');
+  ok(/Health:/.test(adapt.out), 'добавил обязательный Health');
+  ok(/MythicMobs\/Mobs\/BadMob\.yml/.test(adapt.savePath), 'подставил путь файла', adapt.savePath);
+
+  const saved = await page.evaluate(async () => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
+    doc.getElementById('saveBtn').click();
+    await new Promise((r) => setTimeout(r, 900));
+    return doc.getElementById('verdict').textContent;
+  });
+  ok(fs.existsSync(path.join(SRV, 'MythicMobs/Mobs/BadMob.yml')), 'аддон записал файл через мост');
+  const savedText = fs.existsSync(path.join(SRV, 'MythicMobs/Mobs/BadMob.yml'))
+    ? fs.readFileSync(path.join(SRV, 'MythicMobs/Mobs/BadMob.yml'), 'utf8') : '';
+  ok(!/\t/.test(savedText) && /Skills:/.test(savedText), 'в файле нет табуляции, ключ Skills на месте');
+  ok(/Сохранено/.test(saved), 'панель подтвердила запись', saved.slice(0, 70));
+
+  /* ─────────── 4. проверка файлов ─────────── */
+  console.log('\n=== проверка файлов аддоном ===');
+  const scan = await page.evaluate(async () => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
+    doc.getElementById('tabFiles').click();
+    doc.getElementById('scanBtn').click();
     for (let i = 0; i < 40; i += 1) {
       await new Promise((r) => setTimeout(r, 150));
-      const f = document.querySelector('.addon-frame[data-addon-id="whitelist"]');
-      if (f && f.contentDocument && f.contentDocument.querySelectorAll('.item').length) {
-        const doc = f.contentDocument;
-        return { items: doc.querySelectorAll('.item').length, sub: doc.getElementById('sub').textContent };
+      const rows = [...doc.querySelectorAll('#files div')].filter((d) => d.querySelector('.n'));
+      if (rows.length >= 3) {
+        return { rows: rows.length, states: rows.map((r) => r.querySelector('.n').textContent + ': ' + r.querySelector('.st').textContent) };
       }
     }
-    return { items: 0, sub: '' };
+    return { rows: 0, states: [] };
   });
-  ok(wl.items === 1, 'игрок из whitelist.json показан', wl.sub);
+  ok(scan.rows >= 3, 'список файлов MythicMobs получен', 'файлов: ' + scan.rows);
+  ok(scan.states.some((s) => /Broken\.yml/.test(s) && /табуляц/i.test(s)), 'кривой файл помечен', scan.states.join(' · ').slice(0, 120));
+
+  /* ─────────── 5. белый список ─────────── */
+  console.log('\n=== аддон «Белый список» ===');
+  await page.evaluate(() => setTab('addon:whitelist'));
+  const wlItems = await waitAddon(page, 'whitelist', "doc.querySelectorAll('#rows tr').length || 0");
+  ok(wlItems === 1, 'игрок из whitelist.json показан', 'строк: ' + wlItems);
+  const wlUuid = await page.evaluate(() => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="whitelist"]').contentDocument;
+    return doc.querySelector('#rows tr td.uuid').textContent;
+  });
+  ok(wlUuid === '— нет uuid —' || /-/.test(wlUuid), 'у записи видно состояние UUID', wlUuid.slice(0, 40));
 
   const wlAdd = await page.evaluate(async () => {
     const doc = document.querySelector('.addon-frame[data-addon-id="whitelist"]').contentDocument;
     doc.getElementById('nick').value = 'Alex';
     doc.getElementById('add').click();
-    await new Promise((r) => setTimeout(r, 1500));
-    return { items: doc.querySelectorAll('.item').length, status: doc.getElementById('status').textContent };
+    await new Promise((r) => setTimeout(r, 1600));
+    return { items: doc.querySelectorAll('#rows tr').length, hint: doc.getElementById('hint').textContent };
   });
-  ok(wlAdd.items === 2, 'игрок добавлен', 'в списке: ' + wlAdd.items);
+  ok(wlAdd.items === 2, 'игрок добавлен', 'в списке: ' + wlAdd.items + ' · ' + wlAdd.hint.slice(0, 60));
   const wlFile = JSON.parse(fs.readFileSync(path.join(SRV, 'whitelist.json'), 'utf8'));
-  ok(wlFile.some((x) => x.name === 'Alex'), 'whitelist.json обновлён на диске', wlFile.map((x) => x.name).join(','));
+  ok(wlFile.some((x) => (x.name || '') === 'Alex'), 'whitelist.json обновлён на диске', JSON.stringify(wlFile).slice(0, 100));
 
   const wlSwitch = await page.evaluate(async () => {
     const doc = document.querySelector('.addon-frame[data-addon-id="whitelist"]').contentDocument;
-    doc.getElementById('sw').click();
+    doc.getElementById('on').checked = true;
+    doc.getElementById('on').dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 900));
-    return doc.getElementById('swlbl').textContent;
+    return doc.getElementById('hint').textContent;
   });
-  ok(/включён/.test(wlSwitch), 'переключатель белого списка работает', wlSwitch);
+  ok(/Белый список включён/.test(wlSwitch), 'переключатель белого списка работает', wlSwitch.slice(0, 60));
   ok(/white-list=true/.test(fs.readFileSync(path.join(SRV, 'server.properties'), 'utf8')),
     'server.properties обновлён аддоном');
 
-  /* ─────────── 4. выключение аддона ─────────── */
+  /* ─────────── 6. выключение аддона ─────────── */
   console.log('\n=== выключение аддона ===');
   const off = await page.evaluate(async () => {
     const res = await window.desktop.addonsSetEnabled('whitelist', false);
@@ -183,7 +229,7 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   });
   ok(back.includes('addon:whitelist'), 'после включения вкладка вернулась');
 
-  /* ─────────── 5. вход в GitHub: без спама ─────────── */
+  /* ─────────── 7. вход в GitHub: без спама ─────────── */
   console.log('\n=== вход в GitHub по коду ===');
   const auth = await page.evaluate(async () => {
     openPrefs();
@@ -224,7 +270,6 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
     GD.run += 1;
     gdSchedule(GD.run);
     const timerFirst = GD.timer;
-    // второе нажатие при уже идущем ожидании не должно плодить второй опрос
     await gdStart();
     const sameTimer = timerFirst !== null && timerFirst === GD.timer;
     gdStop('');
@@ -239,7 +284,7 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
     window.notify = (o) => { notifs.push((o && o.title) || ''); };
     gdStop('');
     const res = await window.desktop.ghDeviceStart();
-    GD.code = 'неверный-код';           // GitHub ответит ошибкой — как при сбое входа
+    GD.code = 'неверный-код';
     GD.interval = 0;
     GD.run += 1;
     gdSchedule(GD.run);
@@ -250,39 +295,9 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
     return { errors: count, after };
   });
   ok(spam.errors === 1, 'при сбое входа только одно уведомление', 'уведомлений: ' + spam.errors);
-
-
   ok(!spam.after.timer && !spam.after.code, 'опрос останавливается сам', JSON.stringify(spam.after));
 
-  /* ─────────── 6. масштаб ─────────── */
-  console.log('\n=== масштаб под окно ===');
-  const scale = await page.evaluate(async () => {
-    prefs.scale = 0;
-    prefs.save();
-    applyPrefs();
-    await new Promise((r) => setTimeout(r, 200));
-    const before = Number(document.documentElement.dataset.scale);
-    const w = innerWidth;
-    const need = Math.round(Math.min(w / 1120, innerHeight / 700) * 100);
-    return { before, need, hasChip: !!document.querySelector('#scaleGrid .chip[data-scale="0"]') };
-  });
-  ok(scale.hasChip, 'есть пункт «Под окно»');
-  ok(Math.abs(scale.before - scale.need) <= 5, 'масштаб считается от размера окна', scale.before + '% против ' + scale.need + '%');
-
-  const resize = await page.evaluate(async () => {
-    const before = Number(document.documentElement.dataset.scale);
-    // имитируем изменение размера окна
-    Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true });
-    Object.defineProperty(window, 'innerHeight', { value: 1000, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await new Promise((r) => setTimeout(r, 400));
-    const after = Number(document.documentElement.dataset.scale);
-    return { before, after };
-  });
-  ok(resize.after > resize.before, 'при увеличении окна интерфейс растёт', resize.before + '% → ' + resize.after + '%');
-
-  /* ─────────── 7. ошибки ─────────── */
-  const errs = await page.evaluate(() => window.__jsErrors || []);
+  /* ─────────── 8. ошибки ─────────── */
   console.log('\n=== ОШИБКИ ===');
   ok(errs.length === 0, 'нет JS-ошибок', errs.join(' | '));
 

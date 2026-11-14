@@ -43,61 +43,68 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await page.waitForSelector('.profile-name');
   await page.waitForTimeout(1000);
 
-  /* ─────────── 1. шапка окна ─────────── */
-  console.log('\n=== шапка окна как в полном экране ===');
-  const bar = await page.evaluate(() => {
+  /* ─────────── 1. одна шапка на окно и полный экран ─────────── */
+  console.log('\n=== шапка одинаковая в окне и в полном экране ===');
+  const bar = await page.evaluate(async () => {
     const tb = document.querySelector('.titlebar');
     const labels = (root) => [...root.querySelectorAll('button')].map((b) => b.getAttribute('aria-label')).filter(Boolean);
-    return {
+    const snap = () => ({
       text: document.getElementById('tbText').textContent,
-      titlebarLabels: labels(tb.querySelector('.win-ctrl')),
-      fsbarLabels: labels(document.querySelector('.fsbar .fsb-right')),
-      btnSize: (() => { const r = document.querySelector('.titlebar .wc').getBoundingClientRect(); return Math.round(r.height); })(),
-      prefs: !!document.getElementById('tbPrefs'),
+      labels: labels(tb.querySelector('.win-ctrl')),
+      acc: !!document.getElementById('tbAccount'),
+      accName: document.getElementById('tbAccName').textContent,
+      pill: !!document.getElementById('updPill'),
       brand: !!document.querySelector('.tb-left .brand-logo'),
-      iconSame: document.querySelector('#winMax svg.ic-max').innerHTML.trim()
-        === document.querySelector('#fsbExit svg').innerHTML.trim(),
-    };
+      height: Math.round(tb.getBoundingClientRect().height),
+      visible: getComputedStyle(tb).display !== 'none',
+      btn: Math.round(tb.querySelector('.wc').getBoundingClientRect().height),
+    });
+    const windowMode = snap();
+    document.body.classList.add('is-fullscreen');
+    window.dispatchEvent(new Event('resize'));
+    await new Promise((r) => setTimeout(r, 350));
+    const fullMode = snap();
+    const fsbarGone = !document.querySelector('.fsbar');
+    return { windowMode, fullMode, fsbarGone };
   });
-  ok(/Мир друзей/.test(bar.text) && /остановлен/.test(bar.text), 'по центру «сервер — состояние»', bar.text);
-  ok(bar.prefs && bar.brand, 'слева иконка и кнопка настроек');
-  ok(bar.titlebarLabels.length === 5, 'справа пять кнопок', bar.titlebarLabels.join(', '));
-  const same = ['Настройк', 'Скрыть в трей', 'Уменьшить'];
-  ok(same.every((w, i) => (bar.titlebarLabels[i] || '').startsWith(w) && (bar.fsbarLabels[i] || '').startsWith(w)),
-    'те же кнопки и в том же порядке, что в полном экране', bar.fsbarLabels.join(', '));
-  ok(bar.iconSame, 'иконка «на весь экран» совпадает с полосой полного экрана');
-  ok(bar.btnSize <= 26, 'кнопки компактные, как в полосе полного экрана', bar.btnSize + 'px');
+  ok(/Мир друзей/.test(bar.windowMode.text) && /остановлен/.test(bar.windowMode.text),
+    'по центру «сервер — состояние»', bar.windowMode.text);
+  ok(bar.windowMode.brand && bar.windowMode.acc && bar.windowMode.pill,
+    'слева иконка, аккаунт и плашка обновления');
+  ok(/\S/.test(bar.windowMode.accName), 'в окне виден ник аккаунта', bar.windowMode.accName);
+  ok(bar.fsbarGone, 'отдельной полосы полного экрана больше нет');
+  ok(bar.fullMode.visible, 'в полном экране шапка осталась на месте');
+  ok(bar.fullMode.acc && /\S/.test(bar.fullMode.accName),
+    'в полном экране тоже виден ник аккаунта', bar.fullMode.accName);
+  ok(bar.fullMode.labels.join('|') === bar.windowMode.labels.join('|'),
+    'кнопки те же и в том же порядке', bar.fullMode.labels.join(', '));
+  ok(bar.fullMode.height === bar.windowMode.height && bar.fullMode.btn === bar.windowMode.btn,
+    'высота шапки и кнопок совпадает', bar.windowMode.height + 'px / ' + bar.windowMode.btn + 'px');
+  ok(bar.fullMode.labels.length === 5, 'справа пять кнопок', bar.windowMode.labels.join(', '));
+  ok(bar.windowMode.btn <= 26, 'кнопки компактные', bar.windowMode.btn + 'px');
+  await page.evaluate(() => { document.body.classList.remove('is-fullscreen'); window.dispatchEvent(new Event('resize')); });
+  await page.waitForTimeout(200);
 
   /* ─────────── 2. масштаб ─────────── */
-  console.log('\n=== масштаб интерфейса ===');
-  const scale = await page.evaluate(async () => {
-    prefs.scale = 0;
-    prefs.save();
-    applyPrefs();
-    await new Promise((r) => setTimeout(r, 250));
-    const auto = document.documentElement.dataset.scale;
-    const chip = document.querySelector('#scaleGrid .chip[data-scale="0"]');
-    return { auto: Number(auto), chipActive: chip ? chip.classList.contains('active') : false, hasChip: !!chip };
-  });
-  ok(scale.hasChip, 'есть вариант «Под окно»');
-  ok(scale.chipActive, 'он выбран по умолчанию');
-  ok(scale.auto >= 85 && scale.auto <= 130, 'масштаб считается по размеру окна', scale.auto + '%');
-
-  const manual = await page.evaluate(async () => {
-    prefs.scale = 115;
-    prefs.save();
+  console.log('\n=== раскладка вместо масштаба ===');
+  const layout = await page.evaluate(async () => {
     applyPrefs();
     await new Promise((r) => setTimeout(r, 200));
-    return { zoom: document.documentElement.style.zoom, data: document.documentElement.dataset.scale };
+    const density = document.documentElement.dataset.density;
+    const chip = document.querySelector('#densityGrid .chip[data-density="normal"]');
+    const zoom = getComputedStyle(document.documentElement).zoom;
+    const scaleChip = document.querySelector('#scaleGrid .chip');
+    return { density, chipActive: chip ? chip.classList.contains('active') : false, zoom, hasScale: !!scaleChip };
   });
-  ok(manual.zoom === '1.15' && manual.data === '115', 'ручной масштаб работает', manual.zoom + ' / ' + manual.data);
-  await page.evaluate(() => { prefs.scale = 0; prefs.save(); applyPrefs(); });
+  ok(!layout.hasScale, 'зум-масштаба в настройках нет');
+  ok(layout.density === 'normal' && layout.chipActive, 'плотность «Обычный» выбрана по умолчанию', layout.density);
+  ok(layout.zoom === '1' || layout.zoom === '', 'страница не масштабируется зумом', layout.zoom);
 
   /* ─────────── 3. широкие окна настроек ─────────── */
   console.log('\n=== окна настроек: шире и по центру ===');
-  for (const sc of [100, 130]) {
+  for (const sc of ['normal', 'large']) {
     const box = await page.evaluate(async (s) => {
-      prefs.scale = s;
+      prefs.density = s;
       prefs.save();
       applyPrefs();
       await new Promise((r) => setTimeout(r, 250));
@@ -109,7 +116,7 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
       await new Promise((r) => setTimeout(r, 500));
       const q = document.querySelector('#propsModal .props-full').getBoundingClientRect();
       document.getElementById('propsModal').classList.add('hidden');
-      prefs.scale = 0;
+      prefs.density = 'normal';
       prefs.save();
       applyPrefs();
       return {
@@ -117,8 +124,8 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
         props: { w: Math.round(q.width), h: Math.round(q.height), fit: q.bottom <= innerHeight + 1 && q.right <= innerWidth + 1 },
       };
     }, sc);
-    ok(box.prefs.fit && box.props.fit, `при ${sc}% окна целиком в экране`, `${box.prefs.w}×${box.prefs.h} и ${box.props.w}×${box.props.h}`);
-    ok(box.prefs.w > 900 && box.prefs.h > 560, `при ${sc}% панель настроек широкая и высокая`, box.prefs.w + '×' + box.prefs.h);
+    ok(box.prefs.fit && box.props.fit, `плотность «${sc}»: окна целиком в экране`, `${box.prefs.w}×${box.prefs.h} и ${box.props.w}×${box.props.h}`);
+    ok(box.prefs.w > 900 && box.prefs.h > 560, `плотность «${sc}»: панель настроек широкая и высокая`, box.prefs.w + '×' + box.prefs.h);
   }
 
   const addBox = await page.evaluate(async () => {

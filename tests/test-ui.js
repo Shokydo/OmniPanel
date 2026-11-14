@@ -220,17 +220,50 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   await page.click('#scanClose');
   await page.waitForTimeout(300);
 
-  console.log('\n=== МАСШТАБ ИНТЕРФЕЙСА ===');
+  console.log('\n=== РАСКЛАДКА ПОД ОКНО (вместо зума) ===');
   await page.click('#profileBtn');
   await page.waitForTimeout(400);
   await page.click('#prefsNav .prefs-tab[data-cat="win"]');
   await page.waitForTimeout(200);
-  await page.click('#scaleGrid .chip[data-scale="115"]');
-  await page.waitForTimeout(300);
-  const zoom = await page.evaluate(() => getComputedStyle(document.documentElement).zoom);
-  ok(zoom === '1.15', 'масштаб применился', zoom);
+  ok(await page.$('#scaleGrid') === null, 'масштаба-зума в настройках больше нет');
+  ok(await page.$('#densityGrid') !== null, 'вместо него — плотность интерфейса');
+  await page.click('#densityGrid .chip[data-density="large"]');
+  await page.waitForTimeout(250);
+  const dens = await page.evaluate(() => ({
+    attr: document.documentElement.dataset.density,
+    zoom: getComputedStyle(document.documentElement).zoom,
+    font: getComputedStyle(document.querySelector('.fm-tree')).fontSize,
+  }));
+  ok(dens.attr === 'large', 'плотность переключилась', dens.attr);
+  ok(dens.zoom === '1' || dens.zoom === '', 'zoom не используется', dens.zoom);
   await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-prefs-win.png' });
-  await page.click('#scaleGrid .chip[data-scale="100"]');
+
+  /* окно 900×620: интерфейс должен ужаться перестроением, а не зумом */
+  await app.evaluate(({ BrowserWindow }, size) => {
+    const w = BrowserWindow.getAllWindows()[0];
+    w.setSize(size[0], size[1]);
+  }, [900, 620]);
+  await page.waitForTimeout(500);
+  const small = await page.evaluate(() => {
+    const tabs = document.querySelector('#view .tabs');
+    const files = document.querySelector('.fm');
+    return {
+      zoom: getComputedStyle(document.documentElement).zoom,
+      tabsOverflow: tabs ? tabs.scrollWidth - tabs.clientWidth : 0,
+      filesOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      bodyFont: parseFloat(getComputedStyle(document.body).fontSize),
+      filesWidth: files ? files.clientWidth : 0,
+    };
+  });
+  ok(small.zoom === '1' || small.zoom === '', 'на маленьком окне зума нет', small.zoom);
+  ok(small.filesOverflow <= 1, 'горизонтальной прокрутки у окна нет', `${small.filesOverflow}px`);
+  ok(small.tabsOverflow <= 1, 'вкладки не вылезают за край', `${small.tabsOverflow}px`);
+  ok(small.bodyFont > 10, 'шрифт остался читаемым', `${small.bodyFont}px`);
+  await app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].setSize(1180, 760);
+  });
+  await page.waitForTimeout(400);
+  await page.click('#densityGrid .chip[data-density="normal"]');
   await page.waitForTimeout(200);
   await page.click('#prefsDone');
   await page.waitForTimeout(200);

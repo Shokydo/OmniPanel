@@ -12,6 +12,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const os = require('os');
+const backup = require('./backup');
+const zip = require('./zip');
+
+/* Режим «через бэкап»: весь сервер одним архивом. */
+const ARCHIVE_PATH = '.omnipanel/сервер.zip';
+const MANIFEST_PATH = '.omnipanel/манифест.json';
+
 const MAX_FILE = 40 * 1024 * 1024;    // больше — не отправляем по умолчанию
 const HARD_LIMIT = 95 * 1024 * 1024;  // жёсткий лимит GitHub на один blob
 const CONCURRENCY = 4;
@@ -52,7 +60,10 @@ function humanError(status, body) {
     return 'Нет прав на запись (403). В токене должна быть галочка «repo».';
   }
   if (status === 404) return 'Репозиторий не найден или у токена нет к нему доступа (404).';
-  if (status === 409) return 'Конфликт ветки (409): ветка пустая или изменена параллельно.';
+  if (status === 409) {
+    if (/empty/i.test(msg)) return 'Репозиторий ещё пустой: в нём нет ни одного коммита (409). Панель создаёт первый коммит автоматически — повтори отправку.';
+    return `Ветка изменилась во время отправки (409)${msg ? ': ' + msg : ''}. Повтори отправку.`;
+  }
   if (status === 413) return 'Файл слишком большой для GitHub (413).';
   if (status === 422) return `GitHub не принял данные (422): ${msg || 'проверь имя ветки'}`;
   return `GitHub ответил ${status}${msg ? ': ' + msg : ''}`;
@@ -88,7 +99,11 @@ async function gh(token, urlPath, opts = {}) {
     // пустая ветка в пустом репозитории — это нормально
     if (opts.allow404 && res.status === 404) return null;
     if (opts.allow409 && res.status === 409) return null;
-    throw new Error(humanError(res.status, data));
+    const err = new Error(humanError(res.status, data));
+    err.status = res.status;
+    err.body = data;
+    err.path = urlPath;
+    throw err;
   }
   return data;
 }
@@ -212,6 +227,36 @@ async function getHead(token, repo, branch) {
   return ref && ref.object ? { commit: ref.object.sha } : null;
 }
 
+/**
+ * Первый коммит в пустом репозитории.
+ *
+ * У репозитория без коммитов нет дерева и нет ветки, поэтому Git Data API
+ * отвечает 409 «Git Repository is empty». Единственный надёжный способ
+ * создать там первую ветку — Contents API: он делает коммит сам.
+ */
+const BOOTSTRAP_PATH = '.omnipanel/первый-коммит.md';
+const BOOTSTRAP_TEXT = [
+  '# OmniPanel',
+  '',
+  'Этот файл панель создала, чтобы в пустом репозитории появился первый коммит.',
+  'Следующая отправка сервера удалит его автоматически.',
+  '',
+].join('\n');
+
+async function bootstrapEmpty(token, repo, branch, message) {
+  const body = {
+    message: message || 'OmniPanel: первый коммит',
+    content: Buffer.from(BOOTSTRAP_TEXT, 'utf8').toString('base64'),
+    branch,
+  };
+  const cur = await gh(token, `/repos/${repo}/contents/${encodeURI(BOOTSTRAP_PATH)}?ref=${encodeURIComponent(branch)}`, {
+    allow404: true, allow409: true,
+  });
+  if (cur && cur.sha) body.sha = cur.sha;
+  await gh(token, `/repos/${repo}/contents/${encodeURI(BOOTSTRAP_PATH)}`, { method: 'PUT', body });
+  return getHead(token, repo, branch);
+}
+
 async function getTreeOfCommit(token, repo, commitSha) {
   const commit = await gh(token, `/repos/${repo}/git/commits/${commitSha}`);
   const tree = await gh(token, `/repos/${repo}/git/trees/${commit.tree.sha}?recursive=1`);
@@ -221,6 +266,152 @@ async function getTreeOfCommit(token, repo, commitSha) {
 async function downloadBlob(token, repo, sha) {
   const data = await gh(token, `/repos/${repo}/git/blobs/${sha}`);
   return Buffer.from(data.content || '', data.encoding === 'base64' ? 'base64' : 'utf8');
+}
+
+/* ─────────────────── отправка «через бэкап» (одним архивом) ─────────────────── */
+
+/**
+ * Упаковывает папку сервера в zip с максимальным сжатием и кладёт в репозиторий
+ * одним файлом. Для больших миров это надёжнее поштучной отправки: десятки тысяч
+ * мелких файлов превращаются в один, и лимит на размер одного файла не мешает.
+ */
+async function pushArchive(token, repo, branch, opts) {
+  const { dir, message, stateFile, onLog = () => {} } = opts;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-'));
+  let info;
+  try {
+    onLog('упаковываю сервер в архив…');
+    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server' });
+    const head = await getHead(token, repo, branch);
+    const state = loadState(stateFile);
+    const buf = fs.readFileSync(info.file);
+    if (buf.length > HARD_LIMIT) {
+      return {
+        ok: false,
+        error: `Архив сервера получился ${(buf.length / 1048576).toFixed(0)} МБ — GitHub не принимает файлы больше 95 МБ. `
+          + 'Включи в настройках синхронизацию по файлам или убери крупные файлы из папки сервера.',
+      };
+    }
+    const remoteSha = head ? await shaOfPath(token, repo, head.commit, ARCHIVE_PATH) : null;
+    const localSha = blobSha(buf);
+    if (head && remoteSha === localSha) {
+      saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [ARCHIVE_PATH]: localSha } });
+      return { ok: true, upToDate: true, commit: head.commit, uploaded: 0, removed: 0, changed: 0, archive: info.name, size: buf.length };
+    }
+
+    const blob = await gh(token, `/repos/${repo}/git/blobs`, {
+      body: { content: buf.toString('base64'), encoding: 'base64' },
+    });
+    const manifest = Buffer.from(JSON.stringify({
+      createdAt: new Date().toISOString(),
+      files: info.files,
+      raw: info.raw,
+      packed: buf.length,
+      sha256: info.sha256,
+    }, null, 1), 'utf8');
+    const manifestBlob = await gh(token, `/repos/${repo}/git/blobs`, {
+      body: { content: manifest.toString('base64'), encoding: 'base64' },
+    });
+
+    const entries = [
+      { path: ARCHIVE_PATH, mode: '100644', type: 'blob', sha: blob.sha },
+      { path: MANIFEST_PATH, mode: '100644', type: 'blob', sha: manifestBlob.sha },
+    ];
+    /* старые поштучные файлы из прошлых отправок убираем, чтобы не дублировать сервер */
+    let removed = 0;
+    const prev = (state.files || {});
+    for (const rel of Object.keys(prev)) {
+      if (rel === ARCHIVE_PATH || rel === MANIFEST_PATH) continue;
+      entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
+      removed += 1;
+    }
+
+    const sendTree = async (baseTree, parent) => {
+      const body = { tree: entries };
+      if (baseTree) body.base_tree = baseTree;
+      const tree = await gh(token, `/repos/${repo}/git/trees`, { body });
+      const commit = await gh(token, `/repos/${repo}/git/commits`, {
+        body: { message, tree: tree.sha, parents: parent ? [parent] : [] },
+      });
+      if (parent) {
+        await gh(token, `/repos/${repo}/git/refs/heads/${encodeURI(branch)}`, {
+          method: 'PATCH', body: { sha: commit.sha, force: false },
+        });
+      } else {
+        await gh(token, `/repos/${repo}/git/refs`, { body: { ref: `refs/heads/${branch}`, sha: commit.sha } });
+      }
+      return commit;
+    };
+
+    let commit;
+    if (!head) {
+      onLog('репозиторий пустой — создаю первый коммит');
+      const boot = await bootstrapEmpty(token, repo, branch, message);
+      if (!boot) throw new Error('Не удалось создать первый коммит в пустом репозитории.');
+      const t = await getTreeOfCommit(token, repo, boot.commit);
+      commit = await sendTree(t.treeSha, boot.commit);
+    } else {
+      const t = await getTreeOfCommit(token, repo, head.commit);
+      commit = await sendTree(t.treeSha, head.commit);
+    }
+
+    saveState(stateFile, { commit: commit.sha, branch, mode: 'archive', files: { [ARCHIVE_PATH]: localSha } });
+    return {
+      ok: true,
+      commit: commit.sha,
+      uploaded: 1,
+      removed,
+      changed: 1,
+      archive: info.name,
+      size: buf.length,
+      raw: info.raw,
+    };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
+    void zip;
+  }
+}
+
+/** sha файла по пути в дереве коммита (или null). */
+async function shaOfPath(token, repo, commitSha, rel) {
+  const { entries } = await getTreeOfCommit(token, repo, commitSha);
+  const hit = entries.find((e) => e.type === 'blob' && e.path === rel);
+  return hit ? hit.sha : null;
+}
+
+/** Забрать сервер из архива в репозитории. */
+async function pullArchive(token, repo, branch, opts) {
+  const { dir, stateFile, onLog = () => {} } = opts;
+  const head = await getHead(token, repo, branch);
+  if (!head) return { ok: false, error: `В репозитории ${repo} ещё нет отправленного сервера — сначала отправь его.` };
+  const state = loadState(stateFile);
+  if (state.commit === head.commit) {
+    return { ok: true, changed: 0, downloaded: 0, removed: 0, commit: head.commit, upToDate: true };
+  }
+  const sha = await shaOfPath(token, repo, head.commit, ARCHIVE_PATH);
+  if (!sha) {
+    return { ok: false, error: 'В репозитории нет файла сервера. Его нужно отправить из панели (архивом).' };
+  }
+  onLog('скачиваю архив сервера…');
+  const buf = await downloadBlob(token, repo, sha);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-pull-'));
+  const zipFile = path.join(tmpDir, 'server.zip');
+  try {
+    fs.writeFileSync(zipFile, buf);
+    const res = zip.extractFile(zipFile, dir);
+    saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [ARCHIVE_PATH]: sha } });
+    return {
+      ok: true,
+      commit: head.commit,
+      changed: res.files.length,
+      downloaded: res.files.length,
+      removed: 0,
+      total: res.files.length,
+      list: res.files.slice(0, 10),
+    };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
+  }
 }
 
 /* ─────────────────────────────── состояние ─────────────────────────────── */
@@ -248,7 +439,7 @@ function saveState(file, state) {
  * Возвращает {ok, changed, downloaded, removed, commit} либо {ok:false, error}.
  */
 async function pull(opts) {
-  const { dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all', stateFile, onLog = () => {} } = opts;
+  const { dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all', stateFile, onLog = () => {}, mode = 'files' } = opts;
   try {
     const repo = normRepo(rawRepo);
     const branch = normBranch(rawBranch);
@@ -257,6 +448,7 @@ async function pull(opts) {
 
     const head = await getHead(token, repo, branch);
     if (!head) return { ok: false, error: `В репозитории ${repo} нет ветки ${branch} — сначала отправь сервер на GitHub.` };
+    if (mode === 'archive') return await pullArchive(token, repo, branch, opts);
 
     const state = loadState(stateFile);
     if (state.commit === head.commit) {
@@ -332,13 +524,19 @@ async function push(opts) {
   const {
     dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all',
     message = 'OmniPanel: сохранение мира', stateFile, onLog = () => {},
-    maxFile = MAX_FILE,
+    maxFile = MAX_FILE, mode = 'files',
   } = opts;
   try {
     const repo = normRepo(rawRepo);
     const branch = normBranch(rawBranch);
     const token = normToken(rawToken);
     if (!fs.existsSync(dir)) return { ok: false, error: 'Папка сервера не найдена: ' + dir };
+
+    if (mode === 'archive') {
+      /* одним архивом имеет смысл гнать только весь сервер целиком */
+      if (scope !== 'all') onLog('выбран не весь сервер — отправляю по файлам');
+      else return await pushArchive(token, repo, branch, opts);
+    }
 
     const match = makeMatcher(scope, dir);
     const localFiles = walk(dir, match);
@@ -356,7 +554,7 @@ async function push(opts) {
       }
     }
 
-    const head = await getHead(token, repo, branch);
+    let head = await getHead(token, repo, branch);
     let remote = new Map();
     let baseTree = null;
     let parentCommit = null;
@@ -398,25 +596,45 @@ async function push(opts) {
     // 2. удаления в дереве — sha: null
     for (const rel of deletions) entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
 
-    // 3. дерево
-    const treeBody = { tree: entries };
-    if (baseTree) treeBody.base_tree = baseTree;
-    const tree = await gh(token, `/repos/${repo}/git/trees`, { body: treeBody });
+    /* 3–5. дерево → коммит → ветка.
+       В пустом репозитории любой из этих шагов может ответить 409:
+       тогда создаём первый коммит через Contents API и повторяем один раз. */
+    const sendTree = async () => {
+      const treeBody = { tree: entries };
+      if (baseTree) treeBody.base_tree = baseTree;
+      const tree = await gh(token, `/repos/${repo}/git/trees`, { body: treeBody });
 
-    // 4. коммит
-    const commitBody = { message, tree: tree.sha, parents: parentCommit ? [parentCommit] : [] };
-    const commit = await gh(token, `/repos/${repo}/git/commits`, { body: commitBody });
+      const commitBody = { message, tree: tree.sha, parents: parentCommit ? [parentCommit] : [] };
+      const commit = await gh(token, `/repos/${repo}/git/commits`, { body: commitBody });
 
-    // 5. ветка
-    if (parentCommit) {
-      await gh(token, `/repos/${repo}/git/refs/heads/${encodeURI(branch)}`, {
-        method: 'PATCH',
-        body: { sha: commit.sha, force: false },
-      });
-    } else {
-      await gh(token, `/repos/${repo}/git/refs`, {
-        body: { ref: `refs/heads/${branch}`, sha: commit.sha },
-      });
+      if (parentCommit) {
+        await gh(token, `/repos/${repo}/git/refs/heads/${encodeURI(branch)}`, {
+          method: 'PATCH',
+          body: { sha: commit.sha, force: false },
+        });
+      } else {
+        await gh(token, `/repos/${repo}/git/refs`, {
+          body: { ref: `refs/heads/${branch}`, sha: commit.sha },
+        });
+      }
+      return commit;
+    };
+
+    let commit;
+    try {
+      commit = await sendTree();
+    } catch (err) {
+      const empty = err.status === 409 || err.status === 404 || /empty/i.test(err.message || '');
+      if (!empty) throw err;
+      onLog('репозиторий пустой — создаю первый коммит');
+      head = await bootstrapEmpty(token, repo, branch, message);
+      if (!head) throw new Error('Не удалось создать первый коммит в пустом репозитории. Проверь права токена на запись (Contents: read and write).');
+      /* после первого коммита ветка есть — дальше обычный путь */
+      const info = await getTreeOfCommit(token, repo, head.commit);
+      baseTree = info.treeSha;
+      parentCommit = head.commit;
+      for (const e of info.entries) if (e.type === 'blob') remote.set(e.path, e.sha);
+      commit = await sendTree();
     }
 
     const files = {};
@@ -544,10 +762,24 @@ async function createRepo(token, name, isPrivate = true) {
   try {
     const clean = String(name || '').trim().replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!clean) throw new Error('Пустое имя репозитория');
-    const data = await gh(normToken(token), '/user/repos', {
-      body: { name: clean, private: !!isPrivate, auto_init: true, description: 'OmniPanel: мир сервера' },
+    const t = normToken(token);
+    const data = await gh(t, '/user/repos', {
+      body: { name: clean, private: !!isPrivate, auto_init: true, description: 'OmniPanel: сервер целиком' },
     });
-    return { ok: true, repo: data.full_name, private: !!data.private, htmlUrl: data.html_url || '' };
+    /* Свежий репозиторий иногда ещё не виден токену (fine-grained токен
+       с доступом к выбранным репозиториям). Проверяем сразу, чтобы потом
+       не ловить 404 при отправке. */
+    const checkLater = await gh(t, `/repos/${data.full_name}`, { allow404: true }).catch(() => null);
+    return {
+      ok: true,
+      repo: data.full_name,
+      private: !!data.private,
+      htmlUrl: data.html_url || '',
+      invisible: !checkLater,
+      note: checkLater
+        ? ''
+        : 'Репозиторий создан, но токен его пока не видит. Открой токен на GitHub и выбери «All repositories» (или добавь этот репозиторий в список) — иначе отправка упрётся в 404.',
+    };
   } catch (err) {
     return { ok: false, error: err.message };
   }

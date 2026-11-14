@@ -1,12 +1,15 @@
 'use strict';
 /**
  * Бэкапы папки сервера: создание архива и восстановление из него.
- * Windows — встроенный Compress-Archive/Expand-Archive (zip), Unix — tar.gz.
- * Без внешних зависимостей.
+ * Архив собирает свой zip-писатель (deflate уровень 9 — максимум для zip),
+ * поэтому одинаково работает на Windows и Linux и не требует PowerShell.
+ * Тем же архивом панель отправляет сервер в GitHub (см. core/github.js).
  */
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
+const zip = require('./zip');
 
 const IS_WIN = process.platform === 'win32';
 
@@ -52,27 +55,42 @@ function listBackups(dir) {
   }
 }
 
+/** Что не кладём в архив: то же, что не синхронизируем. */
+const SKIP_ALWAYS = [
+  /(^|\/)\.git(\/|$)/,
+  /(^|\/)cache(\/|$)/,
+  /(^|\/)\.DS_Store$/,
+  /(^|\/)Thumbs\.db$/i,
+  /(^|\/)session\.lock$/i,
+];
+
 /**
- * Создаёт архив папки сервера.
- * @returns {Promise<{file:string,size:number,name:string,createdAt:number}>}
+ * Создаёт архив папки сервера с максимальным сжатием.
+ * @returns {Promise<{file:string,size:number,name:string,createdAt:number,sha256:string,files:number,raw:number}>}
  */
-async function createBackup({ srcDir, destDir, label = 'backup' }) {
+async function createBackup({ srcDir, destDir, label = 'backup', skip = [] }) {
   if (!srcDir || !fs.existsSync(srcDir)) throw new Error('Папка сервера не найдена: ' + srcDir);
   ensureDir(destDir);
 
-  const name = `${slug(label)}_${stamp()}.${IS_WIN ? 'zip' : 'tar.gz'}`;
+  const name = `${slug(label)}_${stamp()}.zip`;
   const file = path.join(destDir, name);
+  const tmp = file + '.part';
 
-  if (IS_WIN) {
-    const script =
-      `Compress-Archive -Path ${psQuote(path.join(srcDir, '*'))} -DestinationPath ${psQuote(file)} -CompressionLevel Optimal -Force`;
-    await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script]);
-  } else {
-    await run('tar', ['-czf', file, '-C', srcDir, '.']);
-  }
+  const res = zip.zipDir(srcDir, tmp, { skip: SKIP_ALWAYS.concat(skip) });
+  fs.renameSync(tmp, file);
 
   const st = fs.statSync(file);
-  return { file, name, size: st.size, createdAt: st.mtimeMs };
+  const hash = crypto.createHash('sha256');
+  hash.update(fs.readFileSync(file));
+  return {
+    file,
+    name,
+    size: st.size,
+    createdAt: st.mtimeMs,
+    sha256: hash.digest('hex'),
+    files: res.files,
+    raw: res.bytes,
+  };
 }
 
 /**
@@ -82,12 +100,12 @@ async function restoreBackup({ file, destDir }) {
   if (!file || !fs.existsSync(file)) throw new Error('Файл бэкапа не найден');
   ensureDir(destDir);
 
-  if (IS_WIN) {
-    const script = `Expand-Archive -LiteralPath ${psQuote(file)} -DestinationPath ${psQuote(destDir)} -Force`;
-    await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script]);
-  } else {
-    await run('tar', ['-xzf', file, '-C', destDir]);
+  if (/\.zip$/i.test(file)) {
+    zip.extractFile(file, destDir);
+    return true;
   }
+  /* старые архивы .tar.gz — только через tar */
+  await run('tar', ['-xzf', file, '-C', destDir]);
   return true;
 }
 

@@ -1,282 +1,369 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8" />
+<meta charset="utf-8">
+<title>Мифические мобы</title>
 <style>
   :root {
-    --bg: #0f1014; --bg2: #16181d; --bg3: #1e2128; --line: #2a2d36;
-    --text: #e8eaf0; --dim: #9aa0ae; --accent: #8ab4ff; --ok: #78d39a; --warn: #d9a13b;
+    --bg: #0f1014; --panel: #16181d; --panel3: #1e2128; --line: #2a2d36;
+    --text: #e8eaf0; --dim: #9aa0ae; --accent: #8ab4ff; --warn: #e0b34a; --bad: #e06c6c; --ok: #6cc78a;
+    --r-xs: 4px; --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-pill: 999px; --r-circle: 50%; --r-card: 12px;
+    --font: 12.4px/1.45 "Segoe UI", system-ui, sans-serif;
+    --mono: 12px/1.55 "Cascadia Mono", "Consolas", monospace;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 14px; font: 13px/1.45 "Segoe UI", Tahoma, sans-serif;
-    background: var(--bg); color: var(--text);
-  }
-  h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; }
-  .sub { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
-  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-  input[type="text"] {
-    flex: 1 1 180px; min-width: 120px; background: var(--bg2); color: var(--text);
-    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; outline: none;
-  }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: var(--font); padding: 14px; }
+  .seg { display: inline-flex; background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 2px; gap: 2px; margin-bottom: 12px; }
+  .seg button { background: transparent; border: none; color: var(--dim); font: var(--font);
+    padding: 6px 12px; border-radius: var(--r-xs); cursor: pointer; }
+  .seg button.on { background: var(--panel3); color: var(--text); }
+  .view { display: none; }
+  .view.on { display: block; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card);
+    padding: 12px 14px; margin-bottom: 10px; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .card p { margin: 0 0 8px; color: var(--dim); font-size: 12px; }
+  pre { margin: 0; background: var(--panel3); border: 1px solid var(--line); border-radius: var(--r-sm);
+    padding: 10px 12px; font: var(--mono); overflow: auto; white-space: pre; color: var(--text); }
+  code { font: var(--mono); background: var(--panel3); padding: 1px 5px; border-radius: var(--r-xs); }
+
+  textarea { width: 100%; min-height: 170px; resize: vertical; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 12px; font: var(--mono); outline: none; }
+  textarea:focus { border-color: var(--accent); }
+  input[type="text"] { width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 8px 10px; font: var(--mono); outline: none; }
   input[type="text"]:focus { border-color: var(--accent); }
-  button {
-    background: var(--bg3); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 12px; font: inherit; cursor: pointer;
-  }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  .row .lbl { color: var(--dim); font-size: 11.5px; }
+  .grow { flex: 1 1 auto; }
+  button { background: var(--panel3); color: var(--text); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 8px 12px; font: var(--font); cursor: pointer; transition: .12s; }
   button:hover { border-color: var(--accent); }
-  button.primary { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
-  button.primary:hover { opacity: .88; }
-  .list { display: flex; flex-direction: column; gap: 8px; }
-  .mob {
-    background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
-    display: flex; gap: 12px; align-items: flex-start;
-  }
-  .mob .ico {
-    width: 34px; height: 34px; flex: 0 0 34px; border-radius: 8px; background: var(--bg3);
-    border: 1px solid var(--line); display: flex; align-items: center; justify-content: center;
-    font-weight: 700; color: var(--dim);
-  }
-  .mob .body { flex: 1 1 auto; min-width: 0; }
-  .mob .name { font-weight: 650; }
-  .mob .row { color: var(--dim); font-size: 12px; margin-top: 2px; }
-  .mob .acts { display: flex; gap: 6px; flex: 0 0 auto; }
-  .mob .acts button { padding: 5px 10px; font-size: 12px; }
-  .badge { font-size: 10.5px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--dim); }
-  .badge.bad { border-color: var(--warn); color: var(--warn); }
-  .empty { color: var(--dim); border: 1px dashed var(--line); border-radius: 12px; padding: 22px; text-align: center; }
-  .status { color: var(--dim); font-size: 12px; margin-top: 10px; min-height: 16px; }
-  .status.ok { color: var(--ok); }
-  .status.bad { color: var(--warn); }
-  pre {
-    margin: 8px 0 0; padding: 10px; background: var(--bg3); border: 1px solid var(--line);
-    border-radius: 8px; max-height: 240px; overflow: auto; font: 12px/1.5 Consolas, monospace; white-space: pre-wrap;
-  }
-  .hidden { display: none !important; }
+  button.primary { background: color-mix(in srgb, var(--accent) 22%, var(--panel3)); border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+
+  #verdict { margin: 8px 0; color: var(--dim); font-size: 12px; min-height: 16px; }
+  #verdict.warn { color: var(--warn); }
+  #verdict.ok { color: var(--ok); }
+  #verdict.bad { color: var(--bad); }
+
+  #files .f { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  #files .f:last-child { border-bottom: none; }
+  #files .n { font: var(--mono); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+  #files .st { color: var(--dim); font-size: 11.5px; }
+  #files .st.bad { color: var(--warn); }
+  #files .st.ok { color: var(--ok); }
+  .panel-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-card); overflow: hidden; }
 </style>
 </head>
 <body>
-  <h2>Мифические мобы</h2>
-  <div class="sub" id="sub">читаю MythicMobs/Mobs…</div>
-
-  <div class="bar">
-    <input id="q" type="text" placeholder="поиск по имени или типу" spellcheck="false" />
-    <button id="scan">Проверить файлы</button>
+  <div class="seg">
+    <button id="tabWiki" class="on">Вики</button>
+    <button id="tabFix">Адаптация кода</button>
+    <button id="tabFiles">Проверка файлов</button>
   </div>
 
-  <div class="bar">
-    <input id="newName" type="text" placeholder="имя нового моба, латиницей" spellcheck="false" />
-    <button id="new" class="primary">Создать моба</button>
+  <div class="view on" id="vWiki">
+    <div id="wikiList"></div>
   </div>
 
-  <div id="list" class="list"></div>
-  <div id="status" class="status"></div>
-  <pre id="preview" class="hidden"></pre>
+  <div class="view" id="vFix">
+    <div class="card">
+      <h3>Адаптация кода моба</h3>
+      <p>Вставь код из старой вики или из чата — приведу его к современному синтаксису MythicMobs
+        и сохраню в папку сервера.</p>
+      <textarea id="src" spellcheck="false" placeholder="BadMob:&#10;  Type: ZOMBIE&#10;  Skills:&#10;    - ignite{ticks=40} @Target ~onAttack"></textarea>
+      <div class="row">
+        <button class="primary" id="fixBtn">Привести в порядок</button>
+        <button id="saveBtn" disabled>Сохранить в сервер</button>
+        <div class="grow"></div>
+        <span class="lbl" id="pathLbl">Файл</span>
+      </div>
+      <input type="text" id="savePath" placeholder="MythicMobs/Mobs/Имя.yml" spellcheck="false">
+      <div id="verdict"></div>
+      <pre id="out"></pre>
+    </div>
+  </div>
+
+  <div class="view" id="vFiles">
+    <div class="card">
+      <h3>Проверка файлов MythicMobs</h3>
+      <p>Смотрю папку <code>MythicMobs/Mobs</code>: табуляция, пустые файлы, отсутствие <code>Type</code> и <code>Health</code>.</p>
+      <div class="row">
+        <button class="primary" id="scanBtn">Проверить</button>
+        <div class="grow"></div>
+        <span class="lbl" id="scanInfo"></span>
+      </div>
+      <div class="panel-card" id="files"></div>
+    </div>
+  </div>
 
 <script>
 (function () {
-  let rid = 0;
-  const waiting = new Map();
-  const state = { files: [], filter: '', theme: {}, server: null, preview: '' };
+  var S = { server: null, theme: null, fixed: '', path: '' };
+  var rid = 0;
+  var waits = new Map();
+  var $ = function (id) { return document.getElementById(id); };
 
   function call(method, args) {
-    return new Promise((resolve) => {
-      const id = ++rid;
-      waiting.set(id, resolve);
+    return new Promise(function (resolve) {
+      var id = ++rid;
+      waits.set(id, resolve);
       parent.postMessage({ omni: 1, rid: id, method: method, args: args || [] }, '*');
-      setTimeout(() => {
-        if (waiting.has(id)) { waiting.delete(id); resolve({ ok: false, error: 'нет ответа' }); }
-      }, 15000);
+      setTimeout(function () {
+        if (waits.has(id)) { waits.delete(id); resolve({ ok: false, error: 'Панель не ответила' }); }
+      }, 20000);
     });
   }
 
-  window.addEventListener('message', (e) => {
-    const d = e.data;
-    if (!d || d.omni !== 2) return;
-    if (d.type === 'theme') { applyTheme(d.theme || {}); return; }
-    const cb = waiting.get(d.rid);
-    if (cb) { waiting.delete(d.rid); cb(d); }
-  });
-
   function applyTheme(t) {
-    state.theme = t;
-    const r = document.documentElement.style;
-    if (t.bg) r.setProperty('--bg', t.bg);
-    if (t.panel) r.setProperty('--bg2', t.panel);
-    if (t.panel3) r.setProperty('--bg3', t.panel3);
-    if (t.line) r.setProperty('--line', t.line);
-    if (t.text) r.setProperty('--text', t.text);
-    if (t.dim) r.setProperty('--dim', t.dim);
-    if (t.accent) r.setProperty('--accent', t.accent);
+    if (!t) return;
+    S.theme = t;
+    var r = document.documentElement.style;
+    var map = { bg: '--bg', panel: '--panel', panel3: '--panel3', line: '--line',
+      text: '--text', dim: '--dim', accent: '--accent' };
+    Object.keys(map).forEach(function (k) { if (t[k]) r.setProperty(map[k], t[k]); });
+    var rad = t.radius || {};
+    var rmap = { xs: '--r-xs', sm: '--r-sm', md: '--r-md', lg: '--r-lg',
+      pill: '--r-pill', circle: '--r-circle', card: '--r-card' };
+    Object.keys(rmap).forEach(function (k) { if (rad[k]) r.setProperty(rmap[k], rad[k]); });
   }
 
-  const el = (id) => document.getElementById(id);
-  const setStatus = (text, kind) => {
-    const s = el('status');
-    s.textContent = text || '';
-    s.className = 'status' + (kind ? ' ' + kind : '');
-  };
-
-  /* в MythicMobs имя моба — это ключ верхнего уровня (или поле InternalName) */
-  function nameOfYaml(text) {
-    const inner = text.match(/^\s*InternalName:\s*(.+)$/m);
-    if (inner) return inner[1].trim();
-    const top = text.match(/^([A-Za-z0-9_-]+):/m);
-    return top ? top[1] : '';
-  }
-  function typeOfYaml(text) {
-    const m = text.match(/^\s*Type:\s*(.+)$/m);
-    return m ? m[1].trim() : '';
-  }
-  function hpOfYaml(text) {
-    const m = text.match(/^\s*Health:\s*(.+)$/m);
-    return m ? m[1].trim() : '';
-  }
-  function problems(text) {
-    const out = [];
-    if (/\t/.test(text)) out.push('табуляция');
-    if (!nameOfYaml(text)) out.push('нет имени моба');
-    if (!/^\s*Type:/m.test(text)) out.push('нет Type');
-    return out;
+  function verdict(text, cls) {
+    var el = $('verdict');
+    el.textContent = text || '';
+    el.className = cls || '';
   }
 
-  function render() {
-    const host = el('list');
-    const q = state.filter.trim().toLowerCase();
-    const rows = state.files.filter((f) => !q
-      || f.name.toLowerCase().includes(q)
-      || (f.internal || '').toLowerCase().includes(q)
-      || (f.type || '').toLowerCase().includes(q));
-    el('sub').textContent = state.files.length
-      ? 'файлов: ' + state.files.length + (state.server ? ' · ' + state.server.name : '')
-      : 'в MythicMobs/Mobs пока нет файлов';
-    if (!rows.length) {
-      host.innerHTML = '<div class="empty">' + (state.files.length ? 'ничего не найдено' : 'мобов нет — создай первого') + '</div>';
-      return;
-    }
-    host.innerHTML = '';
-    for (const f of rows) {
-      const card = document.createElement('div');
-      card.className = 'mob';
-      const bad = f.problems && f.problems.length;
-      card.innerHTML =
-        '<div class="ico">' + (f.internal || f.name).slice(0, 1).toUpperCase() + '</div>'
-        + '<div class="body">'
-        + '<div class="name">' + escapeHtml(f.internal || f.name) + '</div>'
-        + '<div class="row">' + escapeHtml(f.type || 'тип не указан')
-        + (f.health ? ' · здоровье ' + escapeHtml(f.health) : '')
-        + ' <span class="badge' + (bad ? ' bad' : '') + '">'
-        + (bad ? escapeHtml(f.problems.join(', ')) : 'в порядке') + '</span></div>'
-        + '</div>'
-        + '<div class="acts">'
-        + '<button data-act="view" data-file="' + escapeAttr(f.path) + '">Показать</button>'
-        + '<button data-act="edit" data-file="' + escapeAttr(f.path) + '">Редактор</button>'
-        + '</div>';
+  /* ─────────── вики ─────────── */
+  var WIKI = [
+    {
+      title: 'Что такое MythicMobs',
+      text: 'Плагин добавляет мобов с собственными характеристиками, скиллами, дропом и спавнерами. ' +
+        'Настройки лежат в папке plugins/MythicMobs: Mobs — сами мобы, Skills — отдельные скиллы, ' +
+        'DropTables — таблицы дропа, Spawners — спавнеры. После правки файлов выполняй mythicmobs reload.',
+      code: '',
+    },
+    {
+      title: 'Моб: минимальный рабочий файл',
+      text: 'Имя моба — ключ верхнего уровня, дальше отступ в два пробела. Type обязателен, Health без него будет 1.',
+      code: 'ZombieKing:\n  Type: ZOMBIE\n  Display: \'Король зомби\'\n  Health: 60\n  Damage: 6\n  Options:\n    MovementSpeed: 0.3',
+    },
+    {
+      title: 'Скиллы',
+      text: 'Скиллы описываются ключом Skills (не Skill) — список из строк. В фигурных скобках параметры, ' +
+        'через собаку — цель, в конце — условие срабатывания.',
+      code: 'ZombieKing:\n  Type: ZOMBIE\n  Health: 60\n  Skills:\n    - ignite{ticks=40} @Target ~onAttack\n    - potion{type=SLOW;duration=60;level=1} @Target ~onDamaged 0.3',
+    },
+    {
+      title: 'Дроп',
+      text: 'Дроп задаётся блоком Drops: что выпадет, с какой вероятностью и в каком количестве.',
+      code: 'ZombieKing:\n  Type: ZOMBIE\n  Health: 60\n  Drops:\n    - diamond 1 0.15\n    - exp 25',
+    },
+    {
+      title: 'Спавнеры',
+      text: 'Спавнер ставит мобов в мире. Указывается моб, радиус, количество и период.',
+      code: 'KingSpawner:\n  MobName: ZombieKing\n  World: world\n  SpawnRadius: 8\n  MaxMobs: 2\n  MobInterval: 300',
+    },
+    {
+      title: 'Частые ошибки',
+      text: 'Табуляция вместо пробелов — YAML её не принимает. Ключ Skill вместо Skills молча игнорируется. ' +
+        'Забытый Health делает моба одноударным. Отступ в один пробел превращает параметр в мусор. ' +
+        'Кнопка «Адаптация кода» исправляет всё это одной командой.',
+      code: '',
+    },
+  ];
+
+  function renderWiki() {
+    var host = $('wikiList');
+    host.textContent = '';
+    WIKI.forEach(function (w) {
+      var card = document.createElement('div');
+      card.className = 'card';
+      var h = document.createElement('h3');
+      h.textContent = w.title;
+      var p = document.createElement('p');
+      p.textContent = w.text;
+      card.appendChild(h);
+      card.appendChild(p);
+      if (w.code) {
+        var pre = document.createElement('pre');
+        pre.textContent = w.code;
+        card.appendChild(pre);
+      }
       host.appendChild(card);
+    });
+  }
+
+  /* ─────────── адаптация кода ─────────── */
+  function mobName(text) {
+    var m = text.match(/^([A-Za-z0-9_\-]+)\s*:\s*$/m);
+    return m ? m[1] : '';
+  }
+
+  function adapt(src) {
+    var notes = [];
+    var text = String(src || '').replace(/\r\n?/g, '\n');
+    if (/\t/.test(text)) {
+      text = text.replace(/\t/g, '  ');
+      notes.push('нашёл табуляцию — заменил на два пробела');
     }
+    if (/[ ]+$/m.test(text)) {
+      text = text.replace(/[ ]+$/gm, '');
+      notes.push('убрал пробелы в конце строк');
+    }
+    if (/^[ ]*Skill:\s*$/m.test(text)) {
+      text = text.replace(/^([ ]*)Skill:\s*$/gm, '$1Skills:');
+      notes.push('ключ Skill: исправлен на Skills:');
+    } else if (/^[ ]*Skill:\s*$/m.test(text)) {
+      text = text.replace(/^([ ]*)Skill:/gm, '$1Skills:');
+    }
+    var name = mobName(text);
+    if (!/^[ ]*Type:/m.test(text)) {
+      var head = text.match(/^([A-Za-z0-9_\-]+)\s*:\s*$/m);
+      if (head) {
+        var at = head.index + head[0].length;
+        text = text.slice(0, at) + '\n  Type: ZOMBIE' + text.slice(at);
+        notes.push('добавил обязательный Type');
+      }
+    }
+    if (!/^[ ]*Health:/m.test(text)) {
+      var typeLine = text.match(/^([ ]*)Type:.*$/m);
+      if (typeLine) {
+        var pos = typeLine.index + typeLine[0].length;
+        text = text.slice(0, pos) + '\n  Health: 20' + text.slice(pos);
+      } else {
+        var head2 = text.match(/^([A-Za-z0-9_\-]+)\s*:\s*$/m);
+        var at2 = head2 ? head2.index + head2[0].length : 0;
+        text = text.slice(0, at2) + '\n  Health: 20' + text.slice(at2);
+      }
+      notes.push('добавил обязательный Health: 20');
+    }
+    text = text.replace(/\n{3,}/g, '\n\n');
+    if (!text.endsWith('\n')) text += '\n';
+    return { text: text, notes: notes, name: name || mobName(text) || 'NewMob' };
   }
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-  }
-  function escapeAttr(s) {
-    return String(s).replace(/"/g, '&quot;');
+  function fix() {
+    var src = $('src').value;
+    if (!src.trim()) { verdict('Вставь код моба — пусто адаптировать нечего', 'warn'); return; }
+    var r = adapt(src);
+    S.fixed = r.text;
+    $('out').textContent = r.text;
+    S.path = 'MythicMobs/Mobs/' + r.name + '.yml';
+    $('savePath').value = S.path;
+    $('saveBtn').disabled = false;
+    verdict(r.notes.length
+      ? 'Готово: ' + r.notes.join(' · ')
+      : 'Готово: код уже в порядке, ни одной правки не понадобилось', r.notes.length ? 'ok' : '');
   }
 
-  async function loadFiles() {
-    const res = await call('list', ['MythicMobs/Mobs']);
-    if (!res.ok) {
-      state.files = [];
-      el('sub').textContent = 'папка MythicMobs/Mobs не найдена — поставь плагин MythicMobs';
-      render();
+  async function saveFile() {
+    var path = ($('savePath').value || '').trim();
+    if (!path) { verdict('Укажи путь файла', 'warn'); return; }
+    if (!/\.yml$|\.yaml$/i.test(path)) path += '.yml';
+    $('saveBtn').disabled = true;
+    var res = await call('write', [path, S.fixed]);
+    $('saveBtn').disabled = false;
+    if (!res || !res.ok) { verdict('Не сохранилось: ' + ((res && res.error) || 'нет связи'), 'bad'); return; }
+    var tail = '';
+    if (S.server && S.server.running) {
+      var r = await call('command', ['mythicmobs reload']);
+      tail = r && r.ok ? ' · на сервере выполнен mythicmobs reload' : ' · перезагрузить плагин не удалось';
+    } else {
+      tail = ' · сервер не запущен, применится при следующем запуске';
+    }
+    verdict('Сохранено: ' + path + tail, 'ok');
+  }
+
+  /* ─────────── проверка файлов ─────────── */
+  async function scan() {
+    var host = $('files');
+    host.textContent = '';
+    $('scanInfo').textContent = 'Смотрю папку…';
+    var dirs = ['MythicMobs/Mobs', 'MythicMobs', 'plugins/MythicMobs/Mobs'];
+    var list = null;
+    var base = '';
+    for (var i = 0; i < dirs.length; i++) {
+      var res = await call('list', [dirs[i]]);
+      if (res && res.ok && res.data) { list = res.data; base = dirs[i]; break; }
+    }
+    if (!list) {
+      $('scanInfo').textContent = '';
+      verdict('Папка MythicMobs не найдена — плагин ещё не запускался', 'warn');
+      var empty = document.createElement('div');
+      empty.className = 'f';
+      empty.textContent = 'MythicMobs/Mobs не найдена';
+      host.appendChild(empty);
       return;
     }
-    const items = (res.data.items || []).filter((x) => !x.isDir && /\.(yml|yaml)$/i.test(x.name));
-    const files = [];
-    for (const it of items) {
-      const read = await call('read', [it.path]);
-      const text = read.ok ? (read.data.content || '') : '';
-      files.push({
-        name: it.name,
-        path: it.path,
-        internal: nameOfYaml(text),
-        type: typeOfYaml(text),
-        health: hpOfYaml(text),
-        problems: problems(text),
+    var items = (list.items || list || []).filter(function (x) {
+      return x && !x.isDir && /\.(yml|yaml)$/i.test(x.name || '');
+    });
+    $('scanInfo').textContent = items.length ? ('файлов: ' + items.length + ' · ' + base) : 'ни одного .yml';
+    var bad = 0;
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      var rel = it.path || (base + '/' + it.name);
+      var read = await call('read', [rel]);
+      var text = read && read.ok && read.data ? String(read.data.content || '') : '';
+      var state = 'ок';
+      var cls = 'ok';
+      if (!text.trim()) { state = 'пустой файл'; cls = 'bad'; bad++; }
+      else if (/\t/.test(text)) { state = 'табуляция — YAML не примет'; cls = 'bad'; bad++; }
+      else if (!/^\s*Type:/m.test(text)) { state = 'нет Type'; cls = 'bad'; bad++; }
+      else if (!/^\s*Health:/m.test(text)) { state = 'нет Health — моб одноударный'; cls = 'bad'; bad++; }
+      var row = document.createElement('div');
+      row.className = 'f';
+      var n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = it.name || rel;
+      var st = document.createElement('span');
+      st.className = 'st ' + cls;
+      st.textContent = state;
+      row.appendChild(n);
+      row.appendChild(st);
+      host.appendChild(row);
+    }
+    if (bad) $('scanInfo').textContent += ' · с замечаниями: ' + bad;
+  }
+
+  /* ─────────── вкладки ─────────── */
+  var TABS = [
+    { btn: 'tabWiki', view: 'vWiki' },
+    { btn: 'tabFix', view: 'vFix' },
+    { btn: 'tabFiles', view: 'vFiles' },
+  ];
+  TABS.forEach(function (t) {
+    $(t.btn).addEventListener('click', function () {
+      TABS.forEach(function (x) {
+        $(x.btn).classList.toggle('on', x.btn === t.btn);
+        $(x.view).classList.toggle('on', x.view === t.view);
       });
-    }
-    state.files = files;
-    render();
-  }
-
-  async function checkAll() {
-    if (!state.files.length) { setStatus('нечего проверять', 'bad'); return; }
-    const bad = state.files.filter((f) => f.problems && f.problems.length);
-    if (!bad.length) {
-      setStatus('все файлы в порядке: ' + state.files.length + ' мобов', 'ok');
-    } else {
-      setStatus('проблемы: ' + bad.map((f) => f.name + ' — ' + f.problems.join(', ')).join('; '), 'bad');
-    }
-  }
-
-  async function createMob() {
-    const raw = el('newName').value.trim();
-    if (!raw) { setStatus('впиши имя моба', 'bad'); return; }
-    const name = raw.replace(/\s+/g, '_');
-    if (!/^[A-Za-z0-9_-]{2,40}$/.test(name)) { setStatus('имя: латиница, цифры, _ и -', 'bad'); return; }
-    const path = 'MythicMobs/Mobs/' + name + '.yml';
-    const template = [
-      name + ':',
-      '  Type: ZOMBIE',
-      '  Display: \'' + name + '\'',
-      '  Health: 40',
-      '  Damage: 6',
-      '  Options:',
-      '    MovementSpeed: 0.25',
-      '    PreventOtherDrops: true',
-      '  Skills:',
-      '  - skill{s=Attack} @target ~onTimer:60',
-      '',
-    ].join('\n');
-    const res = await call('write', [path, template]);
-    if (!res.ok) { setStatus('не записалось: ' + (res.error || ''), 'bad'); return; }
-    el('newName').value = '';
-    setStatus('создан ' + path, 'ok');
-    await loadFiles();
-  }
-
-  async function showPreview(path) {
-    const res = await call('read', [path]);
-    if (!res.ok) { setStatus('не прочитать файл', 'bad'); return; }
-    const pre = el('preview');
-    pre.textContent = res.data.content || '';
-    pre.classList.remove('hidden');
-    state.preview = path;
-  }
-
-  el('q').oninput = () => { state.filter = el('q').value; render(); };
-  el('scan').onclick = checkAll;
-  el('new').onclick = createMob;
-  el('newName').addEventListener('keydown', (e) => { if (e.key === 'Enter') createMob(); });
-  el('list').addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-act]');
-    if (!btn) return;
-    const file = btn.getAttribute('data-file');
-    if (btn.getAttribute('data-act') === 'view') showPreview(file);
-    else call('openEditor', [file]);
+      if (t.view === 'vFix' && !$('src').value) verdict('');
+    });
   });
 
-  parent.postMessage({ omni: 1, rid: 0, method: 'init', args: [] }, '*');
-  window.addEventListener('message', (e) => {
-    const d = e.data;
+  $('fixBtn').addEventListener('click', fix);
+  $('saveBtn').addEventListener('click', saveFile);
+  $('scanBtn').addEventListener('click', scan);
+
+  window.addEventListener('message', function (e) {
+    var d = e.data;
     if (!d || d.omni !== 2) return;
-    if (d.type === 'init-ok') {
-      state.server = d.server;
-      if (d.theme) applyTheme(d.theme);
-      loadFiles();
-    }
-    if (d.type === 'server-changed') { state.server = d.server; loadFiles(); }
+    if (d.type === 'init-ok') { applyTheme(d.theme); S.server = d.server; return; }
+    if (d.type === 'theme') { applyTheme(d.theme); return; }
+    if (d.type === 'server-changed') { S.server = d.server; return; }
+    var w = waits.get(d.rid);
+    if (w) { waits.delete(d.rid); w(d); }
   });
+
+  renderWiki();
+  call('init', []);
 })();
 </script>
 </body>

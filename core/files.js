@@ -10,8 +10,9 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 
-const MAX_READ = 2 * 1024 * 1024;      // больше 2 МБ в редактор не грузим
-const MAX_WRITE = 8 * 1024 * 1024;     // и записывать больше не даём
+const MAX_READ = 16 * 1024 * 1024;     // в редактор грузим до 16 МБ — логи и большие yml влезают
+const MAX_WRITE = 32 * 1024 * 1024;    // и записывать столько же
+const MAX_IMAGE = 12 * 1024 * 1024;    // картинки показываем до 12 МБ
 const MAX_TREE_ENTRIES = 4000;         // предохранитель от гигантских папок
 
 /** Корень папки сервера + проверка, что rel не вылезает наружу. */
@@ -48,11 +49,39 @@ function kindOf(name) {
   if (['.properties', '.env', '.conf', '.ini', '.cfg', '.toml'].includes(ext)) return 'properties';
   if (ext === '.txt' || ext === '.log' || ext === '.md' || ext === '.mcfunction' || ext === '.sh' || ext === '.bat') return 'text';
   if (ext === '.js' || ext === '.mjs' || ext === '.ts') return 'js';
-  if (ext === '.jar' || ext === '.zip' || ext === '.gz' || ext === '.png' || ext === '.jpg' || ext === '.dat' || ext === '.mca') return 'binary';
+  if (IMAGE_EXT.test(ext)) return 'image';
+  if (ARCHIVE_EXT.test(ext)) return 'archive';
+  if (['.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz'].includes(ext)) return 'archive-other';
+  if (ext === '.jar' || ext === '.dat' || ext === '.mca' || ext === '.lock') return 'binary';
   return 'text';
 }
 
-const BINARY_KINDS = new Set(['binary']);
+const IMAGE_EXT = /^\.(png|jpe?g|gif|webp|bmp|ico)$/i;
+const ARCHIVE_EXT = /^\.(zip|jar|mcpack|whl|epub)$/i;
+
+const BINARY_KINDS = new Set(['binary', 'archive', 'archive-other']);
+
+const IMAGE_MIME = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
+};
+
+/** Картинка как data URL — чтобы показать её прямо в редакторе. */
+async function readImage(root, rel) {
+  const abs = resolveSafe(root, rel);
+  const st = await fsp.stat(abs);
+  if (st.size > MAX_IMAGE) throw new Error(`Картинка больше ${Math.round(MAX_IMAGE / 1048576)} МБ — не показываю`);
+  const ext = path.extname(abs).toLowerCase();
+  const mime = IMAGE_MIME[ext] || 'application/octet-stream';
+  const buf = await fsp.readFile(abs);
+  return {
+    path: relOf(root, abs),
+    kind: 'image',
+    size: st.size,
+    mtime: st.mtimeMs,
+    dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+  };
+}
 
 /** Список одной папки. */
 async function listDir(root, rel = '') {
@@ -100,6 +129,15 @@ async function readFile(root, rel) {
 
   const buf = await fsp.readFile(abs);
   const kind = kindOf(abs);
+  if (kind === 'image' || kind === 'archive' || kind === 'archive-other') {
+    /* такие файлы не редактируют текстом — панель покажет картинку или список архива */
+    const hint = kind === 'image'
+      ? 'Картинка — открою в просмотрщике'
+      : kind === 'archive'
+        ? 'Архив — покажу содержимое'
+        : 'Этот формат архива не поддерживается';
+    return { path: relOf(root, abs), kind, size: st.size, binary: true, content: '', message: hint };
+  }
   if (BINARY_KINDS.has(kind) || buf.subarray(0, 8000).includes(0)) {
     return {
       path: relOf(root, abs), kind: 'binary', size: st.size, binary: true,
@@ -157,6 +195,23 @@ async function rename(root, rel, newName) {
   if (fs.existsSync(dest)) throw new Error('Файл с таким именем уже есть');
   await fsp.rename(abs, dest);
   return { ok: true, path: relOf(root, dest) };
+}
+
+/** Перенос файла или папки в другую папку (перетаскивание в дереве). */
+async function move(root, from, toDir) {
+  const abs = resolveSafe(root, from);
+  const destDirAbs = resolveSafe(root, toDir || '');
+  if (path.resolve(abs) === path.resolve(root)) throw new Error('Нельзя перенести корневую папку сервера');
+  const st = await fsp.lstat(abs);
+  const destAbs = path.join(destDirAbs, path.basename(abs));
+  if (path.resolve(destAbs) === path.resolve(abs)) return { ok: true, path: relOf(root, abs), same: true };
+  if (st.isDirectory() && (destDirAbs + path.sep).startsWith(abs + path.sep)) {
+    throw new Error('Нельзя перенести папку внутрь себя');
+  }
+  if (fs.existsSync(destAbs)) throw new Error('В этой папке уже есть «' + path.basename(abs) + '»');
+  await fsp.mkdir(destDirAbs, { recursive: true });
+  await fsp.rename(abs, destAbs);
+  return { ok: true, path: relOf(root, destAbs) };
 }
 
 /** Поиск по именам файлов внутри папки сервера (для быстрого открытия). */
@@ -291,5 +346,5 @@ async function writeServerProperties(root, patch = {}) {
 module.exports = {
   readServerProperties, writeServerProperties, PROP_FIELDS,
   resolveSafe, listDir, readFile, writeFile, mkdir, remove, rename, search,
-  kindOf, MAX_READ,
+  kindOf, readImage, move, MAX_READ, MAX_IMAGE, ARCHIVE_EXT, IMAGE_EXT,
 };

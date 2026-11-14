@@ -10,8 +10,8 @@
 <body>
 <div class="app">
 
-  <!-- ───────────── своя шапка окна ───────────── -->
-  <header class="titlebar">
+  <!-- ───────────── шапка: одна и та же в окне и в полном экране ───────────── -->
+  <header class="titlebar" id="topbar">
     <div class="tb-left">
       <img class="brand-logo" src="../assets/icon.png" alt="" width="18" height="18" />
       <button id="tbAccount" class="tb-acc">
@@ -43,26 +43,6 @@
       </button>
     </div>
   </header>
-
-  <!-- ───────────── полоса полного экрана (F11): слева иконка, по центру состояние, справа кнопки ───────────── -->
-  <div class="fsbar">
-    <div class="fsb-left"><img src="../assets/icon.png" alt="" width="18" height="18" /></div>
-    <div class="fsb-center"><span id="fsbText">OmniPanel</span></div>
-    <div class="fsb-right">
-      <button id="fsbSettings" class="fsb-btn" aria-label="Настройки">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
-      </button>
-      <button id="fsbHide" class="fsb-btn" aria-label="Скрыть в трей">
-        <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.6 6 8.4l4-3.8"/><path d="M2 9.6h8"/></svg>
-      </button>
-      <button id="fsbMin" class="fsb-btn" aria-label="Уменьшить окно">
-        <svg width="13" height="13" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-      </button>
-      <button id="fsbExit" class="fsb-btn" aria-label="Выйти из полного экрана">
-        <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 1.6H1.6v3M7.4 10.4h3v-3M1.9 1.9l3 3M10.1 10.1l-3-3"/></svg>
-      </button>
-    </div>
-  </div>
 
   <div class="app-body">
 
@@ -197,7 +177,6 @@
         <button class="tab active" data-tab="console">Консоль</button>
         <button class="tab" data-tab="files">Файлы</button>
         <button class="tab" data-tab="perf">Производительность</button>
-        <button class="tab" data-tab="tps">TPS-история</button>
         <button class="tab" data-tab="backups">Бэкапы</button>
         <button class="tab" data-tab="addons">Плагины</button>
         <button class="tab" data-tab="players">Игроки</button>
@@ -244,10 +223,12 @@
           </aside>
 
           <div class="fm-main">
+            <div id="fmTabs" class="fm-tabs"></div>
             <div class="fm-bar">
               <div id="fmCrumb" class="fm-crumb">файл не выбран</div>
               <div class="right">
                 <span id="fmDirty" class="fm-dirty hidden"></span>
+                <button id="fmExtractAll" class="btn btn-mini hidden">Распаковать сюда</button>
                 <button id="fmOpenExt" class="btn btn-mini">Внешне</button>
                 <button id="fmWikiBtn" class="btn btn-mini">Шпаргалка</button>
                 <button id="fmSave" class="btn btn-primary btn-mini" disabled>Сохранить</button>
@@ -261,6 +242,8 @@
                 <textarea id="fmText" class="fm-text" spellcheck="false" wrap="off" disabled
                   placeholder="Выбери файл слева"></textarea>
               </div>
+              <div id="fmArchive" class="fm-archive hidden"></div>
+              <div id="fmImageBox" class="fm-image hidden"><img id="fmImage" alt="" /></div>
             </div>
 
             <div class="fm-status">
@@ -304,26 +287,51 @@
             <div class="pc-hint">включая дочерние</div>
           </div>
         </div>
-      </section>
 
-      <!-- TPS история -->
-      <section id="tab-tps" class="pane tab-pane hidden">
-        <div class="pane-head">
-          <div>
-            <div class="ph-title">История TPS</div>
-            <div class="ph-sub" id="tpsStats">—</div>
+        <div class="perf-tps">
+          <div class="pane-head">
+            <div>
+              <div class="ph-title">История TPS</div>
+              <div class="ph-sub" id="tpsStats">—</div>
+            </div>
+            <div class="row" style="gap:6px">
+              <select id="tpsRange" class="mini-select">
+                <option value="15">15 минут</option>
+                <option value="60" selected>1 час</option>
+                <option value="360">6 часов</option>
+                <option value="1440">24 часа</option>
+              </select>
+              <select id="tpsRefresh" class="mini-select">
+                <option value="0">Без автообновления</option>
+                <option value="5" selected>Обновлять каждые 5 с</option>
+                <option value="15">Обновлять каждые 15 с</option>
+                <option value="60">Обновлять каждую минуту</option>
+              </select>
+              <button id="tpsClearBtn" class="btn btn-mini">Очистить историю</button>
+            </div>
           </div>
-          <div class="row" style="gap:6px">
-            <select id="tpsRange" class="mini-select">
-              <option value="15">15 минут</option>
-              <option value="60" selected>1 час</option>
-              <option value="360">6 часов</option>
-              <option value="1440">24 часа</option>
-            </select>
-            <button id="tpsClearBtn" class="btn btn-mini">Очистить историю</button>
+
+          <div id="tpsChart" class="chart big"></div>
+
+          <div class="tps-monitor">
+            <div class="tm-head">
+              <span class="tm-title">Как панель узнаёт TPS</span>
+              <span class="tm-timer" id="tpsTimer">таймер: —</span>
+            </div>
+            <div class="sync-grid">
+              <label class="mini-field">Команда сервера
+                <input id="tpsCmd" type="text" placeholder="tps" spellcheck="false" />
+              </label>
+              <label class="mini-field">Период проверки, секунд
+                <input id="tpsEvery" type="number" min="5" max="3600" step="5" placeholder="30" />
+              </label>
+            </div>
+            <div class="row" style="gap:6px;justify-content:flex-end">
+              <span class="tm-note">панель пишет команду в консоль и читает ответ</span>
+              <button id="tpsSaveBtn" class="btn btn-mini btn-primary">Сохранить</button>
+            </div>
           </div>
         </div>
-        <div id="tpsChart" class="chart big"></div>
       </section>
 
       <!-- бэкапы -->
@@ -614,7 +622,15 @@
       <div class="field">
         <span class="lbl">Синхронизация с GitHub</span>
         <div class="props-box sync-box">
-          <label class="check"><input id="f_syncEnabled" type="checkbox" /><span>Держать мир в репозитории GitHub</span></label>
+          <div class="sync-hero">
+            <label class="switch">
+              <input id="f_syncEnabled" type="checkbox" /><span class="box"></span>
+            </label>
+            <div class="sh-text">
+              <div class="sh-title">Синхронизация всего сервера</div>
+              <div class="sh-sub">мир, плагины, конфиги и ядро целиком — в один репозиторий GitHub. Логи, кэш и бэкапы не отправляются.</div>
+            </div>
+          </div>
 
           <div id="syncBody" class="sync-body">
             <div class="sync-grid">
@@ -627,29 +643,31 @@
               </label>
             </div>
 
-            <label class="mini-field syn-wide">Свой токен <em>(необязательно)</em>
+            <label class="mini-field syn-wide">Свой токен <em>(необязательно — можно войти в настройках панели)</em>
               <input id="f_syncToken" type="password" placeholder="ghp_…" spellcheck="false" autocomplete="off" />
             </label>
 
             <label class="mini-field mini-field-wide syn-wide">Что синхронизировать
               <select id="f_syncScope">
-                <option value="all" selected>весь сервер (мир, плагины, конфиги, ядро)</option>
-                <option value="config">мир + конфиги плагинов</option>
+                <option value="all" selected>весь сервер — мир, плагины, конфиги, ядро</option>
+                <option value="config">мир и конфиги плагинов</option>
                 <option value="world">только мир</option>
               </select>
             </label>
 
             <div class="sync-order">
-              <label class="check"><input id="f_syncPull" type="checkbox" /><span>скачивать обновления перед запуском</span></label>
-              <label class="check"><input id="f_syncPush" type="checkbox" /><span>отправлять мир после остановки</span></label>
+              <label class="switch"><input id="f_syncPull" type="checkbox" /><span class="box"></span>забирать обновления перед запуском</label>
+              <label class="switch"><input id="f_syncPush" type="checkbox" /><span class="box"></span>отправлять сервер после остановки</label>
+              <label class="switch"><input id="f_syncMode" type="checkbox" /><span class="box"></span>гонять сервер одним архивом, как бэкап</label>
             </div>
+            <div class="sync-hint">Один архив вместо десятков тысяч файлов: отправка идёт быстрее, а лимит GitHub на размер файла не мешает. Распаковка на другой машине — тем же архивом.</div>
 
-            <div class="row sync-actions">
+            <div class="sync-actions">
               <button id="syncVerify" class="btn btn-mini">Проверить</button>
-              <button id="syncPull" class="btn btn-mini">Скачать</button>
-              <button id="syncPush" class="btn btn-mini">Отправить</button>
-              <span id="syncStatus" class="wall-name">—</span>
+              <button id="syncPull" class="btn btn-mini">Забрать с GitHub</button>
+              <button id="syncPush" class="btn btn-mini btn-primary">Отправить на GitHub</button>
             </div>
+            <div id="syncStatus" class="sync-status">—</div>
           </div>
         </div>
       </div>
@@ -1117,13 +1135,11 @@
           </div>
 
           <div class="field">
-            <span class="lbl">Масштаб интерфейса</span>
-            <div id="scaleGrid" class="chip-grid">
-              <button class="chip" data-scale="0">Под окно</button>
-              <button class="chip" data-scale="85">Мельче</button>
-              <button class="chip" data-scale="100">Обычный</button>
-              <button class="chip" data-scale="115">Крупнее</button>
-              <button class="chip" data-scale="130">Крупно</button>
+            <span class="lbl">Размер значков и шрифта</span>
+            <div id="densityGrid" class="chip-grid">
+              <button class="chip" data-density="compact">Плотнее</button>
+              <button class="chip" data-density="normal">Обычный</button>
+              <button class="chip" data-density="large">Крупнее</button>
             </div>
           </div>
         </section>

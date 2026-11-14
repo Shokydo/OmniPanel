@@ -196,4 +196,108 @@ function createFromFiles(items) {
   return create(items.map((it) => ({ name: it.name, data: fs.readFileSync(it.from) })));
 }
 
-module.exports = { list, extractFile, create, createFromFiles, crc32 };
+/* ─────────────────────── запись папки потоком ─────────────────────── */
+
+/**
+ * Пакует папку в zip с максимальным сжатием, не держа весь архив в памяти.
+ * @param {string} srcDir  что пакуем
+ * @param {string} destFile куда писать
+ * @param {{skip?: RegExp[], onProgress?: Function}} opts
+ */
+function zipDir(srcDir, destFile, opts = {}) {
+  const skip = opts.skip || [];
+  const { time, date } = dosTime();
+  const fd = fs.openSync(destFile, 'w');
+  const centrals = [];
+  let offset = 0;
+  let count = 0;
+  let rawBytes = 0;
+  let packedBytes = 0;
+
+  const push = (entry, nameBuf, crc, method, body, size) => {
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(LOCAL, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x800, 6);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(size, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    fs.writeSync(fd, local);
+    fs.writeSync(fd, nameBuf);
+    fs.writeSync(fd, body);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(CDIR, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x800, 8);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt16LE(time, 12);
+    central.writeUInt16LE(date, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(body.length, 20);
+    central.writeUInt32LE(size, 24);
+    central.writeUInt16LE(nameBuf.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBuf);
+    offset += 30 + nameBuf.length + body.length;
+    count += 1;
+    rawBytes += size;
+    packedBytes += body.length;
+    if (opts.onProgress && count % 50 === 0) opts.onProgress({ files: count, rawBytes, packedBytes });
+    void entry;
+  };
+
+  const stack = [''];
+  while (stack.length) {
+    const rel = stack.pop();
+    const abs = rel ? path.join(srcDir, rel) : srcDir;
+    let entries = [];
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const childRel = rel ? rel + '/' + e.name : e.name;
+      if (skip.some((re) => re.test(childRel.replace(/\\/g, '/')))) continue;
+      if (e.isDirectory()) { stack.push(childRel); continue; }
+      if (!e.isFile()) continue;
+      let data;
+      try { data = fs.readFileSync(path.join(srcDir, childRel)); } catch { continue; }
+      const nameBuf = Buffer.from(childRel, 'utf8');
+      const crc = zlib.crc32 ? zlib.crc32(data) : crc32(data);
+      let method = 8;
+      /* уровень 9 — максимум, который даёт deflate; уже сжатые форматы не трогаем */
+      const packed = /\\.(zip|gz|tgz|rar|7z|png|jpg|jpeg|webp|mp3|mp4|ogg|jar)$/i.test(childRel)
+        ? data
+        : zlib.deflateRawSync(data, { level: 9 });
+      let body = packed;
+      if (packed.length >= data.length) { method = 0; body = data; }
+      push(e, nameBuf, crc, method, body, data.length);
+    }
+  }
+
+  const centralPart = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(EOCD, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(count, 8);
+  eocd.writeUInt16LE(count, 10);
+  eocd.writeUInt32LE(centralPart.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+  fs.writeSync(fd, centralPart);
+  fs.writeSync(fd, eocd);
+  fs.closeSync(fd);
+  return { file: destFile, files: count, bytes: rawBytes, packed: packedBytes + centralPart.length + 22 };
+}
+
+module.exports = { list, readEntry, extractFile, create, createFromFiles, crc32, zipDir };

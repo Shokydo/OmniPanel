@@ -83,6 +83,8 @@ function normManifest(raw, dir, builtin) {
     panelTitle: hasPanel ? String((panel && panel.title) || raw.name || id).slice(0, 40) : '',
     panelFile,
     permissions: Array.isArray(raw.permissions) ? raw.permissions.filter((p) => typeof p === 'string') : ['files'],
+    /* что делать, если пользователь ещё не трогал переключатель */
+    defaultEnabled: raw.defaultEnabled !== false,
   };
 }
 
@@ -113,13 +115,20 @@ function scan(dataDir) {
   return list;
 }
 
+/** Включён ли аддон: что выбрал пользователь, иначе — значение по умолчанию. */
+function isEnabled(state, item) {
+  const chosen = state.enabled[item.id];
+  if (chosen === undefined) return item.defaultEnabled !== false;
+  return chosen !== false;
+}
+
 /** Список для интерфейса: с флагами включения. */
 function list(dataDir) {
   const state = readState(dataDir);
   return scan(dataDir).map((it) => ({
     ...it,
     panelFile: undefined,
-    enabled: state.enabled[it.id] !== false,
+    enabled: isEnabled(state, it),
   }));
 }
 
@@ -137,7 +146,7 @@ function panel(dataDir, id) {
   const item = scan(dataDir).find((x) => x.id === id);
   if (!item) return { ok: false, error: 'Аддон не найден' };
   const state = readState(dataDir);
-  if (state.enabled[item.id] === false) return { ok: false, error: 'Аддон выключен' };
+  if (!isEnabled(state, item)) return { ok: false, error: 'Аддон выключен' };
   if (!item.hasPanel) return { ok: false, error: 'У аддона нет панели' };
   let html = '';
   try { html = fs.readFileSync(item.panelFile, 'utf8'); } catch (err) {
@@ -156,4 +165,4 @@ function dirs(dataDir) {
   return { user: userDir(dataDir), builtin: BUILTIN_DIR };
 }
 
-module.exports = { list, setEnabled, panel, scan, dirs, userDir, BUILTIN_DIR, ID_RE };
+module.exports = { list, setEnabled, panel, scan, dirs, userDir, isEnabled, BUILTIN_DIR, ID_RE };

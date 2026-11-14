@@ -42,9 +42,9 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await page.evaluate(() => { document.body.classList.add('is-fullscreen'); window.dispatchEvent(new Event('resize')); });
   await page.waitForTimeout(600);
   await page.screenshot({ path: path.join(OUT, '2-fullscreen.png') });
-  const fsb = await page.$eval('#fsbText', (e) => e.textContent);
+  const fsb = await page.$eval('#tbText', (e) => e.textContent);
   console.log('полоса полного экрана:', fsb);
-  const btnCount = await page.$$eval('.fsb-btn', (b) => b.length);
+  const btnCount = await page.$$eval('.win-ctrl .wc', (b) => b.length);
   console.log('кнопок справа:', btnCount);
   await page.evaluate(() => document.body.classList.remove('is-fullscreen'));
 

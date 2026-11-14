@@ -11,6 +11,7 @@ const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
 const kernels = require('./core/kernels');
 const files = require('./core/files');
+const archive = require('./core/archive');
 const modrinth = require('./core/modrinth');
 const ports = require('./core/ports');
 const addons = require('./core/addons');
@@ -412,6 +413,7 @@ function syncOptions(srv) {
     branch: sc.branch || 'main',
     token: sc.token || accountToken(),
     scope: sc.scope || 'all',
+    mode: sc.mode || 'files',
     stateFile: syncStateFile(srv.id),
     message: `OmniPanel: ${srv.name} — ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
     onLog: (text) => manager && manager.note(srv.id, 'GitHub: ' + text),
@@ -475,7 +477,7 @@ async function pushAfterStop(id) {
     }
     if (win && !win.isDestroyed()) {
       win.webContents.send('toast', res.ok
-        ? { kind: 'ok', text: res.upToDate ? `${srv.name}: изменений для GitHub нет` : `${srv.name}: мир отправлен на GitHub` }
+        ? { kind: 'ok', text: res.upToDate ? `${srv.name}: изменений для GitHub нет` : `${srv.name}: сервер отправлен на GitHub` }
         : { kind: 'err', text: `${srv.name}: GitHub — ${res.error}` });
     }
   } finally {
@@ -955,7 +957,11 @@ function wireIpc() {
     manager.note(id, 'GitHub: отправляю изменения…');
     const res = await github.push(syncOptions(srv));
     manager.note(id, res.ok
-      ? (res.upToDate ? 'GitHub: отправлять нечего' : `GitHub: отправлено ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`)
+      ? (res.upToDate
+        ? 'GitHub: отправлять нечего'
+        : (res.archive
+          ? `GitHub: сервер отправлен архивом ${(res.size / 1048576).toFixed(1)} МБ (сжато из ${(res.raw / 1048576).toFixed(1)} МБ), коммит ${String(res.commit).slice(0, 7)}`
+          : `GitHub: отправлено ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`))
       : 'GitHub: ' + res.error);
     return res;
   });
@@ -1313,6 +1319,11 @@ function wireIpc() {
   ipcMain.handle('files:remove', fsWrap(async (id, rel) => files.remove(rootOf(id), rel)));
   ipcMain.handle('files:rename', fsWrap(async (id, rel, name) => files.rename(rootOf(id), rel, name)));
   ipcMain.handle('files:search', fsWrap(async (id, q) => ({ results: await files.search(rootOf(id), q) })));
+  ipcMain.handle('files:image', fsWrap(async (id, rel) => files.readImage(rootOf(id), rel)));
+  ipcMain.handle('files:move', fsWrap(async (id, from, toDir) => files.move(rootOf(id), from, toDir)));
+  ipcMain.handle('archive:open', fsWrap(async (id, rel) => archive.open(rootOf(id), rel)));
+  ipcMain.handle('archive:read', fsWrap(async (id, rel, name) => archive.readEntry(rootOf(id), rel, name)));
+  ipcMain.handle('archive:extract', fsWrap(async (id, rel, destRel, onlyName) => archive.extract(rootOf(id), rel, destRel, onlyName)));
   /** Перетаскивание файлов в окно: кладём байты в папку сервера. */
   ipcMain.handle('files:upload', async (_e, id, relDir, name, data) => {
     try {
@@ -1556,15 +1567,23 @@ function wireIpc() {
   ipcMain.handle('backup:list', (_e, id) => backup.listBackups(backupsDir(id)));
 
   ipcMain.handle('backup:create', async (_e, id, opts = {}) => {
-    const srv = manager.get(id);
-    const src = serverCwd(id);
-    const info = await backup.createBackup({
-      srcDir: src,
-      destDir: backupsDir(id),
-      label: opts.name || srv.name,
-    });
-    if (win && !win.isDestroyed()) win.webContents.send('toast', { kind: 'ok', text: `Бэкап создан: ${info.name}` });
-    return info;
+    try {
+      const srv = manager.get(id);
+      if (!srv) return { ok: false, error: 'Сервер не найден' };
+      const src = serverCwd(id);
+      if (!src) return { ok: false, error: 'У сервера не задана рабочая папка' };
+      manager.note(id, 'Бэкап: упаковываю папку сервера (максимальное сжатие)…');
+      const info = await backup.createBackup({
+        srcDir: src,
+        destDir: backupsDir(id),
+        label: opts.name || srv.name,
+      });
+      manager.note(id, `Бэкап: ${info.name} — ${(info.size / 1048576).toFixed(1)} МБ (сжато из ${(info.raw / 1048576).toFixed(1)} МБ)`);
+      if (win && !win.isDestroyed()) win.webContents.send('toast', { kind: 'ok', text: `Бэкап создан: ${info.name}` });
+      return { ok: true, ...info };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 
   ipcMain.handle('backup:restore', async (_e, id, file, opts = {}) => {

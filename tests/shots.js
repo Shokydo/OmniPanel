@@ -20,6 +20,14 @@ fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/SkeletonKing.yml'),
   'SkeletonKing:\n  Type: SKELETON\n  Health: 120\n  Damage: 8\n  Display: Король скелетов\n');
 fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/AncientGolem.yml'),
   'AncientGolem:\n  Type: IRON_GOLEM\n  Health: 400\n  Damage: 14\n');
+const zipCore = require(path.join(__dirname, '..', 'core', 'zip'));
+fs.writeFileSync(path.join(SRV, 'plugins.zip'), zipCore.create([
+  { name: 'plugin.yml', data: 'name: Sample\nversion: 2.1\n' },
+  { name: 'config/settings.yml', data: 'enabled: true\nradius: 8\n' },
+  { name: 'config/messages.yml', data: 'hello: &7Привет\nbye: &7Пока\n' },
+]));
+fs.mkdirSync(path.join(SRV, 'pictures'), { recursive: true });
+fs.copyFileSync(path.join(__dirname, '..', 'assets', 'icon.png'), path.join(SRV, 'pictures/logo.png'));
 fs.writeFileSync(path.join(SRV, 'whitelist.json'), JSON.stringify([
   { uuid: '8667ba71-b85a-4004-af54-457a9734eed7', name: 'Steve' },
   { uuid: 'ec561538-f3fd-461d-aff5-086b22154bce', name: 'Alex' },
@@ -201,7 +209,7 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await shot('port-busy');
   await page.evaluate(() => document.getElementById('portModal').classList.add('hidden'));
 
-  await page.evaluate(() => { prefs.scale = 0; prefs.save(); applyPrefs(); openPrefs(); });
+  await page.evaluate(() => { prefs.density = 'normal'; prefs.save(); applyPrefs(); openPrefs(); });
   await page.waitForTimeout(700);
   await shot('prefs-wide');
   await page.evaluate(() => document.getElementById('prefsModal').classList.add('hidden'));
@@ -216,13 +224,92 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await shot('prefs-addons');
   await page.evaluate(() => document.getElementById('prefsModal').classList.add('hidden'));
 
+  await page.evaluate(async () => {
+    await window.desktop.addonsSetEnabled('mythic-mobs', true);
+    await loadAddonList();
+  });
+  await page.waitForTimeout(500);
   await page.evaluate(() => setTab('addon:mythic-mobs'));
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1600);
   await shot('addon-mythic');
+  await page.evaluate(() => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
+    doc.getElementById('tabFix').click();
+    doc.getElementById('src').value = 'BadMob:\n\tType: ZOMBIE\n\tSkill:\n\t\t- ignite{ticks=40} @Target ~onAttack';
+    doc.getElementById('fixBtn').click();
+  });
+  await page.waitForTimeout(500);
+  await shot('addon-mythic-fix');
+  await page.evaluate(() => {
+    const doc = document.querySelector('.addon-frame[data-addon-id="mythic-mobs"]').contentDocument;
+    doc.getElementById('tabFiles').click();
+    doc.getElementById('scanBtn').click();
+  });
+  await page.waitForTimeout(1200);
+  await shot('addon-mythic-files');
   await page.evaluate(() => setTab('addon:whitelist'));
   await page.waitForTimeout(1500);
   await shot('addon-whitelist');
   await page.evaluate(() => setTab('console'));
+
+  /* ── 1.19: файлы (вкладки, архив, картинка), производительность с TPS, синхронизация ── */
+  await page.evaluate(async () => {
+    setTab('files');
+    await new Promise((r) => setTimeout(r, 400));
+    FM.expanded = new Set(['MythicMobs', 'MythicMobs/Mobs']);
+    await fmLoadTree();
+    await fmOpenFile('MythicMobs/Mobs/SkeletonKing.yml');
+    await fmOpenFile('MythicMobs/Mobs/AncientGolem.yml');
+    await fmOpenFile('MythicMobs/Mobs/SkeletonKing.yml');
+  });
+  await page.waitForTimeout(800);
+  await shot('files-tabs');
+
+  await page.evaluate(async () => {
+    await fmOpenFile('plugins.zip');
+  });
+  await page.waitForTimeout(700);
+  await page.evaluate(async () => {
+    const row = document.querySelectorAll('#fmArchive .far-row')[1];
+    if (row) row.click();
+  });
+  await page.waitForTimeout(600);
+  await shot('files-archive');
+
+  await page.evaluate(async () => {
+    await fmOpenFile('pictures/logo.png');
+  });
+  await page.waitForTimeout(700);
+  await shot('files-image');
+
+  await page.evaluate(async () => {
+    setTab('perf');
+    await new Promise((r) => setTimeout(r, 700));
+    S.tpsFull.set(S.servers[0].id, Array.from({ length: 60 }, (_, i) => ({
+      t: Date.now() - (60 - i) * 60000,
+      v: 19.2 + Math.sin(i / 5) * 0.7 - (i % 17 === 0 ? 3.4 : 0),
+    })));
+    S.servers[0].tpsCommand = 'tps';
+    S.servers[0].tpsInterval = 30;
+    renderTpsTab();
+    tpsFillMonitor();
+  });
+  await page.waitForTimeout(700);
+  await shot('tab-perf-tps');
+
+  await page.evaluate(async () => {
+    setTab('console');
+    await new Promise((r) => setTimeout(r, 300));
+    openModal(S.servers[0]);
+    await new Promise((r) => setTimeout(r, 500));
+    const block = document.querySelector('#modal .sync-box');
+    if (block) block.scrollIntoView({ block: 'center' });
+  });
+  await page.waitForTimeout(700);
+  const syncBox = await page.$('#modal .sync-box');
+  if (syncBox) await syncBox.screenshot({ path: path.join(outDir, 'sync-block.png') });
+  else await shot('sync-block');
+  await page.evaluate(() => document.getElementById('modal').classList.add('hidden'));
 
   await page.evaluate(() => { setUpdPill({ hasUpdate: false }); });
   await app.close();

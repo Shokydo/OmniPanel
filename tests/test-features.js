@@ -162,20 +162,21 @@ mock.listen(8791, '127.0.0.1', async () => {
     document.body.classList.add('is-fullscreen');
     window.dispatchEvent(new Event('resize'));
     await new Promise((r) => setTimeout(r, 400));
-    const cs = getComputedStyle(document.querySelector('.fsbar'));
+    const cs = getComputedStyle(document.querySelector('.titlebar'));
     return {
       shown: cs.display !== 'none',
-      text: document.querySelector('#fsbText').textContent,
-      buttons: document.querySelectorAll('.fsb-btn').length,
-      hasIcon: !!document.querySelector('.fsb-left img'),
-      titlebarHidden: getComputedStyle(document.querySelector('.titlebar')).display === 'none',
+      text: document.querySelector('#tbText').textContent,
+      buttons: document.querySelectorAll('.titlebar .win-ctrl .wc').length,
+      hasIcon: !!document.querySelector('.tb-left .brand-logo'),
+      accShown: !!document.getElementById('tbAccount'),
+      titlebarHidden: cs.display === 'none',
     };
   });
-  ok(bar.shown, 'полоса видна в полном экране');
+  ok(bar.shown, 'шапка видна в полном экране');
   ok(bar.hasIcon, 'слева иконка');
+  ok(bar.accShown, 'слева аккаунт с ником');
   ok(/Мир друзей/.test(bar.text) && /остановлен/.test(bar.text), 'по центру «сервер — состояние»', bar.text);
-  ok(bar.buttons >= 3, 'справа кнопки управления', 'кнопок: ' + bar.buttons);
-  ok(bar.titlebarHidden, 'своя шапка окна скрыта');
+  ok(bar.buttons === 5, 'справа кнопки управления', 'кнопок: ' + bar.buttons);
 
   const live = await page.evaluate(async () => {
     const s = (await window.desktop.list()).find((x) => x.id === 's1');
@@ -187,7 +188,7 @@ mock.listen(8791, '127.0.0.1', async () => {
   await page.evaluate(async () => {
     // подсовываем состояние через внутренний рендер — просто ждём обычного обновления
     await new Promise((r) => setTimeout(r, 200));
-    const box = document.querySelector('#fsbText');
+    const box = document.querySelector('#tbText');
     return box.textContent;
   });
   ok(live, 'состояние сервера читается');

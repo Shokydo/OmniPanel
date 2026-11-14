@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 
 const API = 'https://api.modrinth.com/v2';
-const UA = 'OmniPanel/1.18.0 (github.com/Shokydo/OmniPanel)';
+const UA = 'OmniPanel/1.19.0 (github.com/Shokydo/OmniPanel)';
 
 function get(url) {
   return new Promise((resolve, reject) => {

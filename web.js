@@ -14,6 +14,7 @@ const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
 const kernels = require('./core/kernels');
 const files = require('./core/files');
+const archive = require('./core/archive');
 const modrinth = require('./core/modrinth');
 const ports = require('./core/ports');
 const addons = require('./core/addons');
@@ -325,6 +326,8 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, await opener.openInEditor(target));
       }
       if (action === 'search') return sendJson(res, 200, { results: await files.search(rootOk(), url.searchParams.get('q') || '') });
+      if (action === 'image') return sendJson(res, 200, await files.readImage(rootOk(), rel));
+      if (action === 'archive') return sendJson(res, 200, await archive.open(rootOk(), rel));
       if (req.method === 'POST') {
         const body = await readBody(req);
         const relBody = body.rel || rel;
@@ -332,6 +335,11 @@ const server = http.createServer(async (req, res) => {
         if (action === 'mkdir') return sendJson(res, 200, await files.mkdir(rootOk(), relBody));
         if (action === 'remove') return sendJson(res, 200, await files.remove(rootOk(), relBody));
         if (action === 'rename') return sendJson(res, 200, await files.rename(rootOk(), relBody, body.name));
+        if (action === 'move') return sendJson(res, 200, await files.move(rootOk(), relBody, body.toDir || ''));
+        if (action === 'archiveRead') return sendJson(res, 200, await archive.readEntry(rootOk(), relBody, body.name));
+        if (action === 'archiveExtract') {
+          return sendJson(res, 200, await archive.extract(rootOk(), relBody, body.destRel || '', body.onlyName || ''));
+        }
       }
       return sendJson(res, 404, { error: 'Неизвестное действие' });
     } catch (e) {
@@ -373,7 +381,7 @@ const server = http.createServer(async (req, res) => {
       if (action === 'create') {
         const body = await readBody(req);
         const info = await backup.createBackup({ srcDir: srv.cwd, destDir: backupsDir(id), label: body.name || srv.name });
-        return sendJson(res, 200, info);
+        return sendJson(res, 200, { ok: true, ...info });
       }
       if (action === 'restore') {
         const body = await readBody(req);
