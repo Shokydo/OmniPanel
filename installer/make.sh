@@ -8,7 +8,7 @@ WIN64="${2:-/tmp/win64.zip}"
 PATCH="${PATCH:-/home/user/.cache/bld/patch-installer.js}"
 cd "$(dirname "$0")"
 
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -static -s -o build-setup.exe installer.c
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -static -s -mwindows -o build-setup.exe installer.c -lgdi32 -lshell32 -lole32 -luuid
 [ -f "$PATCH" ] && node "$PATCH" build-setup.exe "$VERSION" ../OmniPanel/assets/icon.ico
 
 OUT="../OmniPanel-Установка-${VERSION}.exe"

@@ -90,7 +90,7 @@ sed -e "s/FILEVERSION .*/FILEVERSION $MAJ,$MIN,$PATCH,0/" \
 sed -i 's/#define APP_VERSION.*//' omni.build.rc
 x86_64-w64-mingw32-windres -c 65001 omni.build.rc -O coff -o omni.res.o
 sed -i "s/#define APP_VERSION \".*\"/#define APP_VERSION \"$VERSION\"/" installer.c
-x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -static -s -o build-setup.exe installer.c omni.res.o
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -static -s -mwindows -o build-setup.exe installer.c omni.res.o -lgdi32 -lshell32 -lole32 -luuid
 
 OUT="$HERE/../OmniPanel-Установка-$VERSION.exe"
 cp build-setup.exe "$OUT"
