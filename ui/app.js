@@ -61,6 +61,12 @@ const httpApi = {
   async ghLogin() { return { ok: false, error: 'Только в exe-версии' }; },
   async ghLogout() { return { ok: true }; },
   async ghRepos() { return { ok: false, error: 'Только в exe-версии' }; },
+  async ghOauthClientId() { return ''; },
+  async ghSetOauthClientId() { return ''; },
+  async ghDeviceStart() { return { ok: false, error: 'Вход через GitHub — только в exe-версии' }; },
+  async ghDevicePoll() { return { ok: false, error: 'Вход через GitHub — только в exe-версии' }; },
+  async ghOpenExternal(url) { try { window.open(url, '_blank'); } catch { /* браузер сам */ } return true; },
+  async ghDownload() { return { ok: false, error: 'Скачивание из GitHub — только в exe-версии' }; },
   async ghCreateRepo() { return { ok: false, error: 'Только в exe-версии' }; },
   async ghCheck() { return { ok: false, error: 'Только в exe-версии' }; },
   async ghPull() { return { ok: false, error: 'Только в exe-версии' }; },
@@ -1366,11 +1372,14 @@ function ieExport(px = 128) {
   const img = IE.img;
   if (!img) return '';
   const out = document.createElement('canvas');
-  out.width = out.height = px;
+  out.width = out.height = px;                 // итог всегда 1:1
   const ctx = out.getContext('2d');
   const base = Math.max(px / img.width, px / img.height);
   const scale = base * IE.zoom;
-  ctx.translate(px / 2 + IE.panX * px, px / 2 + IE.panY * px);
+  // ровно как в предпросмотре: перетаскивание + поля смещения
+  const dx = (IE.panX + IE.offX / 100) * px;
+  const dy = (IE.panY + IE.offY / 100) * px;
+  ctx.translate(px / 2 + dx, px / 2 + dy);
   ctx.rotate((IE.rot * Math.PI) / 180);
   ctx.scale(scale, scale);
   ctx.imageSmoothingQuality = 'high';
@@ -2585,6 +2594,7 @@ function renderView() {
   const state = s.state || 'stopped';
   el.dot.className = 'dot ' + (state === 'running' ? 'running' : state === 'stopping' ? 'stopping' : '');
   el.stateText.textContent = STATE_LABEL[state] || state;
+  if (typeof fsbUpdate === 'function') fsbUpdate();
   setUptime(s);
   el.pid.textContent = s.pid ? 'PID ' + s.pid : '—';
 
@@ -3759,6 +3769,10 @@ function bindActions() {
     tab.onclick = () => { setPrefsCat(tab.dataset.cat); Sound.play('click'); };
   }
   bindGithubAccount();
+  bindGithubDevice();
+  bindGithubAdd();
+  bindPropsFull();
+  bindFsBar();
 
   // сохранение собственной темы
   $('themeSave').onclick = () => {
@@ -3996,6 +4010,426 @@ function bindActions() {
   };
 }
 
+
+
+/* ═════════════════ полоса полного экрана (F11) ═════════════════ */
+
+/** Слева — иконка, по центру — «Сервер — состояние», справа — три кнопки. */
+function fsbUpdate() {
+  const box = $('fsbText');
+  if (!box) return;
+  const s = S.servers.find((x) => x.id === S.currentId);
+  if (!s) { box.textContent = 'OmniPanel — сервер не выбран'; return; }
+  const state = STATE_LABEL[s.state] || s.state || 'остановлен';
+  const up = s.state === 'running' && s.startedAt ? ` · ${fmtUptime(Date.now() - s.startedAt)}` : '';
+  box.textContent = `${s.name} — ${state}${up}`;
+  box.classList.toggle('live', s.state === 'running');
+  box.classList.toggle('warn', s.state === 'stopping');
+}
+
+function bindFsBar() {
+  const st = $('fsbSettings');
+  if (st) st.onclick = () => openPrefs();
+  const mn = $('fsbMin');
+  if (mn) mn.onclick = () => { if (API.winMinimize) API.winMinimize(); };
+  const ex = $('fsbExit');
+  if (ex) ex.onclick = async () => { setWinIcons(await API.winToggleFull()); };
+  document.addEventListener('fullscreenchange', fsbUpdate);
+  fsbUpdate();
+}
+
+
+/* ═════════════════ server.properties: полная настройка ═════════════════ */
+
+const PF = { id: null, cwd: '', props: {}, exists: false, group: 'main', search: '' };
+
+function pfSchema() {
+  return (typeof PROP_SCHEMA !== 'undefined' && PROP_SCHEMA) ? PROP_SCHEMA : { groups: [], props: [], byKey: {} };
+}
+
+function pfValue(key) {
+  const def = pfSchema().byKey[key];
+  const v = PF.props[key];
+  if (v === null || v === undefined) return def && def.def !== undefined ? def.def : '';
+  return v;
+}
+
+function pfFieldHtml(p) {
+  const val = pfValue(p.key);
+  const cur = val === null || val === undefined ? '' : String(val);
+  const common = `data-key="${esc(p.key)}" data-type="${p.type}"`;
+  if (p.type === 'bool') {
+    const on = String(cur).toLowerCase() === 'true' || cur === '1';
+    return `<div class="field pf-bool"><span class="lbl">${esc(p.label)}</span>
+      <span class="pf-toggle"><em class="pf-key">${esc(p.key)}</em>
+      <label class="check"><input type="checkbox" ${common} ${on ? 'checked' : ''}/><span></span></label></span></div>`;
+  }
+  if (p.type === 'enum') {
+    const opts = (p.options || []).map((o) => `<option value="${esc(o.v)}"${o.v === cur ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+    return `<label class="field"><span class="lbl">${esc(p.label)} <em class="pf-key">${esc(p.key)}</em></span>
+      <select ${common}>${opts}</select></label>`;
+  }
+  if (p.type === 'num') {
+    const min = p.min !== undefined ? ` min="${p.min}"` : '';
+    const max = p.max !== undefined ? ` max="${p.max}"` : '';
+    return `<label class="field"><span class="lbl">${esc(p.label)} <em class="pf-key">${esc(p.key)}</em></span>
+      <input type="number"${min}${max} value="${esc(cur)}" ${common} /></label>`;
+  }
+  return `<label class="field"><span class="lbl">${esc(p.label)} <em class="pf-key">${esc(p.key)}</em></span>
+    <input type="text" value="${esc(cur)}" spellcheck="false" ${common} /></label>`;
+}
+
+function pfRender() {
+  const host = $('propsFields');
+  const nav = $('propsGroups');
+  if (!host || !nav) return;
+  const schema = pfSchema();
+  const q = PF.search.trim().toLowerCase();
+
+  // ключи, которых нет в схеме (плагины, моды) — отдельным разделом
+  const known = new Set(schema.props.map((p) => p.key));
+  const extras = Object.keys(PF.props).filter((k) => !known.has(k));
+
+  const groups = schema.groups.slice();
+  if (extras.length) groups.push({ id: 'extra', label: 'Свои ключи' });
+
+  nav.innerHTML = groups.map((g) => {
+    const count = g.id === 'extra' ? extras.length : schema.props.filter((p) => p.group === g.id).length;
+    return `<button class="props-group${g.id === PF.group ? ' active' : ''}" data-group="${g.id}">${esc(g.label)}<span>${count}</span></button>`;
+  }).join('');
+  for (const b of nav.querySelectorAll('.props-group')) {
+    b.onclick = () => { PF.group = b.dataset.group; pfRender(); };
+  }
+
+  let list;
+  if (q) list = schema.props.filter((p) => p.key.toLowerCase().includes(q) || p.label.toLowerCase().includes(q));
+  else if (PF.group === 'extra') list = extras.map((k) => ({ key: k, label: k, type: 'extra', group: 'extra' }));
+  else list = schema.props.filter((p) => p.group === PF.group);
+
+  if (!list.length) { host.innerHTML = '<div class="pf-empty">ничего не найдено</div>'; return; }
+
+  host.innerHTML = list.map((p) => (p.type === 'extra'
+    ? `<label class="field"><span class="lbl">${esc(p.key)} <em class="pf-key">свой ключ</em></span>
+        <input type="text" value="${esc(String(PF.props[p.key] == null ? '' : PF.props[p.key]))}" spellcheck="false" data-key="${esc(p.key)}" data-type="extra" /></label>`
+    : pfFieldHtml(p))).join('');
+
+  // числа: не даём выйти за границы, но и не мешаем печатать
+  for (const inp of host.querySelectorAll('input[type=number]')) {
+    inp.addEventListener('blur', () => {
+      const min = inp.min !== '' ? Number(inp.min) : null;
+      const max = inp.max !== '' ? Number(inp.max) : null;
+      let v = Number(inp.value);
+      if (inp.value.trim() === '' || Number.isNaN(v)) return;
+      if (min !== null && v < min) v = min;
+      if (max !== null && v > max) v = max;
+      inp.value = String(v);
+    });
+  }
+}
+
+function pfCollect() {
+  const patch = {};
+  const host = $('propsFields');
+  if (!host) return patch;
+  for (const inp of host.querySelectorAll('[data-key]')) {
+    const key = inp.dataset.key;
+    const type = inp.dataset.type;
+    if (type === 'bool') {
+      const v = !!inp.checked;
+      if (PF.props[key] === v) continue;
+      patch[key] = v;
+    } else if (type === 'num') {
+      const raw = inp.value.trim();
+      if (raw === '') continue;
+      const v = Number(raw);
+      if (Number.isNaN(v)) continue;
+      if (String(PF.props[key]) === String(v)) continue;
+      patch[key] = v;
+    } else {
+      const v = inp.value;
+      if (String(PF.props[key] == null ? '' : PF.props[key]) === v) continue;
+      patch[key] = v;
+    }
+  }
+  return patch;
+}
+
+async function pfOpen(server) {
+  const s = server || S.servers.find((x) => x.id === S.currentId);
+  if (!s || !s.id || !s.cwd) {
+    notify({ title: 'Нет папки сервера', text: 'Сначала укажи рабочую папку в настройках сервера.', kind: 'warn' });
+    return;
+  }
+  PF.id = s.id;
+  PF.cwd = s.cwd;
+  PF.group = 'main';
+  PF.search = '';
+  const res = await API.propsRead(s.id);
+  if (!res || res.ok === false || res.error) {
+    notify({ title: 'Не удалось прочитать', text: (res && res.error) || 'server.properties недоступен', kind: 'err' });
+    return;
+  }
+  PF.props = { ...(res.props || {}), ...(res.other || {}) };
+  PF.exists = !!res.exists;
+  $('propsSearch').value = '';
+  $('propsFullState').textContent = PF.exists ? 'server.properties найден' : 'файла нет — создам при сохранении';
+  pfRender();
+  $('propsModal').classList.remove('hidden');
+  Sound.play('nav');
+}
+
+async function pfSave() {
+  const patch = pfCollect();
+  if (!Object.keys(patch).length) {
+    $('propsModal').classList.add('hidden');
+    toast('Ничего не изменилось');
+    return;
+  }
+  const res = await API.propsWrite(PF.id, patch);
+  if (!res || res.ok === false || res.error) {
+    toast((res && res.error) || 'Не удалось записать server.properties', 'err');
+    return;
+  }
+  $('propsModal').classList.add('hidden');
+  Sound.play('ok');
+  toast(`server.properties обновлён — параметров: ${Object.keys(patch).length}`, 'ok');
+  const s = S.servers.find((x) => x.id === PF.id);
+  if (s) propsLoad(s);
+}
+
+function bindPropsFull() {
+  const open = $('propsAll');
+  if (open) open.onclick = () => pfOpen();
+  const close = $('propsModalClose');
+  if (close) close.onclick = () => $('propsModal').classList.add('hidden');
+  const cancel = $('propsFullCancel');
+  if (cancel) cancel.onclick = () => $('propsModal').classList.add('hidden');
+  const save = $('propsFullSave');
+  if (save) save.onclick = () => pfSave();
+  const search = $('propsSearch');
+  if (search) search.oninput = () => { PF.search = search.value; pfRender(); };
+  const defs = $('propsFullDefaults');
+  if (defs) {
+    defs.onclick = () => {
+      for (const p of pfSchema().props) {
+        if (p.def === undefined) continue;
+        if (p.type === 'bool') PF.props[p.key] = p.def === 'true';
+        else if (p.type === 'num') PF.props[p.key] = Number(p.def);
+        else PF.props[p.key] = p.def;
+      }
+      pfRender();
+      Sound.play('click');
+      toast('Подставлены значения по умолчанию — нажми «Сохранить»');
+    };
+  }
+}
+
+
+/* ═════════════════ добавление сервера из GitHub ═════════════════ */
+
+const GA = { src: 'account', repo: '', token: '', repos: [] };
+
+function gaMode(mode) {
+  for (const b of document.querySelectorAll('#addMode .seg-btn')) b.classList.toggle('active', b.dataset.mode === mode);
+  $('ghAdd').classList.toggle('hidden', mode !== 'gh');
+  if (mode === 'gh') gaSource(GA.src);
+}
+
+function gaSource(src) {
+  GA.src = src;
+  for (const b of document.querySelectorAll('#ghAddSrc .seg-btn')) b.classList.toggle('active', b.dataset.src === src);
+  $('ghAddAccount').classList.toggle('hidden', src !== 'account');
+  $('ghAddTokenRow').classList.toggle('hidden', src !== 'token');
+  if (src === 'account') gaLoadRepos();
+}
+
+async function gaLoadRepos(query = '') {
+  const host = $('ghAddRepos');
+  if (!host) return;
+  host.innerHTML = '<div class="gh-repo">загружаю список…</div>';
+  const res = await API.ghRepos(query);
+  if (!res || !res.ok) {
+    host.innerHTML = `<div class="gh-repo">${esc((res && res.error) || 'не удалось загрузить — войди в аккаунт или вставь токен')}</div>`;
+    return;
+  }
+  GA.repos = res.repos || [];
+  if (!GA.repos.length) { host.innerHTML = '<div class="gh-repo">репозиториев нет</div>'; return; }
+  host.innerHTML = '';
+  for (const r of GA.repos.slice(0, 80)) {
+    const el = document.createElement('div');
+    el.className = 'gh-repo act';
+    el.dataset.repo = r.full;
+    if (r.full === GA.repo) el.classList.add('sel');
+    el.innerHTML = `${esc(r.full)}<span class="r-tag">${r.private ? 'приватный' : 'публичный'}</span>`;
+    el.onclick = () => {
+      GA.repo = r.full;
+      host.querySelectorAll('.gh-repo').forEach((n) => n.classList.remove('sel'));
+      el.classList.add('sel');
+      $('ghAddState').textContent = 'выбран: ' + r.full;
+      if (!$('f_name').value.trim()) $('f_name').value = r.name || r.full.split('/')[1];
+      Sound.play('click');
+    };
+    host.appendChild(el);
+  }
+}
+
+async function gaDownload() {
+  if (!GA.repo) { notify({ title: 'Репозиторий не выбран', text: 'Выбери репозиторий из списка.', kind: 'warn' }); return; }
+  const dir = $('ghAddDir').value.trim();
+  if (!dir) { notify({ title: 'Куда скачать?', text: 'Выбери папку кнопкой «обзор…».', kind: 'warn' }); return; }
+  const btn = $('ghAddDownload');
+  btn.disabled = true;
+  btn.textContent = 'Скачиваю…';
+  $('ghAddState').textContent = 'качаю архив репозитория…';
+  const res = await API.ghDownload({
+    repo: GA.repo,
+    branch: $('ghAddBranch').value.trim() || 'main',
+    dir,
+    token: GA.src === 'token' ? ($('ghAddToken').value.trim() || GA.token) : '',
+  });
+  btn.disabled = false;
+  btn.textContent = 'Скачать сервер';
+  if (!res || !res.ok) {
+    $('ghAddState').textContent = 'не вышло';
+    notify({ title: 'Не удалось скачать', text: (res && res.error) || 'ошибка GitHub', kind: 'err' });
+    return;
+  }
+  $('ghAddState').textContent = `готово: файлов ${res.files}`;
+  $('f_cwd').value = res.dir;
+  if (res.command && !$('f_command').value.trim()) $('f_command').value = res.command;
+  if (!$('f_name').value.trim()) $('f_name').value = String(res.repo || '').split('/')[1] || '';
+  // сразу привязываем синхронизацию к этому репозиторию
+  $('f_syncEnabled').checked = true;
+  $('f_syncRepo').value = res.repo;
+  $('f_syncBranch').value = res.branch || 'main';
+  syncToggleBody();
+  gaMode('local');
+  notify({ title: 'Сервер скачан', text: `${res.repo} → ${res.dir}`, kind: 'ok' });
+  Sound.play('ok');
+}
+
+function bindGithubAdd() {
+  for (const b of document.querySelectorAll('#addMode .seg-btn')) b.onclick = () => gaMode(b.dataset.mode);
+  for (const b of document.querySelectorAll('#ghAddSrc .seg-btn')) b.onclick = () => gaSource(b.dataset.src);
+  const reload = $('ghAddReload');
+  if (reload) reload.onclick = () => gaLoadRepos($('ghAddSearch').value.trim());
+  let q = null;
+  const search = $('ghAddSearch');
+  if (search) search.oninput = () => { clearTimeout(q); q = setTimeout(() => gaLoadRepos(search.value.trim()), 400); };
+  const apply = $('ghAddTokenApply');
+  if (apply) apply.onclick = async () => {
+    const tk = $('ghAddToken').value.trim();
+    if (!tk) { notify({ title: 'Токен пустой', text: 'Вставь токен GitHub с правами repo.', kind: 'err' }); return; }
+    const res = await API.ghLogin(tk);
+    if (!res || !res.ok) { notify({ title: 'Токен не подошёл', text: (res && res.error) || 'проверь права repo', kind: 'err' }); return; }
+    GA.token = tk;
+    notify({ title: 'Токен принят', text: `GitHub: ${res.login}`, kind: 'ok' });
+    gaSource('account');
+    ghRefreshAccount();
+  };
+  const pick = $('ghAddDirPick');
+  if (pick) pick.onclick = async () => {
+    const p = await API.pickFolder();
+    if (p) $('ghAddDir').value = p;
+  };
+  const dl = $('ghAddDownload');
+  if (dl) dl.onclick = () => gaDownload();
+}
+
+
+/* ═════════════════ вход в аккаунт GitHub по коду ═════════════════ */
+
+const GD = { timer: null, code: '', interval: 5 };
+
+function gdShow(on) {
+  $('ghDeviceBox').classList.toggle('hidden', !on);
+  $('ghDeviceBtn').classList.toggle('hidden', on);
+}
+
+function gdStop(msg) {
+  if (GD.timer) { clearInterval(GD.timer); GD.timer = null; }
+  GD.code = '';
+  if (msg) $('ghDeviceState').textContent = msg;
+}
+
+async function gdStart() {
+  const clientId = await API.ghOauthClientId().catch(() => '');
+  if (!clientId) {
+    $('ghClientIdBox').classList.remove('hidden');
+    notify({ title: 'Нужен Client ID', text: 'Впиши Client ID своего OAuth App — панель покажет код для входа.', kind: 'warn' });
+    return;
+  }
+  $('ghClientIdBox').classList.add('hidden');
+  const btn = $('ghDeviceBtn');
+  btn.disabled = true;
+  const res = await API.ghDeviceStart();
+  btn.disabled = false;
+  if (!res || !res.ok) {
+    if (res && res.needClientId) $('ghClientIdBox').classList.remove('hidden');
+    notify({ title: 'Не удалось начать вход', text: (res && res.error) || 'ошибка GitHub', kind: 'err' });
+    return;
+  }
+  GD.code = res.deviceCode;
+  GD.interval = Math.max(5, Number(res.interval) || 5);
+  $('ghDeviceCode').textContent = String(res.userCode || '').toUpperCase();
+  $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
+  gdShow(true);
+  Sound.play('ok');
+
+  let ticks = 0;
+  const maxTicks = Math.ceil((res.expiresIn || 900) / GD.interval);
+  GD.timer = setInterval(async () => {
+    ticks += 1;
+    if (ticks > maxTicks) { gdStop('Код устарел — начни вход заново.'); gdShow(false); return; }
+    const r = await API.ghDevicePoll(GD.code);
+    if (r && r.pending) {
+      $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
+      if (r.slow) GD.interval += 5;
+      return;
+    }
+    gdStop('');
+    gdShow(false);
+    if (r && r.ok) {
+      notify({ title: 'Вход выполнен', text: `GitHub: ${r.login}`, kind: 'ok' });
+      await ghRefreshAccount();
+      gaLoadRepos();
+    } else {
+      notify({ title: 'Вход не выполнен', text: (r && r.error) || 'не удалось', kind: 'err' });
+    }
+  }, GD.interval * 1000);
+}
+
+function bindGithubDevice() {
+  const btn = $('ghDeviceBtn');
+  if (!btn) return;
+  btn.onclick = () => gdStart();
+  const open = $('ghDeviceOpen');
+  if (open) open.onclick = () => API.ghOpenExternal('https://github.com/login/device');
+  const copy = $('ghDeviceCopy');
+  if (copy) copy.onclick = async () => {
+    const code = $('ghDeviceCode').textContent.trim();
+    try { await navigator.clipboard.writeText(code); toast('Код скопирован: ' + code, 'ok'); }
+    catch { toast('Код: ' + code); }
+  };
+  const stop = $('ghDeviceStop');
+  if (stop) stop.onclick = () => { gdStop('вход отменён'); gdShow(false); };
+  const save = $('ghClientSave');
+  if (save) save.onclick = async () => {
+    const id = $('ghClientId').value.trim();
+    if (!id) { toast('Вставь Client ID', 'err'); return; }
+    await API.ghSetOauthClientId(id);
+    $('ghClientIdBox').classList.add('hidden');
+    notify({ title: 'Client ID сохранён', text: 'Теперь нажми «Войти через GitHub».', kind: 'ok' });
+  };
+  const make = $('ghClientMake');
+  if (make) make.onclick = () => API.ghOpenExternal('https://github.com/settings/applications/new');
+  const toggle = $('ghTokenToggle');
+  if (toggle) toggle.onclick = () => $('ghTokenRow').classList.toggle('hidden');
+  API.ghOauthClientId().then((id) => {
+    if (id) $('ghClientId').value = id;
+    else $('ghClientIdBox').classList.remove('hidden');
+  }).catch(() => {});
+}
 
 /* ═════════════════════ обновления из GitHub ═════════════════════ */
 

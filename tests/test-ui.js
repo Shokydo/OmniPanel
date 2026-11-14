@@ -106,8 +106,13 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   console.log('\n=== ВХОД В GITHUB И СПИСОК РЕПОЗИТОРИЕВ ===');
   await page.click('#prefsNav .prefs-tab[data-cat="gh"]');
   await page.waitForTimeout(300);
-  ok(await page.$eval('#ghLoginRow', (e) => !e.classList.contains('hidden')), 'без входа поле токена показано');
+  ok(await page.$eval('#ghDeviceBtn', (e) => !e.classList.contains('hidden')), 'кнопка «Войти через GitHub» показана');
   ok(await page.$eval('#ghLoginName', (e) => e.textContent === 'не выполнен вход'), 'статус «вход не выполнен»');
+  // поле токена — за кнопкой «Вход по токену»
+  ok(await page.$eval('#ghTokenRow', (e) => e.classList.contains('hidden')), 'поле токена спрятано по умолчанию');
+  await page.click('#ghTokenToggle');
+  await page.waitForTimeout(200);
+  ok(await page.$eval('#ghTokenRow', (e) => !e.classList.contains('hidden')), 'поле токена открылось кнопкой');
   await page.fill('#ghToken', 'test-token');
   await page.click('#ghLogin');
   await page.waitForTimeout(1500);
@@ -117,7 +122,7 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   }));
   ok(ghState.name === 'tester', 'вход выполнен, логин показан', ghState.name);
   ok(ghState.repos.some((r) => r.includes('o/r')), 'репозитории подгрузились', JSON.stringify(ghState.repos));
-  ok(await page.$eval('#ghLoginRow', (e) => e.classList.contains('hidden')), 'при активном входе поле токена скрыто');
+  ok(await page.$eval('#ghLoginRow', (e) => e.classList.contains('hidden')), 'при активном входе весь блок входа скрыт');
   await page.click('#ghRepoList .gh-repo');
   await page.waitForTimeout(300);
   ok(await page.$eval('#ghRepoList .gh-repo', (e) => e.classList.contains('sel')), 'репозиторий помечен выбранным');

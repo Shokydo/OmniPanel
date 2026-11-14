@@ -553,9 +553,154 @@ async function createRepo(token, name, isPrivate = true) {
   }
 }
 
+
+/* ───────────────── вход в аккаунт (OAuth device flow) ───────────────── */
+/*
+ * Никакого токена руками: панель показывает короткий код, ты вводишь его
+ * на github.com/login/device — и аккаунт подключён. Нужен client_id
+ * своего OAuth App (в нём включён Device Flow): он принадлежит владельцу
+ * аккаунта, поэтому его указывают один раз в настройках панели.
+ */
+
+const https = require('https');
+const httpMod = require('http');
+
+function formPost(url, form, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const body = new URLSearchParams(form).toString();
+    const u = new URL(url);
+    const lib = u.protocol === 'http:' ? httpMod : https;
+    const req = lib.request({
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'http:' ? 80 : 443),
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+        'User-Agent': 'OmniPanel',
+        ...headers,
+      },
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data || '{}')); }
+        catch { reject(new Error('GitHub ответил непонятно: ' + data.slice(0, 200))); }
+      });
+    });
+    req.on('error', (err) => reject(new Error('Нет связи с GitHub: ' + err.message)));
+    req.setTimeout(20000, () => req.destroy(new Error('GitHub не ответил за 20 секунд')));
+    req.write(body);
+    req.end();
+  });
+}
+
+/** Шаг 1: получить код для входа. */
+async function deviceStart(clientId, scope = 'repo read:user') {
+  const id = String(clientId || '').trim();
+  if (!id) return { ok: false, error: 'client_id не заполнен', needClientId: true };
+  try {
+    const data = await formPost('https://github.com/login/device/code', {
+      client_id: id,
+      scope,
+    });
+    if (data.error) {
+      return {
+        ok: false,
+        error: data.error === 'unauthorized_client'
+          ? 'В OAuth App не включён Device Flow (галочка «Enable Device Flow»).'
+          : (data.error_description || data.error),
+      };
+    }
+    return {
+      ok: true,
+      deviceCode: data.device_code,
+      userCode: data.user_code,
+      verificationUri: data.verification_uri || 'https://github.com/login/device',
+      interval: Number(data.interval) || 5,
+      expiresIn: Number(data.expires_in) || 900,
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/** Шаг 2: спросить, ввёл ли человек код. pending=true — ждём дальше. */
+async function devicePoll(clientId, deviceCode) {
+  const id = String(clientId || '').trim();
+  if (!id || !deviceCode) return { ok: false, error: 'Нет данных для ожидания входа' };
+  try {
+    const data = await formPost('https://github.com/login/oauth/access_token', {
+      client_id: id,
+      device_code: deviceCode,
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+    });
+    if (data.access_token) {
+      const user = await getUser(data.access_token);
+      return { ok: true, token: data.access_token, login: user.login || '', avatar: user.avatar || '' };
+    }
+    if (data.error === 'authorization_pending') return { ok: false, pending: true };
+    if (data.error === 'slow_down') return { ok: false, pending: true, slow: true };
+    if (data.error === 'expired_token') return { ok: false, error: 'Код устарел — начни вход заново.' };
+    if (data.error === 'access_denied') return { ok: false, error: 'Вход отменён на GitHub.' };
+    return { ok: false, error: data.error_description || data.error || 'Не удалось войти' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/* ───────────────── скачать сервер из репозитория ───────────────── */
+
+/** Скачивает zip-архив ветки в файл (нужен для «добавить сервер с GitHub»). */
+function downloadRepoZip(token, repo, branch, destFile) {
+  return new Promise((resolve, reject) => {
+    const full = normRepo(repo);
+    const br = normBranch(branch);
+    const url = `${apiBase()}/repos/${full}/zipball/${encodeURIComponent(br)}`;
+    const headers = { 'User-Agent': 'OmniPanel', Accept: 'application/vnd.github+json' };
+    if (token) headers.Authorization = `Bearer ${normToken(token)}`;
+
+    const go = (target, hops) => {
+      if (hops > 6) { reject(new Error('Слишком много перенаправлений')); return; }
+      const u = new URL(target);
+      const lib = u.protocol === 'http:' ? httpMod : https;
+      lib.get({
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'http:' ? 80 : 443),
+        path: u.pathname + u.search,
+        headers,
+      }, (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          res.resume();
+          go(res.headers.location, hops + 1);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (c) => { body += c; });
+          res.on('end', () => reject(new Error(humanError(res.statusCode, (() => {
+            try { return JSON.parse(body); } catch { return {}; }
+          })()))));
+          return;
+        }
+        const out = fs.createWriteStream(destFile);
+        res.pipe(out);
+        out.on('finish', () => out.close(() => resolve({ ok: true, file: destFile })));
+        out.on('error', (err) => reject(err));
+      }).on('error', (err) => reject(new Error('Не удалось скачать архив: ' + err.message)));
+    };
+    go(url, 0);
+  });
+}
+
 module.exports = {
   pull, push, check, verify, loadState, saveState,
   getUser, listRepos, createRepo,
+  deviceStart, devicePoll, downloadRepoZip,
   makeMatcher, worldDirs, blobSha, normRepo, normBranch,
   MAX_FILE, HARD_LIMIT,
 };

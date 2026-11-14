@@ -13,10 +13,18 @@ const kernels = require('./core/kernels');
 const files = require('./core/files');
 const opener = require('./core/opener');
 const github = require('./core/github');
+const zip = require('./core/zip');
+const os = require('os');
 const updater = require('./core/updater');
 const { readJson, writeJson } = require('./core/store');
 
 const APP_NAME = 'OmniPanel';
+
+/* client_id OAuth App для входа в аккаунт GitHub.
+   Пусто — панель попросит вписать свой (Настройки → GitHub).
+   Свой OAuth App: GitHub → Settings → Developer settings → OAuth Apps → New,
+   включить «Enable Device Flow», скопировать Client ID. */
+const GITHUB_OAUTH_CLIENT_ID = '';
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('OmniPanel');
 
@@ -370,6 +378,22 @@ function syncEnabled(srv) {
   return !!(srv.sync.token || accountToken());
 }
 
+/** Команда запуска по содержимому скачанной папки. */
+function guessCommand(dir) {
+  const has = (n) => { try { return fs.existsSync(path.join(dir, n)); } catch { return false; } };
+  if (has('fabric-server-launch.jar')) return 'java -Xmx4G -jar fabric-server-launch.jar nogui';
+  if (has('paper.jar')) return 'java -Xmx4G -jar paper.jar nogui';
+  if (has('purpur.jar')) return 'java -Xmx4G -jar purpur.jar nogui';
+  if (has('spigot.jar')) return 'java -Xmx4G -jar spigot.jar nogui';
+  if (has('velocity.jar')) return 'java -Xmx2G -jar velocity.jar';
+  if (has('server.jar')) return 'java -Xmx4G -jar server.jar nogui';
+  try {
+    const jar = fs.readdirSync(dir).find((f) => /\.jar$/i.test(f) && !/installer|install/i.test(f));
+    if (jar) return `java -Xmx4G -jar "${jar}" nogui`;
+  } catch { /* папки нет */ }
+  return '';
+}
+
 function accountToken() {
   return readGithubAccount().token || '';
 }
@@ -704,6 +728,82 @@ function wireIpc() {
     writeGithubAccount({ githubToken: '', githubLogin: '', githubName: '', githubAvatar: '' });
     return { ok: true };
   });
+  /* вход в аккаунт GitHub: код на экране → подтверждение на github.com */
+  ipcMain.handle('gh:oauthClientId', () => readPanel().githubOauthClientId || '');
+  ipcMain.handle('gh:setOauthClientId', (_e, id) => {
+    const val = String(id || '').trim();
+    writePanel({ githubOauthClientId: val });
+    return val;
+  });
+  ipcMain.handle('gh:deviceStart', async () => {
+    const clientId = readPanel().githubOauthClientId || GITHUB_OAUTH_CLIENT_ID;
+    const res = await github.deviceStart(clientId);
+    if (res.ok && res.verificationUri) {
+      try { shell.openExternal(`${res.verificationUri}?user_code=${encodeURIComponent(res.userCode)}`); } catch { /* браузера нет — код всё равно на экране */ }
+    }
+    return res;
+  });
+  ipcMain.handle('gh:devicePoll', async (_e, deviceCode) => {
+    const clientId = readPanel().githubOauthClientId || GITHUB_OAUTH_CLIENT_ID;
+    const res = await github.devicePoll(clientId, deviceCode);
+    if (res.ok && res.token) {
+      writeGithubAccount({ githubToken: res.token, githubLogin: res.login, githubName: res.login, githubAvatar: res.avatar });
+    }
+    return res;
+  });
+  ipcMain.handle('gh:openExternal', (_e, url) => {
+    const u = String(url || '');
+    if (!/^https:\/\//i.test(u)) return false;
+    try { shell.openExternal(u); return true; } catch { return false; }
+  });
+
+  /* добавить готовый сервер из репозитория GitHub */
+  ipcMain.handle('gh:download', async (_e, cfg) => {
+    const { repo, branch, dir, token } = cfg || {};
+    const tk = String(token || '').trim() || accountToken();
+    let full;
+    try { full = github.normRepo(repo); } catch (err) { return { ok: false, error: err.message }; }
+    const br = github.normBranch(branch);
+    const target = String(dir || '').trim();
+    if (!target) return { ok: false, error: 'Не выбрана папка, куда скачать сервер' };
+    const stamp = Date.now();
+    const tmpZip = path.join(os.tmpdir(), `omnipanel-repo-${stamp}.zip`);
+    const tmpDir = path.join(os.tmpdir(), `omnipanel-repo-${stamp}`);
+    try {
+      fs.mkdirSync(target, { recursive: true });
+      await github.downloadRepoZip(tk, full, br, tmpZip);
+      fs.mkdirSync(tmpDir, { recursive: true });
+      zip.extractFile(tmpZip, tmpDir);
+      /* в архиве от GitHub всё лежит внутри папки «владелец-репозиторий-хеш» */
+      let src = tmpDir;
+      const top = fs.readdirSync(tmpDir);
+      if (top.length === 1 && fs.statSync(path.join(tmpDir, top[0])).isDirectory()) {
+        src = path.join(tmpDir, top[0]);
+      }
+      let count = 0;
+      const moveTree = (from, to) => {
+        for (const name of fs.readdirSync(from)) {
+          const a = path.join(from, name);
+          const b = path.join(to, name);
+          if (fs.statSync(a).isDirectory()) {
+            fs.mkdirSync(b, { recursive: true });
+            moveTree(a, b);
+          } else {
+            fs.copyFileSync(a, b);
+            count += 1;
+          }
+        }
+      };
+      moveTree(src, target);
+      return { ok: true, repo: full, branch: br, dir: target, files: count, command: guessCommand(target) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    } finally {
+      try { fs.rmSync(tmpZip, { force: true }); } catch { /* не критично */ }
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* не критично */ }
+    }
+  });
+
   ipcMain.handle('gh:repos', async (_e, query) => github.listRepos(accountToken(), query));
   ipcMain.handle('gh:createRepo', async (_e, name, isPrivate) => github.createRepo(accountToken(), name, isPrivate !== false));
   ipcMain.handle('gh:check', async (_e, id) => {

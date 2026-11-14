@@ -190,27 +190,16 @@ async function search(root, query, limit = 60) {
 /* ───────────── server.properties ───────────── */
 
 /** Поля, которые правим из панели: ключ → как разбирать. */
-const PROP_FIELDS = {
-  motd: 'string',
-  'online-mode': 'bool',
-  'max-players': 'number',
-  'server-port': 'number',
-  difficulty: 'string',
-  gamemode: 'string',
-  'pvp': 'bool',
-  'allow-flight': 'bool',
-  'allow-nether': 'bool',
-  'white-list': 'bool',
-  'hardcore': 'bool',
-  'enable-command-block': 'bool',
-  'view-distance': 'number',
-  'simulation-distance': 'number',
-  'spawn-protection': 'number',
-  'level-name': 'string',
-  'level-seed': 'string',
-  'enforce-whitelist': 'bool',
-  'player-idle-timeout': 'number',
-};
+/* Типы полей берём из общей схемы (ui/props-schema.js) — она же рисует окно настроек. */
+const PROP_SCHEMA = require('../ui/props-schema');
+
+const PROP_FIELDS = {};
+for (const p of PROP_SCHEMA.props) {
+  PROP_FIELDS[p.key] = p.type === 'bool' ? 'bool' : p.type === 'num' ? 'number' : 'string';
+}
+
+/* Свои ключи (плагины, моды) тоже можно писать, если имя безопасное. */
+const EXTRA_KEY = /^[A-Za-z0-9._-]{1,120}$/;
 
 function propFile(root) {
   return path.join(resolveSafe(root, 'server.properties'));
@@ -240,7 +229,14 @@ async function readServerProperties(root) {
     else if (type === 'number') out[key] = raw == null || raw.trim() === '' ? null : Number(raw);
     else out[key] = raw == null ? null : decodePropsText(raw);
   }
-  return { exists: fs.existsSync(file), path: 'server.properties', props: out };
+  /* ключи, которых нет в схеме (плагины, моды) — отдельно, чтобы их тоже можно было править */
+  const other = {};
+  for (const [key, raw] of Object.entries(map)) {
+    if (key in PROP_FIELDS) continue;
+    if (!EXTRA_KEY.test(key)) continue;
+    other[key] = decodePropsText(raw);
+  }
+  return { exists: fs.existsSync(file), path: 'server.properties', props: out, other };
 }
 
 /** Кириллицу в server.properties пишем как \uXXXX (так делают все версии Minecraft). */
@@ -283,7 +279,7 @@ async function writeServerProperties(root, patch = {}) {
   }
   // то, чего в файле не было, дописываем в конец
   for (const [key, value] of Object.entries(patch)) {
-    if (!(key in PROP_FIELDS)) continue;         // чужие ключи не трогаем
+    if (!(key in PROP_FIELDS) && !EXTRA_KEY.test(key)) continue;   // чужие и подозрительные ключи не трогаем
     if (known.has(key)) continue;
     lines.push(`${key}=${encode(key, value)}`);
   }

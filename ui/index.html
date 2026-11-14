@@ -31,6 +31,23 @@
     </div>
   </header>
 
+  <!-- ───────────── полоса полного экрана (F11): слева иконка, по центру состояние, справа кнопки ───────────── -->
+  <div class="fsbar">
+    <div class="fsb-left"><img src="../assets/icon.png" alt="" width="18" height="18" /></div>
+    <div class="fsb-center"><span id="fsbText">OmniPanel</span></div>
+    <div class="fsb-right">
+      <button id="fsbSettings" class="fsb-btn" aria-label="Настройки">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+      </button>
+      <button id="fsbMin" class="fsb-btn" aria-label="Свернуть">
+        <svg width="13" height="13" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </button>
+      <button id="fsbExit" class="fsb-btn" aria-label="Выйти из полного экрана">
+        <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 1.6H1.6v3M7.4 10.4h3v-3M1.9 1.9l3 3M10.1 10.1l-3-3"/></svg>
+      </button>
+    </div>
+  </div>
+
   <div class="app-body">
 
   <!-- ───────────── сайдбар ───────────── -->
@@ -332,6 +349,49 @@
       <button id="modalClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </header>
     <div class="modal-body">
+      <div class="seg" id="addMode">
+        <button class="seg-btn active" data-mode="local">Локальный</button>
+        <button class="seg-btn" data-mode="gh">Из GitHub</button>
+      </div>
+
+      <!-- ── добавление готового сервера из репозитория ── -->
+      <div id="ghAdd" class="gh-add hidden">
+        <div class="seg seg-sub" id="ghAddSrc">
+          <button class="seg-btn active" data-src="account">Мой аккаунт</button>
+          <button class="seg-btn" data-src="token">По токену</button>
+        </div>
+
+        <div id="ghAddTokenRow" class="row hidden" style="gap:6px">
+          <input id="ghAddToken" type="password" class="mini-input" placeholder="ghp_… (токен GitHub)" spellcheck="false" autocomplete="off" />
+          <button id="ghAddTokenApply" class="btn btn-mini">Подключить</button>
+        </div>
+
+        <div id="ghAddAccount" class="gh-add-acc">
+          <div class="row" style="gap:6px">
+            <input id="ghAddSearch" type="text" class="mini-input" placeholder="поиск репозитория" spellcheck="false" />
+            <button id="ghAddReload" class="btn btn-mini">Обновить</button>
+          </div>
+          <div id="ghAddRepos" class="gh-repos"></div>
+        </div>
+
+        <div class="row-2">
+          <label class="mini-field">Ветка
+            <input id="ghAddBranch" type="text" class="mini-input" placeholder="main" spellcheck="false" />
+          </label>
+          <label class="mini-field">Куда скачать
+            <div class="row" style="gap:6px">
+              <input id="ghAddDir" type="text" class="mini-input" placeholder="C:\Servers" spellcheck="false" />
+              <button id="ghAddDirPick" class="btn btn-mini">обзор…</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="row" style="gap:8px;align-items:center">
+          <button id="ghAddDownload" class="btn btn-primary btn-mini">Скачать сервер</button>
+          <span id="ghAddState" class="wall-name">репозиторий не выбран</span>
+        </div>
+      </div>
+
       <label class="field">
         <span class="lbl">Название</span>
         <input id="f_name" type="text" placeholder="Minecraft 1.20.4" />
@@ -400,10 +460,11 @@
       </label>
 
       <div class="field">
-        <span class="lbl">server.properties</span>
+        <span class="lbl">server.properties <em>(главное)</em></span>
         <div class="props-box">
           <div class="props-head">
             <span id="propsState" class="fm-badge">—</span>
+            <button id="propsAll" class="btn btn-mini">Все настройки…</button>
             <button id="propsReload" class="btn btn-mini">Перечитать</button>
           </div>
           <div class="props-grid">
@@ -746,6 +807,31 @@
 </div>
 
 <!-- ───────────── настройки панели ───────────── -->
+<div id="propsModal" class="modal hidden">
+  <div class="modal-box props-full">
+    <header class="modal-head">
+      <h2>server.properties — все настройки</h2>
+      <button id="propsModalClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="props-full-body">
+      <aside class="props-nav">
+        <input id="propsSearch" type="text" class="mini-input" placeholder="поиск настройки" spellcheck="false" />
+        <div id="propsGroups" class="props-groups"></div>
+      </aside>
+      <div class="props-scroll">
+        <div id="propsFields" class="props-fields"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <span id="propsFullState" class="wall-name">—</span>
+      <div class="spacer"></div>
+      <button id="propsFullDefaults" class="btn btn-ghost">Значения по умолчанию</button>
+      <button id="propsFullCancel" class="btn btn-ghost">Отмена</button>
+      <button id="propsFullSave" class="btn btn-primary">Сохранить</button>
+    </footer>
+  </div>
+</div>
+
 <div id="prefsModal" class="modal hidden">
   <div class="modal-box prefs-box">
     <header class="modal-head">
@@ -918,9 +1004,39 @@
               </div>
               <button id="ghLogout" class="btn btn-mini btn-ghost hidden">Выйти</button>
             </div>
-            <div id="ghLoginRow" class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
-              <input id="ghToken" type="password" class="mini-input" placeholder="ghp_… (токен)" spellcheck="false" autocomplete="off" />
-              <button id="ghLogin" class="btn btn-mini btn-primary">Войти</button>
+            <div id="ghLoginRow" class="gh-login">
+              <button id="ghDeviceBtn" class="btn btn-primary">Войти через GitHub</button>
+
+              <div id="ghDeviceBox" class="gh-device hidden">
+                <div class="gh-device-code">
+                  <span>Код для входа</span>
+                  <b id="ghDeviceCode">————</b>
+                </div>
+                <div class="gh-device-actions">
+                  <button id="ghDeviceOpen" class="btn btn-mini">Открыть github.com/login/device</button>
+                  <button id="ghDeviceCopy" class="btn btn-mini btn-ghost">Скопировать код</button>
+                  <button id="ghDeviceStop" class="btn btn-mini btn-ghost">Отмена</button>
+                </div>
+                <div id="ghDeviceState" class="wall-name">ждём подтверждения на GitHub…</div>
+              </div>
+
+              <div id="ghClientIdBox" class="gh-client">
+                <div class="gh-client-steps">
+                  Один раз: GitHub → Settings → Developer settings → OAuth Apps → New OAuth App,
+                  поставь галочку «Enable Device Flow», скопируй Client ID и вставь сюда.
+                </div>
+                <div class="row" style="gap:6px">
+                  <input id="ghClientId" type="text" class="mini-input" placeholder="Client ID твоего OAuth App" spellcheck="false" autocomplete="off" />
+                  <button id="ghClientSave" class="btn btn-mini">Сохранить</button>
+                  <button id="ghClientMake" class="btn btn-mini btn-ghost">Создать OAuth App</button>
+                </div>
+              </div>
+
+              <button id="ghTokenToggle" class="btn btn-mini btn-ghost">Вход по токену</button>
+              <div id="ghTokenRow" class="row hidden" style="gap:6px">
+                <input id="ghToken" type="password" class="mini-input" placeholder="ghp_… (токен)" spellcheck="false" autocomplete="off" />
+                <button id="ghLogin" class="btn btn-mini">Войти</button>
+              </div>
             </div>
           </div>
 
@@ -1011,6 +1127,7 @@
 
 <div id="toasts" class="notif-stack"></div>
 <script src="icons.js"></script>
+<script src="props-schema.js"></script>
 <script src="mythic.js"></script>
 <script src="app.js"></script>
 </body>

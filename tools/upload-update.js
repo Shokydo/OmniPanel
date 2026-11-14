@@ -9,7 +9,7 @@
  *   --token ghp_…                  (если не указан — берётся из настроек панели)
  *   --dir   папка с update.json    (по умолчанию папка, где лежит этот скрипт)
  *   --notes "что нового"
- *   --full  путь к OmniPanel-win64.zip  (приложить к релизу; ищется рядом автоматически)
+ *   --full  путь к OmniPanel-win64.zip  (нужен только для контрольной суммы; в релиз не попадает)
  *   --no-release                   не создавать релиз, только файлы в репозиторий
  *   --dry                          показать, что будет сделано, ничего не отправляя
  *
@@ -305,17 +305,18 @@ async function main() {
     console.log(`   ${rel.created ? 'создан' : 'уже был'} релиз ${rel.tag}`);
     if (setupFile) {
       console.log('\n3/4 установщик к релизу…');
-      const setupName = `OmniPanel-Setup-${version}.exe`;
+      const setupName = `OmniPanel_setup-${version}.exe`;
       asset = await uploadAsset(token, repo, rel.release, setupFile, setupName);
       console.log(`   загружено ${asset.name} (${(asset.size / 1048576).toFixed(1)} МБ)`);
     }
-    if (fullFile) {
-      console.log('\n4/4 полная сборка к релизу…');
-      const fullAsset = await uploadAsset(token, repo, rel.release, fullFile, 'OmniPanel-win64.zip');
-      console.log(`   загружено ${fullAsset.name} (${(fullAsset.size / 1048576).toFixed(1)} МБ)`);
+    // в релизе оставляем только установщик — архив сборки больше не прикладываем
+    const strays = (rel.release.assets || []).filter((a) => /win64\.zip$/i.test(a.name));
+    for (const a of strays) {
+      await api(token, `/repos/${repo}/releases/assets/${a.id}`, { method: 'DELETE' });
+      console.log(`   убран лишний файл ${a.name}`);
     }
-    if (!setupFile && !fullFile) {
-      console.log('\n3/3 ни установщик, ни сборка не найдены — панель обновится только кодом');
+    if (!setupFile) {
+      console.log('\n3/3 установщик не найден — в релизе будет только код');
     }
   }
 

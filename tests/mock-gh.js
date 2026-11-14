@@ -27,6 +27,21 @@ function makeServer(repoFull = 'o/r') {
       const r = store.repos.find((x) => x.full_name === m[1]);
       return r ? send(200, r) : send(404, { message: 'Not Found' });
     }
+    /* архив ветки — как у GitHub: внутри одна папка «владелец-репозиторий-хеш» */
+    if ((m = /^\/repos\/([^/]+\/[^/]+)\/zipball\/(.+)$/.exec(p)) && req.method === 'GET') {
+      const zipLib = require('../core/zip');
+      const root = `${m[1].replace('/', '-')}-${String(m[2]).slice(0, 7)}`;
+      const entries = [
+        { name: `${root}/server.jar`, data: Buffer.from('JAR') },
+        { name: `${root}/server.properties`, data: Buffer.from('motd=Из репозитория\nmax-players=12\n') },
+        { name: `${root}/world/level.dat`, data: Buffer.from('LEVEL') },
+        { name: `${root}/plugins/MyPlugin/config.yml`, data: Buffer.from('enabled: true\n') },
+      ];
+      const buf = zipLib.create(entries);
+      res.writeHead(200, { 'content-type': 'application/zip', 'content-length': buf.length });
+      res.end(buf);
+      return;
+    }
     if ((m = /^\/repos\/([^/]+\/[^/]+)\/git\/ref\/heads\/(.+)$/.exec(p)) && req.method === 'GET') {
       const s = store.refs.get(decodeURIComponent(m[2]));
       return s ? send(200, { object: { sha: s } }) : send(404, { message: 'Not Found' });
