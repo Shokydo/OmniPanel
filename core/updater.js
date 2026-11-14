@@ -314,6 +314,14 @@ async function check(opts = {}) {
      raw.githubusercontent отдаёт до пяти минут прошлую версию, поэтому он — последний. */
   const codeList = [rel, man].filter(Boolean).map((f) => f.code).filter(Boolean);
   const code = codeList.find((c) => !/raw\.githubusercontent\.com/i.test(c.url)) || codeList[0] || null;
+  /* у ассетов релиза GitHub не отдаёт контрольную сумму — берём её из update.json
+     той же версии, чтобы скачанное всё равно проверялось */
+  if (code && !code.sha256) {
+    const withSha = found
+      .filter((f) => compareVersions(f.version, latest.version) === 0 && f.code && f.code.sha256)
+      .map((f) => f.code)[0];
+    if (withSha) code.sha256 = withSha.sha256;
+  }
   const full = latest.full || (found.find((f) => f.full) || {}).full || null;
   const setup = latest.setup || (found.find((f) => f.setup) || {}).setup || null;
 

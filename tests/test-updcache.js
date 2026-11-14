@@ -89,12 +89,23 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
       return res.end(body);
     }
-    if (req.url.startsWith('/api/repos/u/r/releases/latest')) return json({ message: 'Not Found' });
+    // релиз: архив кода лежит ассетом, контрольной суммы GitHub не отдаёт
+    if (req.url.startsWith('/api/repos/u/r/releases/latest')) {
+      return json({
+        tag_name: 'v1.19.3',
+        body: 'новая',
+        assets: [{ name: 'OmniPanel-code.zip', size: FRESH.length, browser_download_url: `http://127.0.0.1:${gh.address().port}/asset/OmniPanel-code.zip` }],
+      });
+    }
     // raw «закэширован»: отдаёт прошлую версию, параметр в адресе игнорирует
     if (req.url.startsWith('/raw/u/r/main/update.json')) return json(OLDVER);
     // API-ссылка на архив кода: отдаём файл только с правильным Accept
     if (req.url.startsWith('/api/repos/u/r/contents/dist/OmniPanel-code.zip')) {
       if (!/application\/vnd\.github\.raw/.test(String(req.headers.accept))) return json({ message: 'нужен Accept' });
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': FRESH.length });
+      return res.end(FRESH);
+    }
+    if (req.url.startsWith('/asset/OmniPanel-code.zip')) {
       res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': FRESH.length });
       return res.end(FRESH);
     }
@@ -108,10 +119,10 @@ const server = http.createServer((req, res) => {
 
   const info = await updater.check({ repo: 'u/r', current: '1.19.0' });
   ok(info.ok && info.latest === '1.19.3', 'версия берётся из API, а не из кэша raw', info.latest);
-  ok(/\/api\//.test(info.code.url || ''), 'ссылка на архив ведёт в API, а не в raw-кэш', (info.code.url || '').slice(0, 60));
-  ok(!!info.code.accept, 'ссылке нужен заголовок Accept', info.code.accept);
-  const fresh = await updater.downloadChecked(info.code.url, dest, { sha256: info.code.sha256, accept: info.code.accept });
-  ok(fresh.attempts === 1 && fs.readFileSync(dest).equals(FRESH), 'архив скачался свежим с первой попытки');
+  ok(/\/asset\/OmniPanel-code\.zip$/.test(info.code.url || ''), 'установка берёт архив из релиза, а не из raw-кэша', info.code.url);
+  ok(info.code.sha256 === sha(FRESH), 'контрольная сумма взята из update.json', (info.code.sha256 || '').slice(0, 12));
+  const fresh = await updater.downloadChecked(info.code.url, dest, { sha256: info.code.sha256 });
+  ok(fresh.attempts === 1 && fs.readFileSync(dest).equals(FRESH), 'архив скачался свежим и проверенным с первой попытки');
   gh.close();
 
   server.close();
