@@ -10,8 +10,43 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
+const https = require('https');
 
-const INSTALLER = '/home/user/OmniPanel-Установка-1.11.1.exe';
+// версию в канале не зашиваем — спрашиваем у самого GitHub
+function channelVersion(repo, branch = 'main') {
+  const url = `https://raw.githubusercontent.com/${repo}/${branch}/update.json`;
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'OmniPanel-test' } }, (res) => {
+      if (res.statusCode !== 200) { reject(new Error('update.json: ' + res.statusCode)); return; }
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        try { resolve(String(JSON.parse(body).version || '').trim()); } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+// установщик ищем сами: берём самый свежий OmniPanel-Установка-<версия>.exe рядом с репозиторием
+function findInstaller() {
+  const dirs = ['/home/user', path.join(__dirname, '..'), path.join(__dirname, '..', 'installer')];
+  const found = [];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      const m = name.match(/^OmniPanel[-_ ]?(Установка|Setup)[-_ ]?(\d+\.\d+\.\d+)\.exe$/i);
+      if (m) found.push({ file: path.join(dir, name), ver: m[2] });
+    }
+  }
+  found.sort((a, b) => a.ver.localeCompare(b.ver, undefined, { numeric: true }));
+  return found.length ? found[found.length - 1].file : null;
+}
+const INSTALLER = findInstaller();
+if (!INSTALLER) {
+  console.log('НЕ НАЙДЕН УСТАНОВЩИК OmniPanel-Установка-<версия>.exe — собери его: installer/build-all.sh <версия>');
+  process.exit(2);
+}
+console.log('=== УСТАНОВЩИК: ' + path.basename(INSTALLER) + ' ===');
 const ROOT = path.join(os.tmpdir(), 'omni-real');
 const APP = path.join(ROOT, 'OmniPanel');           // как после установщика
 const DATA = path.join(APP, 'OmniPanelData');
@@ -75,7 +110,10 @@ const beforeServers = fs.readFileSync(path.join(DATA, 'servers.json'), 'utf8');
   await page.waitForSelector('.profile-name');
   await page.waitForTimeout(1000);
 
-  console.log(`=== ПАНЕЛЬ ${hadVersion} ВНУТРИ «УСТАНОВЛЕННОЙ» ПАПКИ ===`);
+  const NEWVER = await channelVersion(REPO);
+  ok(!!NEWVER, 'канал отдаёт update.json', 'версия в канале: ' + NEWVER);
+
+  console.log(`\n=== ПАНЕЛЬ ${hadVersion} ВНУТРИ «УСТАНОВЛЕННОЙ» ПАПКИ ===`);
   ok(fs.readFileSync(appPkg, 'utf8').includes('"1.11.0"'), 'стартовая версия 1.11.0');
   const serversOnScreen = await page.$$eval('#serverList .srv', (els) => els.length);
   ok(serversOnScreen === 2, 'панель видит два сервера', 'серверов: ' + serversOnScreen);
@@ -91,7 +129,7 @@ const beforeServers = fs.readFileSync(path.join(DATA, 'servers.json'), 'utf8');
   await page.click('#updCheckBtn');
   await page.waitForTimeout(4000);
   const state = await page.$eval('#updState', (e) => e.textContent.trim());
-  ok(state.includes('1.11.1'), 'GitHub отдал новую версию', state);
+  ok(state.includes(NEWVER), 'GitHub отдал новую версию', state);
   const applyDisabled = await page.$eval('#updApplyBtn', (e) => e.disabled);
   ok(!applyDisabled, 'кнопка «Обновить и перезапустить» доступна');
   const fullDisabled = await page.$eval('#updFullBtn', (e) => e.disabled);
@@ -103,7 +141,8 @@ const beforeServers = fs.readFileSync(path.join(DATA, 'servers.json'), 'utf8');
   await page.click('#updApplyBtn').catch(() => {});
   await sleep(6000);
 
-  ok(JSON.parse(fs.readFileSync(appPkg, 'utf8')).version === '1.11.1', 'версия панели стала 1.11.1');
+  const afterVer = JSON.parse(fs.readFileSync(appPkg, 'utf8')).version;
+  ok(afterVer === NEWVER, 'версия панели стала ' + NEWVER, afterVer);
   ok(fs.existsSync(path.join(APP, 'resources/app/core/updater.js')), 'код на месте');
   ok(fs.readFileSync(path.join(DATA, 'servers.json'), 'utf8') === beforeServers, 'список серверов не изменился');
   ok(fs.readFileSync(path.join(DATA, 'Local Storage/prefs'), 'utf8') === prefsValue, 'оформление (тема, фон, масштаб) цело');

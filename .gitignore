@@ -1,7 +1,9 @@
 node_modules/
 OmniPanelData/
 data/
-dist/
+# в репозитории из dist/ нужен только архив канала обновлений
+dist/*
+!dist/OmniPanel-code.zip
 build/
 release/
 installer/build-setup.exe
