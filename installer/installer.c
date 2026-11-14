@@ -30,7 +30,7 @@
 #define APP_EXE "OmniPanel.exe"
 #define UPDATE_REPO "Shokydo/OmniPanel"
 #define UPDATE_BRANCH "main"
-#define APP_VERSION "1.13.0"
+#define APP_VERSION "1.14.0"
 
 /* ─────────────────────────── переносимое: полезная нагрузка ─────────────────────────── */
 
@@ -86,6 +86,8 @@ static int payload_write(const char *self, const char *dest, long *written) {
 #include <windows.h>
 #include <windowsx.h>
 #include <shlobj.h>
+#include <shobjidl.h>
+#include <ole2.h>
 
 /* ── оформление в духе консоли ── */
 #define BG_COLOR      RGB(10, 10, 10)
@@ -109,7 +111,7 @@ static int payload_write(const char *self, const char *dest, long *written) {
 #define PROGRESS_H  6
 
 enum { ST_WELCOME = 1, ST_ALREADY, ST_INSTALLING, ST_QUESTION, ST_DONE, ST_ERROR };
-enum { B_INSTALL = 1, B_CANCEL, B_RUN, B_REINSTALL, B_CLOSE, B_OPEN, B_MOVE, B_FRESH };
+enum { B_INSTALL = 1, B_CANCEL, B_RUN, B_REINSTALL, B_CLOSE, B_OPEN, B_MOVE, B_FRESH, B_PATH };
 
 #define WM_APP_LOG   (WM_APP + 1)
 #define WM_APP_STATE (WM_APP + 2)
@@ -132,6 +134,7 @@ static Btn g_btn[MAX_BTN];
 static HANDLE g_evtAnswer;
 static int g_answer;
 static int g_started;            /* установка уже запускалась в этом окне */
+static int g_force;              /* --reinstall: ставим даже если панель уже есть */
 
 static char g_self[MAX_PATH];
 static char g_base[MAX_PATH];
@@ -146,6 +149,13 @@ static int S(int v) { return (int)((double)v * g_scale + 0.5); }
 static void to_wide(const char *s, wchar_t *out, int n) {
   if (n <= 0) return;
   int got = MultiByteToWideChar(CP_UTF8, 0, s, -1, out, n);
+  if (got <= 0) { out[0] = 0; return; }
+  out[n - 1] = 0;
+}
+
+static void to_utf8(const wchar_t *w, char *out, int n) {
+  if (n <= 0) return;
+  int got = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL);
   if (got <= 0) { out[0] = 0; return; }
   out[n - 1] = 0;
 }
@@ -180,6 +190,124 @@ static int make_dir(const char *path) {
   if (CreateDirectoryA(path, NULL)) return 0;
   return 1;
 }
+
+/* ── выбранный путь установки запоминается между запусками ── */
+
+static void setup_state_file(char *out, size_t n) {
+  char base[MAX_PATH], dir[MAX_PATH];
+  out[0] = 0;
+  if (local_appdata(base, sizeof(base)) != 0) return;
+  path_join(dir, sizeof(dir), base, "OmniPanel-setup");
+  make_dir(dir);
+  path_join(out, n, dir, "install-path.txt");
+}
+
+static int remember_load(char *out, size_t n) {
+  char file[MAX_PATH];
+  setup_state_file(file, sizeof(file));
+  if (!file[0] || !file_exists(file)) return 1;
+  FILE *f = fopen(file, "rb");
+  if (!f) return 1;
+  char buf[MAX_PATH];
+  size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  buf[got] = 0;
+  while (got > 0 && (buf[got - 1] == '\n' || buf[got - 1] == '\r' || buf[got - 1] == ' ')) buf[--got] = 0;
+  if (!buf[0]) return 1;
+  snprintf(out, n, "%s", buf);
+  return 0;
+}
+
+static void remember_save(const char *dir) {
+  char file[MAX_PATH];
+  setup_state_file(file, sizeof(file));
+  if (!file[0]) return;
+  FILE *f = fopen(file, "wb");
+  if (!f) return;
+  fprintf(f, "%s\n", dir);
+  fclose(f);
+}
+
+/* Дописывает подпапку OmniPanel, если её ещё нет в конце пути. */
+static void with_app_folder(const char *chosen, char *out, size_t n) {
+  const char *tail = strrchr(chosen, '\\');
+  tail = tail ? tail + 1 : chosen;
+  if (_stricmp(tail, APP_FOLDER) == 0) {
+    snprintf(out, n, "%s", chosen);                 /* уже папка OmniPanel — ставим прямо в неё */
+    return;
+  }
+  size_t len = strlen(chosen);
+  if (len && chosen[len - 1] == '\\') snprintf(out, n, "%s%s", chosen, APP_FOLDER);
+  else snprintf(out, n, "%s\\%s", chosen, APP_FOLDER);
+}
+
+/* Системный диалог «выбери папку»: современный (Unicode), с запасным старым. */
+static int pick_folder(char *out, size_t n) {
+  static const CLSID clsid_file_open_dialog =
+    { 0xDC1C5A9C, 0xE88A, 0x4DDE, { 0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7 } };
+  static const IID iid_file_open_dialog =
+    { 0xD57C7288, 0xD4AD, 0x4768, { 0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60 } };
+
+  IFileOpenDialog *dlg = NULL;
+  if (SUCCEEDED(CoCreateInstance(&clsid_file_open_dialog, NULL, CLSCTX_INPROC_SERVER,
+                                 &iid_file_open_dialog, (void **)&dlg)) && dlg) {
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->lpVtbl->GetOptions(dlg, &opts))) {
+      dlg->lpVtbl->SetOptions(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                                    FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    }
+    wchar_t title[160];
+    MultiByteToWideChar(CP_UTF8, 0, "Куда установить OmniPanel — выбери папку", -1, title, 160);
+    dlg->lpVtbl->SetTitle(dlg, title);
+    dlg->lpVtbl->SetOkButtonLabel(dlg, L"Установить сюда");
+
+    HRESULT hr = dlg->lpVtbl->Show(dlg, g_wnd);
+    if (SUCCEEDED(hr)) {
+      IShellItem *item = NULL;
+      if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &item)) && item) {
+        PWSTR wpath = NULL;
+        if (SUCCEEDED(item->lpVtbl->GetDisplayName(item, SIGDN_FILESYSPATH, &wpath)) && wpath) {
+          char chosen[MAX_PATH];
+          to_utf8(wpath, chosen, sizeof(chosen));
+          CoTaskMemFree(wpath);
+          item->lpVtbl->Release(item);
+          dlg->lpVtbl->Release(dlg);
+          if (chosen[0]) { with_app_folder(chosen, out, n); return 0; }
+          return 1;
+        }
+        item->lpVtbl->Release(item);
+      }
+    }
+    dlg->lpVtbl->Release(dlg);
+    return 1;                       /* отмена — путь не меняем */
+  }
+
+  /* запасной путь для очень старых систем */
+  BROWSEINFOA bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.hwndOwner = g_wnd;
+  PCSTR title_a = "Куда установить OmniPanel - выбери папку";
+  bi.lpszTitle = title_a;
+  bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+  LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+  if (!pidl) return 1;
+  char path[MAX_PATH];
+  int got = SHGetPathFromIDListA(pidl, path);
+  CoTaskMemFree(pidl);
+  if (!got || !path[0]) return 1;
+  with_app_folder(path, out, n);
+  return 0;
+}
+
+/* Путь, где нужны права администратора — предупреждаем заранее. */
+static int needs_admin(const char *dir) {
+  const char *keys[] = { "\\Program Files", "\\Program Files (x86)", "\\Windows" };
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i += 1) {
+    if (strstr(dir, keys[i]) != NULL) return 1;
+  }
+  return 0;
+}
+
 
 static int run_wait(const char *cmdline, int hidden) {
   STARTUPINFOA si;
@@ -418,6 +546,8 @@ static DWORD WINAPI install_thread(LPVOID unused) {
 
   ui_log("");
   ui_log(" === установка ==================================================");
+  remember_save(install);          /* следующий запуск откроет эту же папку */
+  ui_log("  Куда: %s", install);
   ui_progress(1);
 
   long offset = 0, length = 0;
@@ -455,20 +585,19 @@ static DWORD WINAPI install_thread(LPVOID unused) {
   make_dir(install);
 
   ui_log("  Распаковываю панель в %s", install);
-  if (extract_zip(tempzip, install) != 0) {
-    ui_log("");
-    ui_log("  ! Не удалось распаковать архив.");
-    ui_log("    Открой вручную: %s  →  распакуй в  %s", tempzip, install);
-    ui_progress(-1);
-    PostMessageA(g_wnd, WM_APP_STATE, ST_ERROR, 0);
-    return 0;
-  }
-  DeleteFileA(tempzip);
-  ui_log("    готово");
-  ui_progress(55);
+  int unpacked = (extract_zip(tempzip, install) == 0);
+  if (!unpacked) ui_log("  Первый способ не сработал — пробую второй…");
 
-  /* архив мог быть собран с верхней папкой OmniPanel — поднимаем файлы на уровень выше */
-  if (!file_exists(exe)) {
+  /* поднимаем файлы, если архив собран с верхней папкой OmniPanel */
+  for (int attempt = 0; attempt < 2 && !file_exists(exe); attempt += 1) {
+    if (attempt == 1) {
+      ui_log("  Распаковываю вторым способом…");
+      char cmd[4096];
+      snprintf(cmd, sizeof(cmd),
+               "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "
+               "\"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\"", tempzip, install);
+      run_wait(cmd, 1);
+    }
     char nested[MAX_PATH], nestedExe[MAX_PATH];
     path_join(nested, sizeof(nested), install, APP_FOLDER);
     path_join(nestedExe, sizeof(nestedExe), nested, APP_EXE);
@@ -483,10 +612,15 @@ static DWORD WINAPI install_thread(LPVOID unused) {
       run_wait(cmd, 1);
     }
   }
+  DeleteFileA(tempzip);
 
-  if (!file_exists(exe)) {
+  if (file_exists(exe)) {
+    ui_log("    готово");
+  } else {
     ui_log("");
-    ui_log("  ! Панель распаковалась, но %s не найден в %s", APP_EXE, install);
+    ui_log("  ! Панель распаковалась, но OmniPanel.exe не найден.");
+    ui_log("    Папка: %s", install);
+    ui_log("    Проверь, что места на диске хватает и папка не защищена.");
     ui_progress(-1);
     PostMessageA(g_wnd, WM_APP_STATE, ST_ERROR, 0);
     return 0;
@@ -563,10 +697,12 @@ static void apply_state(int state) {
   memset(list, 0, sizeof(list));
 
   if (state == ST_WELCOME) {
-    list[n].id = B_INSTALL; snprintf(list[n].label, sizeof(list[n].label), "Установить"); list[n].enabled = 1; n += 1;
-    list[n].id = B_CANCEL;  snprintf(list[n].label, sizeof(list[n].label), "Отмена");     list[n].enabled = 1; n += 1;
+    list[n].id = B_INSTALL; snprintf(list[n].label, sizeof(list[n].label), "Установить");        list[n].enabled = 1; n += 1;
+    list[n].id = B_PATH;    snprintf(list[n].label, sizeof(list[n].label), "Изменить путь…");   list[n].enabled = 1; n += 1;
+    list[n].id = B_CANCEL;  snprintf(list[n].label, sizeof(list[n].label), "Отмена");            list[n].enabled = 1; n += 1;
   } else if (state == ST_ALREADY) {
     list[n].id = B_RUN;       snprintf(list[n].label, sizeof(list[n].label), "Запустить панель"); list[n].enabled = 1; n += 1;
+    list[n].id = B_PATH;      snprintf(list[n].label, sizeof(list[n].label), "Изменить путь…");  list[n].enabled = 1; n += 1;
     list[n].id = B_REINSTALL; snprintf(list[n].label, sizeof(list[n].label), "Переустановить");   list[n].enabled = 1; n += 1;
     list[n].id = B_CLOSE;     snprintf(list[n].label, sizeof(list[n].label), "Закрыть");          list[n].enabled = 1; n += 1;
   } else if (state == ST_INSTALLING) {
@@ -586,6 +722,30 @@ static void apply_state(int state) {
   set_buttons(list, n);
   layout_buttons();
   InvalidateRect(g_wnd, NULL, TRUE);
+}
+
+static void welcome_lines(int already);
+
+static void reset_log(void) {
+  EnterCriticalSection(&g_lock);
+  g_lineCount = 0;
+  LeaveCriticalSection(&g_lock);
+}
+
+/* Перерисовать стартовый экран под текущий путь (он же после смены папки). */
+static void show_start_screen(void) {
+  reset_log();
+  int already = !g_force && file_exists(g_exe);
+  welcome_lines(already);
+  apply_state(already ? ST_ALREADY : ST_WELCOME);
+  InvalidateRect(g_wnd, NULL, TRUE);
+}
+
+/* Запомнить выбранный путь и обновить окно под него. */
+static void set_install_dir(const char *dir) {
+  snprintf(g_install, sizeof(g_install), "%s", dir);
+  path_join(g_exe, sizeof(g_exe), g_install, APP_EXE);
+  g_started = 0;
 }
 
 static void start_install(void) {
@@ -624,6 +784,15 @@ static void on_button(int id) {
     case B_OPEN:
       open_install_folder();
       break;
+    case B_PATH: {
+      char picked[MAX_PATH];
+      if (pick_folder(picked, sizeof(picked)) == 0) {
+        set_install_dir(picked);
+        g_force = 0;
+        show_start_screen();
+      }
+      break;
+    }
     case B_MOVE:
       g_answer = 1;
       apply_state(ST_INSTALLING);
@@ -884,7 +1053,16 @@ static void welcome_lines(int already) {
   ui_log("  Версия:            %s", g_version);
   ui_log("  Куда установится:  %s", g_install);
   ui_log("  Внутри:            панель целиком, ничего скачивать не нужно");
+  if (needs_admin(g_install)) {
+    ui_log("");
+    ui_log("  ! В этой папке нужны права администратора.");
+    ui_log("    Лучше выбрать другую — кнопка «Изменить путь…».");
+  }
   ui_log("");
+  if (!already) {
+    ui_log("  Папку можно поменять: «Изменить путь…» внизу окна.");
+    ui_log("");
+  }
   if (already) {
     ui_log("  В этой папке панель уже стоит.");
     ui_log("  «Запустить панель» — открыть установленную версию.");
@@ -922,10 +1100,35 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show) {
   path_join(g_install, sizeof(g_install), g_base, APP_FOLDER);
   path_join(g_exe, sizeof(g_exe), g_install, APP_EXE);
 
-  int force = 0;
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+  /* путь: по умолчанию %LOCALAPPDATA%\OmniPanel, иначе запомненный или --dir */
+  {
+    char remembered[MAX_PATH];
+    if (remember_load(remembered, sizeof(remembered)) == 0) set_install_dir(remembered);
+  }
+
+  /* разбор ключей: --reinstall / --переустановить, --dir "<папка>" */
   for (char *p = args; p && *p; ) {
-    if (*p == ' ') { p += 1; continue; }
-    if (strncmp(p, "--reinstall", 11) == 0 || strncmp(p, "--переустановить", 28) == 0) { force = 1; break; }
+    while (*p == ' ') p += 1;
+    if (!*p) break;
+    if (strncmp(p, "--reinstall", 11) == 0) { g_force = 1; p += 11; continue; }
+    if (strncmp(p, "--dir", 5) == 0) {
+      p += 5;
+      while (*p == ' ') p += 1;
+      char dir[MAX_PATH];
+      size_t k = 0;
+      if (*p == '"') {
+        p += 1;
+        while (*p && *p != '"' && k < sizeof(dir) - 1) dir[k++] = *p++;
+        if (*p == '"') p += 1;
+      } else {
+        while (*p && *p != ' ' && k < sizeof(dir) - 1) dir[k++] = *p++;
+      }
+      dir[k] = 0;
+      if (k) set_install_dir(dir);
+      continue;
+    }
     while (*p && *p != ' ') p += 1;
   }
 
@@ -959,9 +1162,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show) {
   SetWindowTextW(g_wnd, title);
   dark_title_bar(g_wnd);
 
-  int already = !force && file_exists(g_exe);
-  welcome_lines(already);
-  apply_state(already ? ST_ALREADY : ST_WELCOME);
+  show_start_screen();
 
   ShowWindow(g_wnd, SW_SHOW);
   UpdateWindow(g_wnd);
@@ -974,6 +1175,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show) {
 
   DeleteObject(g_font);
   DeleteCriticalSection(&g_lock);
+  CoUninitialize();
   return 0;
 }
 
