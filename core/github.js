@@ -26,6 +26,11 @@ const seven = require('./seven');
  * но читается и старый zip из прошлых версий панели.
  */
 const ARCHIVE_7Z = '.omnipanel/сервер.7z';
+const ARCHIVE_DIR = '.omnipanel';
+/* Разбивка на части: GitHub не принимает файлы больше 95 МБ, поэтому архив
+   режется на тома и каждый уезжает отдельным файлом. */
+const SPLIT_MB = Number(process.env.OMNI_SPLIT_MB) || 45;   // размер одной части архива
+const MAX_PARTS = 90;                 // ≈ 4 ГБ — дальше GitHub не тянет
 const ARCHIVE_ZIP = '.omnipanel/сервер.zip';
 const LEGACY_ARCHIVES = [ARCHIVE_7Z, ARCHIVE_ZIP];
 const MANIFEST_PATH = '.omnipanel/манифест.json';
@@ -293,81 +298,116 @@ const MB = (bytes) => (bytes / 1048576).toFixed(1);
  * проверяется один раз.
  */
 async function pushArchive(token, repo, branch, opts) {
-  const { dir, message, stateFile, onLog = () => {} } = opts;
+  const { dir, message, stateFile, onLog = () => {}, cleanup = true } = opts;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-'));
-  let info;
   try {
     const format = seven.available() ? '7z' : 'zip';
-    const archivePath = format === '7z' ? ARCHIVE_7Z : ARCHIVE_ZIP;
+    /* zip-писатель панели не умеет тома, поэтому разбивка только для 7z */
+    const volumeMb = format === '7z' ? SPLIT_MB : 0;
 
     /* ── шаг 1: архив ── */
-    onLog(`шаг 1 из 2: архивирую сервер${format === '7z' ? ' (7-Zip, максимум сжатия)' : ' (zip)'}…`);
-    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format });
-    onLog(`архив готов: ${info.name} — ${MB(info.size)} МБ из ${MB(info.raw)} МБ`
+    onLog(`шаг 1 из 2: архивирую сервер${format === '7z' ? ` (7-Zip, части по ${SPLIT_MB} МБ)` : ' (zip)'}…`);
+    const info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format, volumeMb });
+    const parts = info.file ? (info.parts && info.parts.length ? info.parts : [info.file]) : [];
+    const local = parts.map((file) => ({
+      file,
+      name: path.basename(file).replace(/^server_\d{4}-[\d-]+_\d{2}-\d{2}-\d{2}\./, 'сервер.'),
+      size: fs.statSync(file).size,
+      sha256: sha256Of(fs.readFileSync(file)),
+    }));
+    const totalSize = local.reduce((sum, p) => sum + p.size, 0);
+
+    onLog(`архив готов: ${MB(totalSize)} МБ из ${MB(info.raw)} МБ`
       + (info.ratio ? `, плотнее в ${info.ratio} раза` : '')
-      + `, файлов ${info.files}`);
+      + `, файлов ${info.files}`
+      + (local.length > 1 ? `, частей ${local.length} по ${MB(local[0].size)} МБ` : ''));
+
+    if (totalSize > HARD_LIMIT * MAX_PARTS) {
+      return {
+        ok: false,
+        error: `Сервер упакован в ${MB(totalSize)} МБ — это больше, чем GitHub готов принять `
+          + `(${MAX_PARTS} частей по ${SPLIT_MB} МБ). Убери крупные файлы из папки сервера `
+          + 'или выбери в настройках отправку по файлам.',
+      };
+    }
+    if (format !== '7z' && totalSize > HARD_LIMIT) {
+      return {
+        ok: false,
+        error: `7-Zip рядом не нашёлся, а обычный zip получился ${MB(totalSize)} МБ — GitHub не принимает `
+          + `файлы больше 95 МБ, и разрезать zip панель не умеет. Положи 7za.exe в папку assets/bin `
+          + 'рядом с панелью или выбери в настройках отправку по файлам.',
+      };
+    }
+    const oversized = local.find((p) => p.size > HARD_LIMIT);
+    if (oversized) {
+      return { ok: false, error: `Одна часть архива получилась ${MB(oversized.size)} МБ — GitHub не принимает файлы больше 95 МБ.` };
+    }
 
     const head = await getHead(token, repo, branch);
     const state = loadState(stateFile);
-    const buf = fs.readFileSync(info.file);
-    if (buf.length > HARD_LIMIT) {
-      return {
-        ok: false,
-        error: `Архив сервера получился ${(buf.length / 1048576).toFixed(0)} МБ — GitHub не принимает файлы больше 95 МБ. `
-          + 'Убери крупные файлы из папки сервера или выбери в настройках отправку по файлам.',
-      };
-    }
-    const remoteSha = head ? await shaOfPath(token, repo, head.commit, archivePath) : null;
-    const localSha = blobSha(buf);
-    if (head && remoteSha === localSha) {
-      saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [archivePath]: localSha } });
-      return {
-        ok: true, upToDate: true, commit: head.commit, uploaded: 0, removed: 0, changed: 0,
-        archive: info.name, size: buf.length, raw: info.raw, format,
-      };
+    const manifest = {
+      createdAt: new Date().toISOString(),
+      format,
+      files: info.files,
+      raw: info.raw,
+      packed: totalSize,
+      parts: local.map((p) => ({ name: p.name, size: p.size, sha256: p.sha256 })),
+      cleanup: cleanup !== false,
+    };
+
+    /* если архив побайтово тот же, что уже лежит в репозитории — отправлять нечего */
+    const remoteParts = head ? await archiveParts(token, repo, head.commit) : null;
+    const samePart = (p, i) => {
+      const mine = local[i];
+      if (p.sha256 && mine.sha256) return p.sha256 === mine.sha256;
+      return !p.size || p.size === mine.size;   // размер может быть неизвестен — не придираемся
+    };
+    if (head && remoteParts
+      && remoteParts.parts.length === local.length
+      && remoteParts.parts.every(samePart)) {
+      saveState(stateFile, {
+        commit: head.commit, branch, mode: 'archive',
+        files: Object.fromEntries(remoteParts.parts.map((p) => [p.path, p.sha])),
+      });
+      return { ok: true, upToDate: true, commit: head.commit, uploaded: 0, removed: 0, changed: 0,
+        archive: local[0].name, size: totalSize, raw: info.raw, format, parts: local.length };
     }
 
     /* ── шаг 2: отправка ── */
-    onLog(`шаг 2 из 2: отправляю архив на GitHub (${MB(buf.length)} МБ)…`);
-    const blob = await gh(token, `/repos/${repo}/git/blobs`, {
-      body: { content: buf.toString('base64'), encoding: 'base64' },
-    });
-    const manifest = Buffer.from(JSON.stringify({
-      createdAt: new Date().toISOString(),
-      format,
-      archive: info.name,
-      files: info.files,
-      raw: info.raw,
-      packed: buf.length,
-      sha256: info.sha256,
-    }, null, 1), 'utf8');
+    onLog(`шаг 2 из 2: отправляю на GitHub ${local.length > 1 ? local.length + ' частей' : 'архив'} (${MB(totalSize)} МБ)…`);
+    const entries = [];
+    for (let i = 0; i < local.length; i += 1) {
+      const part = local[i];
+      const blob = await gh(token, `/repos/${repo}/git/blobs`, {
+        body: { content: fs.readFileSync(part.file).toString('base64'), encoding: 'base64' },
+      });
+      const rel = `${ARCHIVE_DIR}/${part.name}`;
+      entries.push({ path: rel, mode: '100644', type: 'blob', sha: blob.sha });
+      if (local.length > 1) onLog(`  часть ${i + 1} из ${local.length}: ${part.name} — ${MB(part.size)} МБ`);
+    }
+    const manifestBuf = Buffer.from(JSON.stringify(manifest, null, 1), 'utf8');
     const manifestBlob = await gh(token, `/repos/${repo}/git/blobs`, {
-      body: { content: manifest.toString('base64'), encoding: 'base64' },
+      body: { content: manifestBuf.toString('base64'), encoding: 'base64' },
     });
+    entries.push({ path: MANIFEST_PATH, mode: '100644', type: 'blob', sha: manifestBlob.sha });
 
-    const entries = [
-      { path: archivePath, mode: '100644', type: 'blob', sha: blob.sha },
-      { path: MANIFEST_PATH, mode: '100644', type: 'blob', sha: manifestBlob.sha },
-    ];
-    /* прошлые поштучные файлы и архив другого формата убираем, чтобы не дублировать сервер */
+    /* убираем из репозитория то, чего в новом наборе нет: старые части, старый одиночный архив,
+       пофайловые копии из прошлых версий */
     let removed = 0;
-    const prev = (state.files || {});
-    for (const rel of Object.keys(prev)) {
-      if (rel === archivePath || rel === MANIFEST_PATH) continue;
+    const keep = new Set(entries.map((e) => e.path));
+    const stale = new Set(Object.keys(state.files || {}));
+    if (head) {
+      const tree = await getTreeOfCommit(token, repo, head.commit);
+      for (const e of tree.entries) {
+        if (e.type === 'blob' && isArchivePath(e.path)) stale.add(e.path);
+      }
+    }
+    for (const rel of stale) {
+      if (keep.has(rel)) continue;
       entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
       removed += 1;
     }
-    if (head) {
-      const remoteTree = await getTreeOfCommit(token, repo, head.commit);
-      const stale = remoteTree.entries
-        .filter((e) => e.type === 'blob' && LEGACY_ARCHIVES.includes(e.path) && e.path !== archivePath)
-        .map((e) => e.path);
-      for (const rel of stale) {
-        entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
-        removed += 1;
-        onLog(`в репозитории был архив другого формата — убираю ${rel}`);
-      }
-    }
+    if (removed) onLog(`в репозитории остались файлы прошлой отправки — убираю ${removed}`);
 
     const sendTree = async (baseTree, parent) => {
       const body = { tree: entries };
@@ -398,24 +438,74 @@ async function pushArchive(token, repo, branch, opts) {
       commit = await sendTree(t.treeSha, head.commit);
     }
 
-    saveState(stateFile, { commit: commit.sha, branch, mode: 'archive', files: { [archivePath]: localSha } });
-    onLog(`готово: архив в репозитории, коммит ${String(commit.sha).slice(0, 7)}`);
+    saveState(stateFile, {
+      commit: commit.sha, branch, mode: 'archive',
+      files: Object.fromEntries(entries.filter((e) => e.sha).map((e) => [e.path, e.sha])),
+    });
+    onLog(`готово: ${local.length > 1 ? 'части архива' : 'архив'} в репозитории, коммит ${String(commit.sha).slice(0, 7)}`);
     return {
       ok: true,
       commit: commit.sha,
-      uploaded: 1,
+      uploaded: local.length,
       removed,
       changed: 1,
-      archive: info.name,
-      archivePath,
+      archive: local[0].name,
+      archivePath: `${ARCHIVE_DIR}/${local[0].name}`,
       format,
-      size: buf.length,
+      parts: local.length,
+      size: totalSize,
       raw: info.raw,
       files: info.files,
     };
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
   }
+}
+
+/** sha256 буфера. */
+function sha256Of(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/** Это файл нашей пересылки сервера? (архив, его части, манифест) */
+function isArchivePath(rel) {
+  if (rel === MANIFEST_PATH) return true;
+  return /^\.omnipanel\/(сервер\.(7z|zip))(\.\d{3})?$/.test(rel);
+}
+
+/**
+ * Что лежит в репозитории по нашей пересылке:
+ * части архива (отсортированы), манифест, суммарный размер.
+ */
+async function archiveParts(token, repo, commitSha) {
+  const { entries } = await getTreeOfCommit(token, repo, commitSha);
+  const blobs = entries.filter((e) => e.type === 'blob' && isArchivePath(e.path));
+  if (!blobs.length) return null;
+
+  let manifest = null;
+  const manEntry = blobs.find((e) => e.path === MANIFEST_PATH);
+  if (manEntry) {
+    try {
+      manifest = JSON.parse((await downloadBlob(token, repo, manEntry.sha)).toString('utf8'));
+    } catch { /* манифеста нет или он битый — берём имена файлов */ }
+  }
+
+  const partEntries = blobs
+    .filter((e) => e.path !== MANIFEST_PATH)
+    .sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+  const parts = partEntries.map((e) => ({
+    path: e.path,
+    sha: e.sha,
+    size: e.size || 0,
+    sha256: (manifest && (manifest.parts || []).find((p) => p.path === e.path
+      || e.path.endsWith('/' + p.name))) ? (manifest.parts.find((p) => e.path.endsWith('/' + p.name)) || {}).sha256 : '',
+  }));
+  return {
+    manifest,
+    parts,
+    total: parts.reduce((sum, p) => sum + p.size, 0),
+    first: parts[0] || null,
+  };
 }
 
 /** sha файла по пути в дереве коммита (или null). */
@@ -427,70 +517,148 @@ async function shaOfPath(token, repo, commitSha, rel) {
 
 /**
  * Забрать сервер из архива в репозитории.
- * Шаг 1: скачать архив. Шаг 2: распаковать в папку сервера.
- * Понимает и новый 7z, и zip из прошлых версий панели.
+ * Шаг 1: скачать архив (одну часть или все). Шаг 2: распаковать в папку сервера.
+ * После успешной распаковки части архива по умолчанию удаляются из репозитория,
+ * чтобы он не рос: репозиторий работает как канал пересылки, а не как хранилище.
  */
 async function pullArchive(token, repo, branch, opts) {
-  const { dir, stateFile, onLog = () => {} } = opts;
+  const { dir, stateFile, onLog = () => {}, cleanup } = opts;
   const head = await getHead(token, repo, branch);
   if (!head) return { ok: false, error: `В репозитории ${repo} ещё нет отправленного сервера — сначала отправь его.` };
   const state = loadState(stateFile);
 
-  const tree = await getTreeOfCommit(token, repo, head.commit);
-  const found = LEGACY_ARCHIVES
-    .map((rel) => ({ rel, entry: tree.entries.find((e) => e.type === 'blob' && e.path === rel) }))
-    .find((x) => x.entry);
-  if (!found) {
+  const remote = await archiveParts(token, repo, head.commit);
+  if (!remote || !remote.first) {
     return { ok: false, error: 'В репозитории нет файла сервера. Его нужно отправить из панели (архивом).' };
   }
-  const sha = found.entry.sha;
-  if (state.commit === head.commit && state.files && state.files[found.rel] === sha) {
+  const already = state.commit === head.commit
+    && remote.parts.every((p) => state.files && state.files[p.path] === p.sha);
+  if (already) {
     return { ok: true, changed: 0, downloaded: 0, removed: 0, commit: head.commit, upToDate: true };
   }
 
-  /* ── шаг 1: скачать архив ── */
-  onLog(`шаг 1 из 2: скачиваю архив с GitHub (${found.rel})…`);
-  const buf = await downloadBlob(token, repo, sha);
-  onLog(`архив скачан: ${MB(buf.length)} МБ`);
-
+  const multi = remote.parts.length > 1;
+  /* ── шаг 1: скачать ── */
+  onLog(`шаг 1 из 2: скачиваю архив с GitHub (${MB(remote.total)} МБ${multi ? `, частей ${remote.parts.length}` : ''})…`);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-pull-'));
-  const file = path.join(tmpDir, path.basename(found.rel));
   try {
-    fs.writeFileSync(file, buf);
+    const localFiles = [];
+    for (let i = 0; i < remote.parts.length; i += 1) {
+      const part = remote.parts[i];
+      const buf = await downloadBlob(token, repo, part.sha);
+      const name = path.basename(part.path);
+      const target = path.join(tmpDir, name);
+      fs.writeFileSync(target, buf);
+      if (part.sha256 && sha256Of(buf) !== part.sha256) {
+        return { ok: false, error: `Часть ${name} скачалась битой — контрольная сумма не совпала. Повтори забор.` };
+      }
+      localFiles.push(target);
+      if (multi) onLog(`  часть ${i + 1} из ${remote.parts.length}: ${name} — ${MB(buf.length)} МБ`);
+    }
 
     /* ── шаг 2: распаковать ── */
-    const is7z = /\.7z$/i.test(found.rel) || buf.subarray(0, 6).equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]));
-    onLog(`шаг 2 из 2: распаковываю архив в папку сервера (${is7z ? '7z' : 'zip'})…`);
+    const first = localFiles[0];
+    const is7z = /\.7z(\.\d{3})?$/i.test(first) || /^\.7z$/i.test(path.extname(first).replace('.001', '.7z'));
+    const looks7z = fs.readFileSync(first).subarray(0, 6)
+      .equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]));
+    onLog(`шаг 2 из 2: распаковываю архив в папку сервера (${is7z || looks7z ? '7z' : 'zip'})…`);
     let files = 0;
-    let list = [];
-    if (is7z) {
+    if (is7z || looks7z) {
       if (!seven.available()) {
         return { ok: false, error: 'В репозитории архив .7z, а рядом с панелью нет 7-Zip — обнови панель' };
       }
-      files = (await seven.list(file)).filter((x) => x.Path && !x.isDir).length;
-      await seven.extract({ file, destDir: dir });
+      await seven.extract({ file: first, destDir: dir });
+      files = (await seven.list(first).catch(() => [])).filter((x) => x.Path && !x.isDir).length;
+      if (!files) files = countFiles(dir);
     } else {
-      const res = zip.extractFile(file, dir);
+      const res = zip.extractFile(first, dir);
       files = res.files.length;
-      list = res.files.slice(0, 10);
     }
-    saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [found.rel]: sha } });
-    onLog(`готово: распаковано файлов ${files}`);
+
+    /* ── шаг 3 (по желанию): убрать архив из репозитория ── */
+    const wantCleanup = cleanup !== undefined
+      ? cleanup !== false
+      : !(remote.manifest && remote.manifest.cleanup === false);
+    let removedFromRepo = 0;
+    let finalCommit = head.commit;
+    if (wantCleanup) {
+      try {
+        removedFromRepo = await dropArchive(token, repo, branch, head.commit, onLog);
+        finalCommit = removedFromRepo ? (await getHead(token, repo, branch)).commit : head.commit;
+      } catch (err) {
+        onLog('архив распакован, но убрать его из репозитория не удалось: ' + err.message);
+      }
+    }
+
+    saveState(stateFile, {
+      commit: finalCommit,
+      branch,
+      mode: 'archive',
+      files: removedFromRepo ? {} : Object.fromEntries(remote.parts.map((p) => [p.path, p.sha])),
+    });
+    onLog(`готово: распаковано файлов ${files}`
+      + (removedFromRepo ? `, части архива удалены из репозитория (${removedFromRepo})` : ''));
     return {
       ok: true,
-      commit: head.commit,
+      commit: finalCommit,
       changed: files,
       downloaded: files,
       removed: 0,
       total: files,
-      format: is7z ? '7z' : 'zip',
-      archive: found.rel,
-      size: buf.length,
-      list,
+      format: is7z || looks7z ? '7z' : 'zip',
+      archive: path.basename(remote.first.path),
+      parts: remote.parts.length,
+      size: remote.total,
+      repoCleaned: removedFromRepo,
     };
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
   }
+}
+
+/** Сколько файлов в папке (для отчёта после распаковки). */
+function countFiles(dir) {
+  let n = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.isDirectory()) stack.push(path.join(cur, e.name));
+      else n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * Удаляет файлы пересылки (части архива и манифест) из ветки одним коммитом.
+ * @returns {Promise<number>} сколько файлов убрано
+ */
+async function dropArchive(token, repo, branch, commitSha, onLog = () => {}) {
+  const { entries } = await getTreeOfCommit(token, repo, commitSha);
+  const files = entries.filter((e) => e.type === 'blob' && isArchivePath(e.path));
+  if (!files.length) return 0;
+
+  onLog(`убираю архив из репозитория (${files.length} файл${files.length === 1 ? '' : 'ов'})…`);
+  const tree = await gh(token, `/repos/${repo}/git/trees`, {
+    body: {
+      base_tree: (await getTreeOfCommit(token, repo, commitSha)).treeSha,
+      tree: files.map((e) => ({ path: e.path, mode: '100644', type: 'blob', sha: null })),
+    },
+  });
+  const commit = await gh(token, `/repos/${repo}/git/commits`, {
+    body: {
+      message: 'OmniPanel: части архива удалены после распаковки',
+      tree: tree.sha,
+      parents: [commitSha],
+    },
+  });
+  await gh(token, `/repos/${repo}/git/refs/heads/${encodeURI(branch)}`, {
+    method: 'PATCH', body: { sha: commit.sha, force: false },
+  });
+  return files.length;
 }
 
 /* ─────────────────────────────── состояние ─────────────────────────────── */
@@ -1013,6 +1181,7 @@ function downloadRepoZip(token, repo, branch, destFile) {
 }
 
 module.exports = {
+  archiveParts, dropArchive, isArchivePath,
   pull, push, check, verify, loadState, saveState,
   getUser, listRepos, createRepo,
   deviceStart, devicePoll, downloadRepoZip,

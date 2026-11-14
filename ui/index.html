@@ -180,6 +180,7 @@
         <button class="tab" data-tab="backups">Бэкапы</button>
         <button class="tab" data-tab="addons">Плагины</button>
         <button class="tab" data-tab="players">Игроки</button>
+        <button class="tab" data-tab="bans">Блокировки<span id="bansBadge" class="tab-badge hidden">0</span></button>
         <button class="tab tab-alert" data-tab="issues">Ошибки<span id="issuesBadge" class="tab-badge hidden">0</span></button>
       </nav>
 
@@ -323,11 +324,11 @@
                 <input id="tpsCmd" type="text" placeholder="tps" spellcheck="false" />
               </label>
               <label class="mini-field">Период проверки, секунд
-                <input id="tpsEvery" type="number" min="5" max="3600" step="5" placeholder="30" />
+                <input id="tpsEvery" type="number" min="3" max="3600" step="1" placeholder="10" />
               </label>
             </div>
             <div class="row" style="gap:6px;justify-content:flex-end">
-              <span class="tm-note">панель пишет команду в консоль и читает ответ</span>
+              <span class="tm-note">первый замер сразу после запуска, дальше по таймеру</span>
               <button id="tpsSaveBtn" class="btn btn-mini btn-primary">Сохранить</button>
             </div>
           </div>
@@ -345,6 +346,11 @@
             <button id="backupReveal" class="btn btn-mini">Открыть папку бэкапов</button>
             <button id="backupCreate" class="btn btn-primary btn-mini">Создать бэкап</button>
           </div>
+        </div>
+        <div class="backup-opts">
+          <label class="switch"><input id="backupLean" type="checkbox" /><span class="box"></span>без libraries, versions и старых логов</label>
+          <div class="backup-hint" id="backupHint">Эти папки сервер восстанавливает сам: Forge докачает библиотеки, логи создаются заново.
+            Мир, плагины, конфиги и ядро попадают в архив всегда.</div>
         </div>
         <div id="backupList" class="backup-list"></div>
       </section>
@@ -397,10 +403,25 @@
             <div class="ph-sub" id="playersSub">—</div>
           </div>
           <div class="row" style="gap:6px">
+            <label class="switch"><input id="playersAuto" type="checkbox" /><span class="box"></span>обновлять сам</label>
             <button id="playersRefresh" class="btn btn-mini">Запросить список</button>
           </div>
         </div>
         <div id="playerList" class="player-list"></div>
+      </section>
+
+      <!-- блокировки -->
+      <section id="tab-bans" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Блокировки</div>
+            <div class="ph-sub" id="bansSub">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="bansRefresh" class="btn btn-mini">Обновить</button>
+          </div>
+        </div>
+        <div id="bansList" class="ban-list"></div>
       </section>
 
       <!-- ошибки при запуске -->
@@ -659,8 +680,9 @@
               <label class="switch"><input id="f_syncPull" type="checkbox" /><span class="box"></span>забирать обновления перед запуском</label>
               <label class="switch"><input id="f_syncPush" type="checkbox" /><span class="box"></span>отправлять сервер после остановки</label>
               <label class="switch"><input id="f_syncMode" type="checkbox" /><span class="box"></span>пересылать сервер одним архивом</label>
+              <label class="switch"><input id="f_syncKeep" type="checkbox" /><span class="box"></span>оставлять части архива в репозитории</label>
             </div>
-            <div class="sync-hint">Отправка: панель упаковывает папку сервера в архив и кладёт в репозиторий один файл. Забор: скачивает этот файл и распаковывает обратно в папку сервера. Выключи переключатель, если нужна отправка по файлам.</div>
+            <div class="sync-hint">Отправка: панель упаковывает папку сервера в 7-Zip и делит архив на части по 45 МБ — каждая часть проходит лимит GitHub. Забор: скачивает все части, проверяет контрольные суммы, распаковывает и удаляет части из репозитория, чтобы он не распухал. Оставь переключатель «оставлять части» включённым, только если архив нужен в репозитории как копия.</div>
 
             <div class="sync-actions">
               <button id="syncVerify" class="btn btn-mini">Проверить</button>
@@ -761,6 +783,19 @@
 </div>
 
 <!-- ───────────── подтверждение ───────────── -->
+<div id="askModal" class="modal hidden">
+  <div class="modal-box small ask-box">
+    <header class="modal-head">
+      <span id="askIcon" class="ask-icon"></span>
+      <h2 id="askTitle">Вопрос</h2>
+    </header>
+    <div class="modal-body">
+      <p id="askText" class="ask-text">—</p>
+    </div>
+    <footer class="modal-foot ask-foot" id="askFoot"></footer>
+  </div>
+</div>
+
 <div id="confirmModal" class="modal hidden">
   <div class="modal-box small">
     <header class="modal-head">

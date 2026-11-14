@@ -24,8 +24,11 @@ const code = zip.create([
   { name: 'ui/app.js', data: '// app' },
 ]);
 fs.writeFileSync(path.join(KIT, 'dist', 'OmniPanel-code.zip'), code);
-const fullBuf = Buffer.concat([Buffer.from('сборка'), Buffer.alloc(2048, 7)]);
-fs.writeFileSync(path.join(KIT, 'dist', 'OmniPanel-win64.zip'), fullBuf);
+/* в релиз теперь идёт установщик, а старый win64.zip должен убираться */
+const setupBuf = Buffer.concat([Buffer.from('установщик'), Buffer.alloc(2048, 7)]);
+const SETUP = path.join(KIT, 'dist', 'OmniPanel_setup-1.2.3.exe');
+fs.writeFileSync(SETUP, setupBuf);
+fs.writeFileSync(path.join(KIT, 'dist', 'OmniPanel-win64.zip'), Buffer.alloc(512, 3));
 fs.writeFileSync(path.join(KIT, 'update.json'), JSON.stringify({
   version: '1.2.3',
   notes: 'тестовая версия',
@@ -128,7 +131,7 @@ mock.listen(8792, '127.0.0.1', async () => {
   const env = { OMNI_GITHUB_API: base, OMNI_GITHUB_UPLOAD: base + '/uploads' };
 
   console.log('=== ПЕРВАЯ ПУБЛИКАЦИЯ (репозиторий пустой) ===');
-  let r = await run(['--repo', 'o/r', '--token', 'good-token', '--dir', KIT], env);
+  let r = await run(['--repo', 'o/r', '--token', 'good-token', '--dir', KIT, '--exe', SETUP], env);
   ok(r.codeExit === 0, 'скрипт завершился без ошибок', r.out.includes('ОШИБКА') ? r.out.split('\n').filter((l) => l.includes('ОШИБКА')).join(' ') : '');
   ok(state.contents.has('dist/OmniPanel-code.zip'), 'архив кода залит в dist/');
   ok(state.contents.has('update.json'), 'update.json залит в корень');
@@ -137,17 +140,31 @@ mock.listen(8792, '127.0.0.1', async () => {
   ok(man.code.sha256 && man.code.sha256 === require('crypto').createHash('sha256').update(code).digest('hex'), 'контрольная сумма пересчитана');
   ok(man.code.size === code.length, 'размер архива записан');
   ok(state.releases.length === 1 && state.releases[0].tag_name === 'v1.2.3', 'релиз создан', state.releases.map((x) => x.tag_name).join(','));
-  ok(state.uploads.length === 1 && state.uploads[0].name === 'OmniPanel-win64.zip', 'полная сборка приложена к релизу', JSON.stringify(state.uploads));
-  ok(state.uploads[0].size === fullBuf.length, 'сборка загружена целиком', `${state.uploads[0].size} байт`);
+  const names = state.uploads.map((x) => x.name);
+  ok(names.includes('OmniPanel-code.zip'), 'архив кода приложен к релизу', names.join(', '));
+  ok(names.includes('OmniPanel_setup-1.2.3.exe'), 'установщик приложен к релизу', names.join(', '));
+  const setupUp = state.uploads.find((x) => x.name === 'OmniPanel_setup-1.2.3.exe');
+  ok(setupUp.size === setupBuf.length, 'установщик загружен целиком', `${setupUp.size} байт`);
+  ok(!names.some((n) => /win64\.zip$/i.test(n)), 'старый архив сборки в релиз не попал', names.join(', '));
+  ok(state.deletes.length === 0, 'в новый релиз ничего лишнего не попало', 'удалено: ' + state.deletes.length);
+
+  state.log.length = 0;
+  /* положим в релиз старый win64.zip, как он остался от 1.18.0 — скрипт обязан его убрать */
+  state.releases[0].assets.push({ id: 777, name: 'OmniPanel-win64.zip', size: 512 });
+  r = await run(['--repo', 'o/r', '--token', 'good-token', '--dir', KIT, '--exe', SETUP], env);
+  ok(state.deletes.includes(777), 'старый архив сборки убран из релиза', 'удалено: ' + state.deletes.join(','));
+  ok(!state.releases[0].assets.some((a) => /win64\.zip$/i.test(a.name)), 'в релизе остались только нужные файлы',
+    state.releases[0].assets.map((a) => a.name).join(', '));
+  state.uploads.length = 0;
   ok(/готово/.test(r.out) && r.out.includes('releases/tag/v1.2.3'), 'ссылки выведены', r.out.split('\n').pop());
 
   console.log('\n=== ПОВТОРНАЯ ПУБЛИКАЦИЯ ТОЙ ЖЕ ВЕРСИИ ===');
   state.log.length = 0;
-  r = await run(['--repo', 'o/r', '--token', 'good-token', '--dir', KIT], env);
+  r = await run(['--repo', 'o/r', '--token', 'good-token', '--dir', KIT, '--exe', SETUP], env);
   ok(r.codeExit === 0, 'повтор прошёл');
   ok(state.releases.length === 1, 'второй релиз не создаётся — берётся существующий');
   ok(state.deletes.length >= 1, 'старый файл релиза удалён перед повторной загрузкой', 'удалено: ' + state.deletes.length);
-  ok(state.uploads.length === 2, 'сборка загружена заново');
+  ok(state.uploads.length === 2, 'архив кода и установщик загружены заново', 'загрузок: ' + state.uploads.length);
   const puts = state.log.filter((l) => l.startsWith('PUT'));
   ok(puts.length === 2, 'на повторной отправке — два PUT (файлы обновлены)', puts.join(', '));
 

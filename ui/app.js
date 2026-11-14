@@ -85,6 +85,9 @@ const httpApi = {
   async backupDelete(file) { return post(`/api/servers/${id}/backups/delete`, { file }); },
   async backupReveal() { return { ok: false, error: 'Только в exe-версии' }; },
   async backupSize() { return { bytes: 0, files: 0 }; },
+  async bansList(id) { return (await fetch(`/api/servers/${id}/bans`)).json(); },
+  async bansUnban(id, target) { return post(`/api/servers/${id}/bans/unban`, target); },
+  async bansBan(id, target) { return post(`/api/servers/${id}/bans/ban`, target); },
   async tpsHistory(id) { return (await fetch(`/api/servers/${id}/tps`)).json(); },
   async filesList(id, rel) { return (await fetch(`/api/files/list?id=${encodeURIComponent(id)}&rel=${encodeURIComponent(rel || '')}`)).json(); },
   async filesRead(id, rel) { return (await fetch(`/api/files/read?id=${encodeURIComponent(id)}&rel=${encodeURIComponent(rel || '')}`)).json(); },
@@ -213,6 +216,8 @@ const prefs = {
   density: localStorage.getItem('lsp.density') || 'normal',
   notifSound: localStorage.getItem('lsp.notifSound') !== '0',
   notifMs: Number(localStorage.getItem('lsp.notifMs') || 4200),
+  /* бэкап без libraries/versions/логов: они восстанавливаются сами */
+  backupLean: localStorage.getItem('lsp.backupLean') !== '0',
   // фон панели: id встроенных обоев, 'custom' или 'none'
   wall: localStorage.getItem('lsp.wall') || 'none',
   wallName: localStorage.getItem('lsp.wallName') || '',
@@ -836,6 +841,7 @@ const el = {
   toasts: $('toasts'),
   scanModal: $('scanModal'), scanResults: $('scanResults'), scanProgress: $('scanProgress'),
   cfModal: $('confirmModal'), cfTitle: $('cfTitle'), cfText: $('cfText'), cfOk: $('cfOk'),
+  askModal: $('askModal'),
   cpuNow: $('cpuNow'), ramNow: $('ramNow'), procNow: $('procNow'),
   cpuChart: $('cpuChart'), ramChart: $('ramChart'), tpsChart: $('tpsChart'),
   tpsStats: $('tpsStats'), backupList: $('backupList'), backupSub: $('backupSub'),
@@ -864,8 +870,23 @@ function drawChart(host, points, opts = {}) {
   const H = host.clientHeight || 110;
   const pad = { l: 34, r: 6, t: 8, b: 16 };
 
-  if (!points || points.length < 2) {
+  if (!points || !points.length) {
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><text class="empty" x="${W / 2}" y="${H / 2}" text-anchor="middle">данных пока нет</text></svg>`;
+    return;
+  }
+  if (points.length === 1) {
+    /* первый замер: график уже видно — точка и линия-заготовка справа */
+    const v = Number(points[0].v) || 0;
+    const maxV = opts.fixedMax != null ? opts.fixedMax : Math.max(v * 1.2, 1);
+    const yy = pad.t + (1 - v / maxV) * (H - pad.t - pad.b);
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
+      <line class="grid" x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}"/>
+      <line class="grid" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>
+      <text class="lbl" x="${pad.l - 5}" y="${(yy + 3).toFixed(1)}" text-anchor="end">${v.toFixed(1)}</text>
+      <line class="line" x1="${pad.l}" y1="${yy.toFixed(1)}" x2="${W - pad.r}" y2="${yy.toFixed(1)}" opacity="0.35"/>
+      <circle class="dot" cx="${pad.l}" cy="${yy.toFixed(1)}" r="3.5"/>
+      <text class="lbl" x="${W - pad.r}" y="${H - 4}" text-anchor="end">первый замер · ${new Date(points[0].t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</text>
+    </svg>`;
     return;
   }
 
@@ -2112,7 +2133,8 @@ function setTab(name) {
   if (name === 'perf') { renderPerf(); loadTpsTab(); }
   if (name === 'backups') loadBackups();
   if (name === 'files') fmLoadTree();
-  if (name === 'players') renderPlayers();
+  if (name === 'players') { renderPlayers(); playersAutoStart(); }
+  if (name === 'bans') loadBans();
   if (name === 'addons') {
     addonsLoadInfo().then(() => { addonsCategories(); if (!S.addons.hits.length) addonsSearch(true); });
   }
@@ -2198,14 +2220,14 @@ function tpsFillMonitor() {
   if (!s || !cmd || !every) return;
   if (document.activeElement === cmd || document.activeElement === every) return;
   cmd.value = s.tpsCommand == null ? '' : s.tpsCommand;
-  every.value = s.tpsInterval || 30;
+  every.value = s.tpsInterval || 10;
 }
 
 async function tpsSaveMonitor() {
   const s = current();
   if (!s) return;
   const tpsCommand = ($('tpsCmd').value || '').trim();
-  const tpsInterval = Math.max(5, Math.min(3600, Number($('tpsEvery').value) || 30));
+  const tpsInterval = Math.max(3, Math.min(3600, Number($('tpsEvery').value) || 10));
   const res = await API.update(s.id, { tpsCommand, tpsInterval });
   if (!res || res.ok === false || res.error) {
     toast((res && res.error) || 'Не удалось сохранить', 'err');
@@ -2830,7 +2852,7 @@ async function wizCreate() {
       stopCommand: res.stopCommand || 'stop',
       encoding: 'auto',
       tpsCommand: res.isProxy ? '' : (res.tpsCommand || 'tps'),
-      tpsInterval: 30,
+      tpsInterval: 10,
     });
     S.currentId = created.id;
   } catch (e) {
@@ -2948,8 +2970,58 @@ function askConfirm({ title, text, okLabel = 'Да', second = null }) {
   });
 }
 
+/**
+ * Окно-вопрос из ядра (например, «синхронизация не удалась — запускать?»).
+ * Рисуется в стиле панели: своя шапка, свой список кнопок, тема и скругления.
+ */
+function askFromMain(payload) {
+  return new Promise((resolve) => {
+    const modal = $('askModal');
+    if (!modal) { resolve('cancel'); return; }
+    const title = $('askTitle');
+    const text = $('askText');
+    const foot = $('askFoot');
+    const icon = $('askIcon');
+    const close = (id) => {
+      modal.classList.add('hidden');
+      foot.innerHTML = '';
+      document.removeEventListener('keydown', onKey);
+      resolve(id);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close('cancel'); };
+    title.textContent = payload.title || 'Вопрос';
+    text.textContent = payload.text || '';
+    icon.innerHTML = ico(payload.kind === 'err' ? 'alert' : 'shield', 15);
+    foot.innerHTML = '';
+    for (const b of (payload.buttons || [])) {
+      const btn = document.createElement('button');
+      btn.className = 'btn' + (b.primary ? ' btn-primary' : (b.danger ? ' btn-ghost' : ' btn-ghost'));
+      btn.textContent = b.label;
+      btn.onclick = () => { Sound.play(b.primary ? 'ok' : 'click'); close(b.id); };
+      foot.appendChild(btn);
+    }
+    modal.classList.remove('hidden');
+    if (icon) icon.classList.remove('hidden');
+    Sound.play('nav');
+    document.addEventListener('keydown', onKey);
+    const first = foot.querySelector('.btn');
+    if (first) setTimeout(() => first.focus(), 40);
+  });
+}
+
+/** Окно-вопрос от ядра: подписка на канал main → интерфейс. */
+function bindAskChannel() {
+  if (!window.desktop || !window.desktop.onAsk) return;
+  /* сообщаем ядру: свои окна можно показывать, интерфейс готов */
+  if (window.desktop.askReady) window.desktop.askReady();
+  window.desktop.onAsk(async (payload) => {
+    const id = await askFromMain(payload || {});
+    if (window.desktop.answerAsk) window.desktop.answerAsk(payload.rid, id);
+  });
+}
+
 /** Своё окно ввода строки: window.prompt в Electron не поддерживается. */
-function askText({ title, text = '', value = '', okLabel = 'OK' }) {
+function askText({ title, text = '', value = '', okLabel = 'OK', allowEmpty = false }) {
   return new Promise((resolve) => {
     const modal = $('textModal');
     const input = $('txInput');
@@ -2968,7 +3040,11 @@ function askText({ title, text = '', value = '', okLabel = 'OK' }) {
     Sound.play('nav');
     setTimeout(() => { input.focus(); input.select(); }, 30);
 
-    $('txOk').onclick = () => { Sound.play('click'); close(input.value.trim() || null); };
+    $('txOk').onclick = () => {
+      Sound.play('click');
+      const v = input.value.trim();
+      close(v || (allowEmpty ? '' : null));
+    };
     $('txCancel').onclick = () => { Sound.play('click'); close(null); };
     input.onkeydown = (e) => {
       if (e.key === 'Enter') { e.preventDefault(); Sound.play('click'); close(input.value.trim() || null); }
@@ -3449,7 +3525,7 @@ function openModal(server) {
   $('f_stopCommand').value = server?.stopCommand || '';
   $('f_encoding').value = server?.encoding || 'auto';
   $('f_tpsCommand').value = server?.tpsCommand || '';
-  $('f_tpsInterval').value = server?.tpsInterval || 30;
+  $('f_tpsInterval').value = server?.tpsInterval || 10;
   $('f_autoStart').checked = !!server?.autoStart;
   $('f_autoRestart').checked = !!server?.autoRestart;
   $('f_env').value = Object.entries(server?.env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
@@ -3468,6 +3544,7 @@ function openModal(server) {
   $('f_syncPull').checked = sc.pullOnStart !== false;
   $('f_syncPush').checked = sc.pushOnStop !== false;
   if ($('f_syncMode')) $('f_syncMode').checked = sc.mode !== 'files';
+  if ($('f_syncKeep')) $('f_syncKeep').checked = sc.keepParts === true;
   syncToggleBody();
   syncStatusReset(server);
   loadAutoFolder(server);
@@ -3561,6 +3638,7 @@ async function saveModal() {
       pullOnStart: $('f_syncPull').checked,
       pushOnStop: $('f_syncPush').checked,
       mode: ($('f_syncMode') && $('f_syncMode').checked) ? 'archive' : 'files',
+      keepParts: !!($('f_syncKeep') && $('f_syncKeep').checked),
     },
   };
   if (data.sync.enabled) {
@@ -3771,10 +3849,14 @@ function bindSubscriptions() {
       const st = playersState(id);
       st.names.clear();
       st.at = Date.now();
+      /* сервер поднялся — сразу просим список и включаем тихое автообновление */
+      if (id === S.currentId) { API.command(id, 'list'); playersAutoStart(); }
     }
     if (state === 'stopped') {
       playersState(id).names.clear();
       playersState(id).at = 0;
+      clearInterval(playersTimer);
+      playersTimer = null;
     }
     updateOnlineChip();
     renderSidebar();
@@ -4781,6 +4863,7 @@ function bindActions() {
   };
 
   // вкладки плагинов, игроков и ошибок
+  bindAskChannel();
   bindAddons();
   bindFileDrop();
   bindCmdComplete();
@@ -4796,6 +4879,19 @@ function bindActions() {
       Sound.play('click');
     };
   }
+  /* автообновление списка игроков: без вопросов и без нажатий */
+  const playersAuto = $('playersAuto');
+  if (playersAuto) {
+    playersAuto.checked = playersAutoOn();
+    playersAuto.onchange = () => {
+      localStorage.setItem('lsp.playersAuto', playersAuto.checked ? '1' : '0');
+      Sound.play('click');
+      playersAutoStart();
+      renderPlayers();
+    };
+  }
+  const bansRefresh = $('bansRefresh');
+  if (bansRefresh) bansRefresh.onclick = () => { Sound.play('click'); loadBans(); };
   const issuesScan = $('issuesScan');
   if (issuesScan) {
     issuesScan.onclick = () => {
@@ -4834,6 +4930,14 @@ function bindActions() {
   };
 
   // вкладка бэкапов
+  if ($('backupLean')) {
+    $('backupLean').checked = prefs.backupLean !== false;
+    $('backupLean').onchange = () => {
+      prefs.backupLean = $('backupLean').checked;
+      prefs.save();
+      Sound.play('click');
+    };
+  }
   $('backupCreate').onclick = async () => {
     const s = current();
     if (!s) return;
@@ -4843,7 +4947,7 @@ function bindActions() {
     btn.textContent = 'Архивирую…';
     let made = null;
     try {
-      const res = await API.backupCreate(s.id, {});
+      const res = await API.backupCreate(s.id, { lean: prefs.backupLean !== false });
       if (res && res.ok === false) throw new Error(res.error || 'не удалось упаковать папку');
       made = res && res.name ? res : null;
       toast(made
@@ -5714,6 +5818,62 @@ function headUrl(name, size = 40) {
   return `https://mc-heads.net/avatar/${encodeURIComponent(name)}/${size}`;
 }
 
+/* Сколько раз обновлять список: без запросов к человеку, тихо в фоне. */
+const PLAYERS_REFRESH_MS = 20000;
+let playersTimer = null;
+
+function playersAutoOn() {
+  return localStorage.getItem('lsp.playersAuto') !== '0';
+}
+
+function playersAutoStart() {
+  clearInterval(playersTimer);
+  playersTimer = null;
+  const s = current();
+  if (!s || !playersAutoOn() || s.state !== 'running') return;
+  playersTimer = setInterval(() => {
+    const cur = current();
+    if (!cur || cur.state !== 'running') return;
+    if (S.tab !== 'players') return;
+    API.command(cur.id, 'list');
+  }, PLAYERS_REFRESH_MS);
+}
+
+const GAMEMODES = [
+  { id: 'survival', label: 'выживание' },
+  { id: 'creative', label: 'творческий' },
+  { id: 'adventure', label: 'приключение' },
+  { id: 'spectator', label: 'наблюдатель' },
+];
+
+function playerCommand(s, cmd, human) {
+  return API.command(s.id, cmd).then(() => {
+    notify({ title: 'Команда отправлена', text: human || cmd, kind: 'info' });
+    Sound.play('click');
+  });
+}
+
+/** Забанить: причина спрашивается своим окном, без системного диалога. */
+async function banPlayer(s, name) {
+  const reason = await askText({
+    title: `Забанить ${name}?`,
+    text: 'Игрок будет отключён от сервера, его данные останутся. Причина необязательна.',
+    value: '',
+    okLabel: 'Забанить',
+    allowEmpty: true,
+  });
+  if (reason === null || reason === undefined) return;
+  if (window.desktop && window.desktop.bansBan) {
+    const res = await window.desktop.bansBan(s.id, { name, reason: String(reason || '').trim() });
+    if (res && res.ok === false) { toast(res.error, 'err'); return; }
+  } else {
+    await API.bansBan(s.id, { name, reason: String(reason || '').trim() });
+  }
+  notify({ title: 'Забанен', text: name, kind: 'ok' });
+  Sound.play('ok');
+  renderPlayers();
+}
+
 function renderPlayers() {
   const host = $('playerList');
   if (!host) return;
@@ -5723,9 +5883,10 @@ function renderPlayers() {
   const names = [...st.names].sort((a, b) => a.localeCompare(b));
   const sub = $('playersSub');
   if (sub) {
-    sub.textContent = st.max
-      ? `онлайн ${names.length} из ${st.max}${st.at ? ' · обновлено ' + fmtTime(st.at) : ''}`
-      : `онлайн ${names.length}${st.at ? ' · обновлено ' + fmtTime(st.at) : ''}`;
+    const when = st.at ? ' · обновлено ' + fmtTime(st.at) : '';
+    sub.textContent = (st.max ? `онлайн ${names.length} из ${st.max}` : `онлайн ${names.length}`)
+      + when
+      + (s.state === 'running' && playersAutoOn() ? ` · обновляю сам каждые ${PLAYERS_REFRESH_MS / 1000} с` : '');
   }
   if (!names.length) {
     host.innerHTML = `<div class="empty-note">${s.state === 'running' ? 'игроков нет' : 'сервер не запущен'}</div>`;
@@ -5735,18 +5896,106 @@ function renderPlayers() {
   for (const name of names) {
     const card = document.createElement('div');
     card.className = 'player-card';
+    const modes = GAMEMODES.map((g) => `<option value="${g.id}">${g.label}</option>`).join('');
     card.innerHTML = `
       <span class="pl-ava"><img src="${headUrl(name)}" alt="" loading="lazy" /></span>
       <span class="pl-name">${esc(name)}</span>
-      <button class="btn btn-mini pl-kick">Кик</button>`;
+      <span class="pl-tools">
+        <select class="mini-select pl-mode">${modes}</select>
+        <button class="btn btn-mini pl-btn" data-act="clear">${ico('bag', 13)}<span>очистить</span></button>
+        <button class="btn btn-mini pl-btn" data-act="kill">${ico('sword', 13)}<span>убить</span></button>
+        <button class="btn btn-mini pl-btn" data-act="kick">кик</button>
+        <button class="btn btn-mini btn-ghost pl-btn pl-ban" data-act="ban">${ico('ban', 13)}<span>бан</span></button>
+      </span>`;
     const img = card.querySelector('img');
     img.onerror = () => { card.querySelector('.pl-ava').textContent = name.slice(0, 1).toUpperCase(); };
-    card.querySelector('.pl-kick').onclick = async () => {
-      await API.command(s.id, `kick ${name}`);
-      notify({ title: 'Команда отправлена', text: `kick ${name}`, kind: 'info' });
+
+    card.querySelector('.pl-mode').onchange = (e) => {
+      const mode = e.target.value;
+      playerCommand(s, `gamemode ${mode} ${name}`, `режим ${GAMEMODES.find((g) => g.id === mode).label} → ${name}`);
     };
+    card.querySelector('[data-act="clear"]').onclick = () => {
+      playerCommand(s, `clear ${name}`, `инвентарь очищен: ${name}`);
+    };
+    card.querySelector('[data-act="kill"]').onclick = () => {
+      playerCommand(s, `kill ${name}`, `убит: ${name}`);
+    };
+    card.querySelector('[data-act="kick"]').onclick = () => {
+      playerCommand(s, `kick ${name}`, `кик: ${name}`);
+    };
+    card.querySelector('[data-act="ban"]').onclick = () => banPlayer(s, name);
     host.appendChild(card);
   }
+}
+
+/* ═════════════════════ блокировки ═════════════════════ */
+
+function renderBans(data) {
+  const host = $('bansList');
+  if (!host) return;
+  const s = current();
+  const badge = $('bansBadge');
+  const players = (data && data.players) || [];
+  const ips = (data && data.ips) || [];
+  const total = players.length + ips.length;
+  if (badge) {
+    badge.textContent = String(total);
+    badge.classList.toggle('hidden', total === 0);
+  }
+  const sub = $('bansSub');
+  if (sub) {
+    sub.textContent = total
+      ? `заблокировано игроков: ${players.length}${ips.length ? ` · IP-адресов: ${ips.length}` : ''}`
+      : (s && s.state === 'running' ? 'блокировок нет' : 'блокировок нет');
+  }
+  if (!total) {
+    host.innerHTML = '<div class="empty-note">Список пуст: никто не забанен. Забанить можно во вкладке «Игроки».</div>';
+    return;
+  }
+  host.innerHTML = '';
+  const row = (b) => {
+    const node = document.createElement('div');
+    node.className = 'ban-row';
+    const title = b.kind === 'ip' ? b.ip : b.name;
+    node.innerHTML = `
+      <span class="ban-ico">${b.kind === 'ip' ? ico('globe', 15) : ico('ban', 15)}</span>
+      <span class="ban-main">
+        <span class="ban-name">${esc(title)}</span>
+        <span class="ban-meta">${b.kind === 'ip' ? 'IP-адрес' : 'игрок'}${b.uuid ? ` · uuid ${esc(b.uuid)}` : ''}${b.ip && b.kind === 'player' ? ` · ip ${esc(b.ip)}` : ''}</span>
+        <span class="ban-meta">причина: ${esc(b.reason)} · забанил: ${esc(b.source)} · ${esc(b.until)}</span>
+      </span>
+      <button class="btn btn-mini btn-primary ban-un">Разбанить</button>`;
+    node.querySelector('.ban-un').onclick = async () => {
+      const ok = await askConfirm({
+        title: `Разбанить ${title}?`,
+        text: 'Блокировка снимается сразу: на запущенном сервере командой, на остановленном — правкой файла блокировок.',
+        okLabel: 'Разбанить',
+      });
+      if (!ok) return;
+      const target = b.kind === 'ip' ? { ip: b.ip } : { name: b.name };
+      let res;
+      if (window.desktop && window.desktop.bansUnban) res = await window.desktop.bansUnban((current() || {}).id, target);
+      else res = await API.bansUnban((current() || {}).id, target);
+      if (res && res.ok === false) { toast(res.error || 'Не удалось разбанить', 'err'); return; }
+      toast(`Разбанен: ${title}`, 'ok');
+      Sound.play('ok');
+      setTimeout(loadBans, 400);
+    };
+    return node;
+  };
+  for (const b of players) host.appendChild(row(b));
+  for (const b of ips) host.appendChild(row(b));
+}
+
+async function loadBans() {
+  const s = current();
+  if (!s) return;
+  let data = { players: [], ips: [] };
+  try {
+    data = (window.desktop && window.desktop.bansList) ? await window.desktop.bansList(s.id) : await API.bansList(s.id);
+  } catch { data = { players: [], ips: [] }; }
+  if (data && data.error) toast(data.error, 'err');
+  renderBans(data || { players: [], ips: [] });
 }
 
 /* ═════════════════════ ошибки при запуске ═════════════════════ */

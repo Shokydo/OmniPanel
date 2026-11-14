@@ -48,11 +48,21 @@ function ensureDir(dir) {
 function listBackups(dir) {
   try {
     return fs.readdirSync(dir)
-      .filter((f) => /\.(7z|zip|tar\.gz)$/i.test(f))
+      /* разбитый архив показываем одной строкой — по первому тому */
+      .filter((f) => {
+        if (/\.7z\.\d{3}$/i.test(f)) return /\.7z\.001$/i.test(f);
+        return /\.(7z|zip|tar\.gz)$/i.test(f);
+      })
       .map((f) => {
         const full = path.join(dir, f);
         const st = fs.statSync(full);
-        return { file: full, name: f, size: st.size, createdAt: st.mtimeMs };
+        const volumes = /\.7z\.001$/i.test(f)
+          ? seven.existingVolumes(path.join(dir, f.replace(/\.001$/i, '')))
+          : [];
+        const size = volumes.length
+          ? volumes.reduce((sum, v) => { try { return sum + fs.statSync(v).size; } catch { return sum; } }, 0)
+          : st.size;
+        return { file: full, name: f, size, createdAt: st.mtimeMs, parts: volumes.length };
       })
       .sort((a, b) => b.createdAt - a.createdAt);
   } catch {
@@ -68,6 +78,41 @@ const SKIP_ALWAYS = [
   /(^|\/)Thumbs\.db$/i,
   /(^|\/)session\.lock$/i,
 ];
+
+/**
+ * Что можно не тащить в бэкап: сервер восстановит это сам.
+ * libraries/versions — Forge/Fabric докачает при первом запуске,
+ * logs/ и crash-reports/ — диагностика, а не данные мира.
+ */
+const LEAN_NAMES = ['libraries', 'versions', 'logs', 'crash-reports'];
+
+/** Исключения для «лёгкого» бэкапа (регулярные выражения — для подсчёта и zip). */
+const SKIP_LEAN = LEAN_NAMES.map((n) => new RegExp(`(^|/)${n}(/|$)`));
+
+function leanSkip() {
+  return SKIP_LEAN.slice();
+}
+
+/** Те же исключения именами — 7-Zip понимает только маски, не регулярки. */
+function leanNames() {
+  return LEAN_NAMES.slice();
+}
+
+/**
+ * Самые тяжёлые места в папке сервера: [{ name, bytes, files }].
+ * Нужно, чтобы человек видел, из-за чего архив большой, а не гадал.
+ */
+function topDirs(srcDir, count = 5) {
+  let entries = [];
+  try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const size = dirSize(path.join(srcDir, e.name));
+    out.push({ name: e.name, bytes: size.bytes, files: size.files });
+  }
+  return out.sort((a, b) => b.bytes - a.bytes).slice(0, count);
+}
 
 /** Сколько файлов и байт реально попадёт в архив (без служебного мусора). */
 function measure(srcDir, skip = []) {
@@ -98,7 +143,7 @@ function measure(srcDir, skip = []) {
  * @returns {Promise<{file:string,size:number,name:string,createdAt:number,sha256:string,
  *                    files:number,raw:number,format:string,packer:string}>}
  */
-async function createBackup({ srcDir, destDir, label = 'backup', skip = [], format = 'auto' }) {
+async function createBackup({ srcDir, destDir, label = 'backup', skip = [], skipNames = [], format = 'auto', volumeMb = 0 }) {
   if (!srcDir || !fs.existsSync(srcDir)) throw new Error('Папка сервера не найдена: ' + srcDir);
   ensureDir(destDir);
 
@@ -108,28 +153,40 @@ async function createBackup({ srcDir, destDir, label = 'backup', skip = [], form
   const tmp = file + '.part';
 
   const count = measure(srcDir, skip);
-  let packer = 'zip deflate';
   if (use7z) {
     try {
-      await seven.compressDir({ srcDir, outFile: tmp });
-      packer = '7z lzma2';
+      /* с разбивкой томов архив сразу пишется файлами .001, .002 … */
+      const packed = await seven.compressDir({ srcDir, outFile: tmp, volumeMb, excludes: skipNames });
+      const parts = packed.parts || [packed.file];
+      if (parts.length === 1) {
+        fs.renameSync(packed.file, file);
+        return finish(file, count, packed.cmd || '7z lzma2');
+      }
+      const renamed = parts.map((part, i) => {
+        const target = `${file}.${String(i + 1).padStart(3, '0')}`;
+        fs.renameSync(part, target);
+        return target;
+      });
+      return finish(renamed[0], count, packed.cmd || '7z lzma2', '', renamed);
     } catch (err) {
       /* 7-Zip не справился (нет прав, антивирус, битый бинарник) — не теряем бэкап */
+      for (const part of seven.existingVolumes(tmp)) { try { fs.unlinkSync(part); } catch { /* уже нет */ } }
       try { fs.unlinkSync(tmp); } catch { /* уже нет */ }
       const fallback = path.join(destDir, name.replace(/\.7z$/, '.zip'));
       zip.zipDir(srcDir, fallback + '.part', { skip: SKIP_ALWAYS.concat(skip) });
       fs.renameSync(fallback + '.part', fallback);
-      return finish(fallback, count, 'zip deflate', 'Zip не сработал — ' + err.message);
+      return finish(fallback, count, 'zip deflate', '7-Zip не сработал — ' + err.message);
     }
-  } else {
-    zip.zipDir(srcDir, tmp, { skip: SKIP_ALWAYS.concat(skip) });
   }
+  zip.zipDir(srcDir, tmp, { skip: SKIP_ALWAYS.concat(skip) });
   fs.renameSync(tmp, file);
-  return finish(file, count, packer);
+  return finish(file, count, 'zip deflate');
 }
 
 /** Собирает результат бэкапа: размер, sha256, коэффициент сжатия. */
-function finish(file, count, packer, warning = '') {
+function finish(file, count, packer, warning = '', parts = []) {
+  const list = parts.length ? parts : [file];
+  const size = list.reduce((sum, f) => { try { return sum + fs.statSync(f).size; } catch { return sum; } }, 0);
   const st = fs.statSync(file);
   const hash = crypto.createHash('sha256');
   hash.update(fs.readFileSync(file));
@@ -137,15 +194,18 @@ function finish(file, count, packer, warning = '') {
   return {
     file,
     name: path.basename(file),
-    size: st.size,
+    size,
     createdAt: st.mtimeMs,
     sha256: hash.digest('hex'),
     files: count.files,
     raw,
-    format: /\.7z$/i.test(file) ? '7z' : 'zip',
+    format: /\.7z(\.\d{3})?$/i.test(file) ? '7z' : 'zip',
     packer,
+    /* полные пути томов (нужны отправке на GitHub) и их имена для интерфейса */
+    parts: list.length > 1 ? list.slice() : [],
+    partNames: list.length > 1 ? list.map((f) => path.basename(f)) : [],
     /* во сколько раз сжалось: 3.4 — втрое меньше исходного */
-    ratio: raw && st.size ? Number((raw / st.size).toFixed(2)) : 0,
+    ratio: raw && size ? Number((raw / size).toFixed(2)) : 0,
     warning,
   };
 }
@@ -157,7 +217,7 @@ async function restoreBackup({ file, destDir }) {
   if (!file || !fs.existsSync(file)) throw new Error('Файл бэкапа не найден');
   ensureDir(destDir);
 
-  if (/\.7z$/i.test(file)) {
+  if (/\.7z(\.\d{3})?$/i.test(file)) {
     await seven.extract({ file, destDir });
     return true;
   }
@@ -171,11 +231,19 @@ async function restoreBackup({ file, destDir }) {
 }
 
 function deleteBackup(file) {
+  let ok = false;
   try {
+    /* у разбитого архива удаляем все тома, иначе они останутся мусором */
+    if (/\.7z\.\d{3}$/i.test(file)) {
+      for (const part of seven.existingVolumes(file.replace(/\.\d{3}$/i, ''))) {
+        try { fs.unlinkSync(part); ok = true; } catch { /* занят — пропускаем */ }
+      }
+      return ok;
+    }
     fs.unlinkSync(file);
     return true;
   } catch {
-    return false;
+    return ok;
   }
 }
 
@@ -199,4 +267,7 @@ function dirSize(dir, limit = 200000) {
   return { bytes: total, files };
 }
 
-module.exports = { listBackups, createBackup, restoreBackup, deleteBackup, ensureDir, dirSize, slug, stamp };
+module.exports = {
+  listBackups, createBackup, restoreBackup, deleteBackup, ensureDir, dirSize, slug, stamp,
+  measure, topDirs, leanSkip, leanNames, SKIP_ALWAYS, SKIP_LEAN, LEAN_NAMES,
+};

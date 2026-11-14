@@ -70,7 +70,10 @@ const server = http.createServer(async (req, res) => {
     if (b.base_tree) for (const e of (state.trees.get(b.base_tree) || [])) merged.set(e.path, e);
     for (const e of (b.tree || [])) {
       if (e.sha === null) merged.delete(e.path);
-      else merged.set(e.path, { path: e.path, type: 'blob', sha: e.sha, mode: e.mode || '100644' });
+      else merged.set(e.path, {
+        path: e.path, type: 'blob', sha: e.sha, mode: e.mode || '100644',
+        size: (state.blobs.get(e.sha) || Buffer.alloc(0)).length,
+      });
     }
     const list = [...merged.values()];
     state.trees.set(s, list);
@@ -191,16 +194,16 @@ const server = http.createServer(async (req, res) => {
   const archLogs = [];
   const archPush = await github.push({ ...archOpts, onLog: (t) => archLogs.push(t) });
   assert.strictEqual(archPush.ok, true, 'отправка архивом: ' + archPush.error);
-  assert.ok(/\.7z$/.test(archPush.archive), 'собран архив 7z: ' + archPush.archive);
+  assert.ok(/\.7z(\.\d{3})?$/.test(archPush.archive), 'собран архив 7z: ' + archPush.archive);
   assert.strictEqual(archPush.format, '7z', 'формат архива — 7z');
   assert.ok(archPush.size > 0, 'размер архива известен');
   assert.ok(archPush.raw > archPush.size * 3, 'архив заметно меньше исходника: ' + archPush.size + ' из ' + archPush.raw);
   assert.ok(archLogs.some((l) => /шаг 1 из 2: архивирую/.test(l)), 'первый шаг — архивация', archLogs.join(' | ').slice(0, 120));
-  assert.ok(archLogs.some((l) => /шаг 2 из 2: отправляю архив на GitHub/.test(l)), 'второй шаг — отправка');
+  assert.ok(archLogs.some((l) => /шаг 2 из 2: отправляю на GitHub/.test(l)), 'второй шаг — отправка');
   assert.ok(archLogs.some((l) => /архив готов/.test(l)), 'в логе видно имя и плотность архива');
 
   const archTree = state.trees.get(state.trees.get('commit:' + state.refs.get('main')).tree) || [];
-  assert.ok(archTree.some((e) => /\.omnipanel\/сервер\.7z$/.test(e.path)), 'в репозитории один файл сервера (.7z)');
+  assert.ok(archTree.some((e) => /\.omnipanel\/сервер\.7z(\.\d{3})?$/.test(e.path)), 'в репозитории файл сервера (.7z)');
   assert.ok(!archTree.some((e) => /\.omnipanel\/сервер\.zip$/.test(e.path)), 'старый zip в репозитории не остался');
   assert.ok(archTree.some((e) => /манифест\.json$/.test(e.path)), 'манифест архива на месте');
   assert.ok(!archTree.some((e) => e.path === 'server.properties'), 'пофайловых копий нет — только архив');
@@ -277,8 +280,61 @@ const server = http.createServer(async (req, res) => {
   assert.strictEqual(fs.readFileSync(path.join(legacyOut, 'server.properties'), 'utf8'), 'level-name=legacy\n',
     'старый zip распакован');
 
+  /* ── большие серверы: архив делится на части, после распаковки части удаляются ── */
+  const bigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh409-big-'));
+  fs.mkdirSync(path.join(bigDir, 'world'), { recursive: true });
+  /* несжимаемые данные, чтобы архив точно перевалил за размер части */
+  fs.writeFileSync(path.join(bigDir, 'world', 'blob.bin'), require('crypto').randomBytes(3 * 1024 * 1024));
+  fs.writeFileSync(path.join(bigDir, 'server.properties'), 'level-name=big\n');
+  process.env.OMNI_SPLIT_MB = '1';       // в тесте части по 1 МБ вместо 45
+  delete require.cache[require.resolve('../core/github')];
+  const gh2 = require('../core/github');
+  delete process.env.OMNI_SPLIT_MB;      // остальные вызовы — как в бою
+
+  const bigOpts = {
+    dir: bigDir, repo: 'friend/big-server', branch: 'main', token: 'test-token',
+    scope: 'all', mode: 'archive', stateFile: path.join(stateDir, 'state6.json'),
+  };
+  const bigLogs = [];
+  const bigPush = await gh2.push({ ...bigOpts, onLog: (t) => bigLogs.push(t) });
+  assert.strictEqual(bigPush.ok, true, 'отправка большим архивом: ' + bigPush.error);
+  assert.ok(bigPush.parts > 1, 'архив разбит на части: ' + bigPush.parts);
+  assert.ok(bigLogs.some((l) => /частей \d+/.test(l)), 'в логе число частей', bigLogs.join(' | ').slice(0, 140));
+  const bigTree = state.trees.get(state.trees.get('commit:' + state.refs.get('main')).tree) || [];
+  const partPaths = bigTree.map((e) => e.path).filter((p2) => /\.7z\.\d{3}$/.test(p2)).sort();
+  assert.strictEqual(partPaths.length, bigPush.parts, 'все части в репозитории: ' + partPaths.join(', '));
+  assert.ok(partPaths[0].endsWith('.7z.001'), 'части нумеруются с .001');
+
+  /* забор на другой машине: части скачиваются, распаковываются и удаляются из репозитория */
+  const bigOut = fs.mkdtempSync(path.join(os.tmpdir(), 'gh409-big-out-'));
+  const bigPullLogs = [];
+  const bigPull = await gh2.pull({
+    dir: bigOut, repo: 'friend/big-server', branch: 'main', token: 'test-token',
+    mode: 'archive', stateFile: path.join(stateDir, 'state7.json'), onLog: (t) => bigPullLogs.push(t),
+  });
+  assert.strictEqual(bigPull.ok, true, 'забор большим архивом: ' + bigPull.error);
+  assert.strictEqual(bigPull.parts, partPaths.length, 'скачаны все части');
+  assert.ok(bigPull.repoCleaned >= partPaths.length, 'части удалены из репозитория: ' + bigPull.repoCleaned);
+  assert.ok(bigPullLogs.some((l) => /шаг 1 из 2: скачиваю архив/.test(l)), 'первый шаг — скачивание');
+  assert.ok(bigPullLogs.some((l) => /частей/.test(l)), 'в логе видно, что качаются части');
+  assert.ok(bigPullLogs.some((l) => /шаг 2 из 2: распаковываю/.test(l)), 'второй шаг — распаковка');
+  assert.ok(bigPullLogs.some((l) => /удалены из репозитория/.test(l)), 'в логе видно удаление частей');
+  assert.ok(fs.statSync(path.join(bigOut, 'world', 'blob.bin')).size === 3 * 1024 * 1024,
+    'мир распакован целиком из многотомного архива');
+
+  const afterTree = state.trees.get(state.trees.get('commit:' + state.refs.get('main')).tree) || [];
+  assert.ok(!afterTree.some((e) => /\.7z/.test(e.path)), 'в репозитории не осталось ни одной части',
+    afterTree.map((e) => e.path).join(', '));
+  assert.ok(!afterTree.some((e) => /манифест\.json$/.test(e.path)), 'манифест тоже убран');
+
+  /* повторная отправка после очистки работает: репозиторий снова принимает архив */
+  const again = await gh2.push(bigOpts);
+  assert.strictEqual(again.ok, true, 'после очистки архив отправляется заново: ' + again.error);
+  assert.ok(again.parts > 1, 'снова разбит на части');
+
   console.log('409 на пустом репозитории: первый коммит создан через Contents API, вторая отправка обычная — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
   console.log('пересылка архивом: архивация → GitHub → скачивание и распаковка, включая старый zip и режим по умолчанию — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
+  console.log(`большой сервер: архив разбит на ${bigPush.parts} части, все скачаны, распакованы и удалены из репозитория — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ`);
   server.close();
 })().catch((err) => {
   console.error('ОШИБКА:', err.message);

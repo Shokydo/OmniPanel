@@ -78,40 +78,76 @@ const DEFAULT_EXCLUDES = ['.git', 'cache', 'session.lock', 'Thumbs.db', '.DS_Sto
 
 function excludeArgs(extra = []) {
   const args = [];
+  /* каталог исключаем тремя масками: сам, содержимое и с обратной косой чертой
+     (7-Zip на Windows сверяет пути через «\», на Linux — через «/») */
   for (const name of DEFAULT_EXCLUDES.concat(extra)) {
-    const clean = String(name || '').trim();
+    const clean = String(name || '').trim().replace(/[\\/]+$/, '');
     if (!clean) continue;
-    args.push('-xr!' + clean);
+    args.push('-xr!' + clean, '-xr!' + clean + '/*');
+    if (!clean.includes('/')) args.push('-xr!' + clean + '\\*');
   }
   return args;
 }
 
 /**
  * Упаковывает папку в .7z с максимумом сжатия.
- * LZMA2, словарь 32 МБ, твёрдый блок — плотнее zip примерно на 5–20 %,
- * а на серверах с тысячами мелких файлов заметно сильнее.
+ * LZMA2, словарь 64 МБ, 273 быстрых байта, твёрдый блок — плотнее zip примерно на 5–20 %,
+ * а на серверах с тысячами мелких файлов заметно сильнее. Внутри архива уже сжатые
+ * .jar и .mca почти не ужимаются: это предел самого формата, а не настройки.
  *
  * @returns {Promise<{file:string,size:number,cmd:string}>}
  */
-async function compressDir({ srcDir, outFile, excludes = [], extra = [] }) {
+async function compressDir({ srcDir, outFile, excludes = [], extra = [], volumeMb = 0 }) {
   if (!available()) throw new Error('7-Zip не найден');
   if (!fs.existsSync(srcDir)) throw new Error('Папка не найдена: ' + srcDir);
+  for (const part of volumePaths(outFile, volumeMb)) { try { fs.unlinkSync(part); } catch { /* файла ещё нет */ } }
   try { fs.unlinkSync(outFile); } catch { /* файла ещё нет */ }
   await run([
     'a', '-t7z', outFile, '.',
     '-mx=9',
     '-m0=lzma2',
-    '-md=32m',
-    '-mfb=64',
+    /* словарь 64 МБ и максимум быстрых байт: заметно плотнее на тексте и конфигах */
+    '-md=64m',
+    '-mfb=273',
     '-ms=on',
     '-mmt=on',
     '-y',
     '-bso0', '-bsp0',
     '-scsUTF-8',
+    /* разбивка на тома: каждый файл влезает в лимит GitHub */
+    ...(volumeMb > 0 ? [`-v${Math.max(1, Math.round(volumeMb))}m`] : []),
     ...excludeArgs(excludes.concat(extra)),
   ], { cwd: srcDir });
+  const parts = volumeMb > 0 ? existingVolumes(outFile) : [];
+  if (parts.length) {
+    return {
+      file: parts[0],
+      parts,
+      size: parts.reduce((sum, f) => sum + fs.statSync(f).size, 0),
+      cmd: `7z lzma2, ${parts.length} частей`,
+    };
+  }
   const st = fs.statSync(outFile);
-  return { file: outFile, size: st.size, cmd: '7z lzma2' };
+  return { file: outFile, parts: [outFile], size: st.size, cmd: '7z lzma2' };
+}
+
+/** Имена томов: outFile.001, .002 … (как их создаёт 7-Zip с ключом -v). */
+function volumePaths(outFile, volumeMb) {
+  if (!volumeMb) return [];
+  const out = [];
+  for (let i = 1; i <= 999; i += 1) out.push(`${outFile}.${String(i).padStart(3, '0')}`);
+  return out;
+}
+
+/** Что реально появилось на диске после сжатия с разбивкой. */
+function existingVolumes(outFile) {
+  const out = [];
+  for (let i = 1; i <= 999; i += 1) {
+    const file = `${outFile}.${String(i).padStart(3, '0')}`;
+    if (!exists(file)) break;
+    out.push(file);
+  }
+  return out;
 }
 
 /** Распаковывает .7z в папку (перезапись). */
@@ -120,6 +156,12 @@ async function extract({ file, destDir }) {
     throw new Error('Для этого архива нужен 7-Zip, а его нет рядом с панелью');
   }
   if (!fs.existsSync(file)) throw new Error('Файл бэкапа не найден');
+  if (/\.7z\.\d{3}$/i.test(file)) {
+    /* разбитый архив: первый том тянет за собой остальные, но проверим, что они рядом */
+    const base = file.replace(/\.\d{3}$/i, '');
+    const others = existingVolumes(base);
+    if (!others.length) throw new Error('Не хватает частей архива рядом с первым томом');
+  }
   fs.mkdirSync(destDir, { recursive: true });
   await run(['x', file, '-o' + destDir, '-y', '-bso0', '-bsp0']);
   return true;
@@ -164,5 +206,5 @@ async function list(file) {
 function reset() { cached = null; }
 
 module.exports = {
-  binary, available, reset, compressDir, extract, test, list, run, IS_WIN, DEFAULT_EXCLUDES,
+  binary, available, reset, existingVolumes, compressDir, extract, test, list, run, IS_WIN, DEFAULT_EXCLUDES,
 };

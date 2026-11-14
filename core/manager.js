@@ -132,7 +132,7 @@ class ServerManager extends EventEmitter {
       icon: server.icon || '',
       encoding: server.encoding || 'auto',
       tpsCommand: server.tpsCommand ?? '',
-      tpsInterval: Number(server.tpsInterval) > 0 ? Number(server.tpsInterval) : 30,
+      tpsInterval: Number(server.tpsInterval) > 0 ? Number(server.tpsInterval) : 10,
     };
     this.servers.push(s);
     this._persist();
@@ -324,15 +324,27 @@ class ServerManager extends EventEmitter {
     clearTimeout(r.tpsFirstTimer);
     if (!srv || !(srv.tpsCommand || '').trim()) return;
 
-    const interval = (Number(srv.tpsInterval) > 0 ? Number(srv.tpsInterval) : 30) * 1000;
+    const interval = (Number(srv.tpsInterval) > 0 ? Number(srv.tpsInterval) : 10) * 1000;
     const ask = () => {
       if (this._rt(id).state !== 'running') return;
       r.tpsPendingUntil = Date.now() + 5000;
       this.sendCommand(id, srv.tpsCommand, { silent: true });
     };
-    // первый замер — когда сервер уже прогрелся
-    r.tpsFirstTimer = setTimeout(ask, Math.min(15000, interval));
-    r.tpsTimer = setInterval(ask, interval);
+    /* Первый замер — сразу после старта, чтобы график не пустовал.
+       Пока сервер не ответил (ядро ещё грузится), повторяем каждые 3 секунды,
+       но не дольше минуты: дальше работает обычный интервал. */
+    let tries = 0;
+    const first = () => {
+      if (this._rt(id).state !== 'running') return;
+      if (r.tpsHistory.length || tries >= 20) {
+        r.tpsTimer = setInterval(ask, interval);
+        return;
+      }
+      tries += 1;
+      ask();
+      r.tpsFirstTimer = setTimeout(first, 3000);
+    };
+    r.tpsFirstTimer = setTimeout(first, 1500);
   }
 
   _stopTpsPolling(id) {

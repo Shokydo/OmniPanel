@@ -116,7 +116,7 @@ async function openSync(page, serverIndex) {
     return el ? el.innerText : '';
   });
   ok(/шаг 1 из 2: архивирую/.test(notes), 'в консоли виден шаг 1 — архивация', notes.slice(-160));
-  ok(/шаг 2 из 2: отправляю архив на GitHub/.test(notes), 'в консоли виден шаг 2 — отправка');
+  ok(/шаг 2 из 2: отправляю на GitHub/.test(notes), 'в консоли виден шаг 2 — отправка');
   ok(mock.store.blobs.size > before + 1, 'в репозиторий легли blob-ы архива и манифеста',
     `${before} → ${mock.store.blobs.size}`);
 
@@ -160,10 +160,13 @@ async function openSync(page, serverIndex) {
   console.log('\n=== настройки ===');
   const ui = await page.evaluate(() => ({
     mode: document.getElementById('f_syncMode').checked,
+    keep: document.getElementById('f_syncKeep').checked,
     hint: document.querySelector('.sync-hint').textContent,
   }));
   ok(ui.mode === true, 'пересылка архивом включена по умолчанию');
-  ok(/упаковывает папку сервера в архив/i.test(ui.hint), 'подсказка объясняет отправку архивом');
+  ok(ui.keep === false, 'части архива по умолчанию удаляются из репозитория');
+  ok(/делит архив на части/i.test(ui.hint), 'подсказка объясняет нарезку архива');
+  ok(/удаляет части из репозитория/i.test(ui.hint), 'подсказка объясняет автоудаление частей');
 
   console.log('\n=== ОШИБКИ ===');
   ok(errs.length === 0, 'нет JS-ошибок', errs.slice(0, 2).join(' | '));

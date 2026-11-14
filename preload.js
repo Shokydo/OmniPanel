@@ -119,6 +119,13 @@ contextBridge.exposeInMainWorld('desktop', {
   backupDelete: (file) => ipcRenderer.invoke('backup:delete', file),
   backupReveal: (id) => ipcRenderer.invoke('backup:reveal', id),
   backupSize: (id) => ipcRenderer.invoke('backup:size', id),
+  bansList: (id) => ipcRenderer.invoke('bans:list', id),
+  bansUnban: (id, target) => ipcRenderer.invoke('bans:unban', id, target),
+  bansBan: (id, target) => ipcRenderer.invoke('bans:ban', id, target),
+  /* свои окна вместо системных: main спрашивает — интерфейс отвечает */
+  onAsk: (cb) => ipcRenderer.on('ui:ask', (_e, p) => cb(p)),
+  answerAsk: (rid, id) => ipcRenderer.send('ui:answer', { rid, id }),
+  askReady: () => ipcRenderer.send('ui:ready'),
   tpsHistory: (id) => ipcRenderer.invoke('tps:history', id),
   tpsClear: (id) => ipcRenderer.invoke('tps:clear', id),
   iconFromServer: (cwd) => ipcRenderer.invoke('icon:fromServer', cwd),

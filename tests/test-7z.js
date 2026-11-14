@@ -124,6 +124,70 @@ fs.writeFileSync(path.join(SRV, '.git/config'), 'x'.repeat(500));
   seven.reset();
   ok(seven.available(), 'после возврата PATH 7-Zip снова виден');
 
+  console.log('\n=== разбивка на части (для пересылки на GitHub) ===');
+  const SPLIT = path.join(os.tmpdir(), 'omni-7z-split');
+  fs.rmSync(SPLIT, { recursive: true, force: true });
+  const bigSrc = path.join(os.tmpdir(), 'omni-7z-big');
+  fs.rmSync(bigSrc, { recursive: true, force: true });
+  fs.mkdirSync(path.join(bigSrc, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(bigSrc, 'world', 'blob.bin'), require('crypto').randomBytes(2.5 * 1024 * 1024));
+  fs.writeFileSync(path.join(bigSrc, 'server.properties'), 'level-name=big\n');
+  const split = await backup.createBackup({ srcDir: bigSrc, destDir: SPLIT, label: 'Большой', format: '7z', volumeMb: 1 });
+  ok(split.parts.length >= 3, 'архив разбит на части', 'частей: ' + split.parts.length);
+  ok(split.partNames.every((n) => /\.7z\.\d{3}$/.test(n)), 'имена частей как у 7-Zip', split.partNames.slice(0, 2).join(', '));
+  ok(split.partNames[0].endsWith('.001'), 'первая часть — .001');
+  const partSum = split.parts.reduce((sum, f) => sum + fs.statSync(f).size, 0);
+  ok(split.size === partSum, 'размер бэкапа — сумма всех частей', split.size + ' Б');
+  const listed = backup.listBackups(SPLIT);
+  ok(listed.length === 1, 'в списке бэкапов одна строка, а не по строке на часть', 'строк: ' + listed.length);
+  ok(listed[0].parts === split.parts.length, 'в списке видно число частей', 'частей: ' + listed[0].parts);
+
+  const joinBack = path.join(os.tmpdir(), 'omni-7z-split-restore');
+  fs.rmSync(joinBack, { recursive: true, force: true });
+  await backup.restoreBackup({ file: split.file, destDir: joinBack });
+  ok(fs.statSync(path.join(joinBack, 'world', 'blob.bin')).size === 2.5 * 1024 * 1024,
+    'разбитый архив восстанавливается целиком');
+  ok(backup.deleteBackup(split.file), 'удаление бэкапа проходит');
+  ok(fs.readdirSync(SPLIT).length === 0, 'удаляются все части, мусора не остаётся');
+
+  console.log('\n=== «лёгкий» бэкап: без libraries, versions и логов ===');
+  const leanSrc = path.join(os.tmpdir(), 'omni-7z-lean');
+  fs.rmSync(leanSrc, { recursive: true, force: true });
+  fs.mkdirSync(path.join(leanSrc, 'libraries/net'), { recursive: true });
+  fs.mkdirSync(path.join(leanSrc, 'logs'), { recursive: true });
+  fs.mkdirSync(path.join(leanSrc, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(leanSrc, 'world', 'level.dat'), 'мир');
+  fs.writeFileSync(path.join(leanSrc, 'server.properties'), 'level-name=world\n');
+  /* библиотеки — как настоящие .jar: уже сжаты, поэтому вес виден сразу */
+  for (let i = 0; i < 20; i += 1) {
+    fs.writeFileSync(path.join(leanSrc, `libraries/net/lib${i}.jar`), require('crypto').randomBytes(200000));
+  }
+  for (let i = 0; i < 5; i += 1) {
+    fs.writeFileSync(path.join(leanSrc, `logs/${i}.log`), 'player joined the game\n'.repeat(4000));
+  }
+  const leanDst = path.join(os.tmpdir(), 'omni-7z-lean-out');
+  fs.rmSync(leanDst, { recursive: true, force: true });
+  const full = await backup.createBackup({ srcDir: leanSrc, destDir: leanDst, label: 'full', format: '7z' });
+  const lean = await backup.createBackup({
+    srcDir: leanSrc, destDir: leanDst, label: 'lean', format: '7z',
+    skip: backup.leanSkip(), skipNames: backup.leanNames(),
+  });
+  ok(lean.raw < full.raw, 'в лёгкий бэкап попадает меньше данных',
+    `${(full.raw / 1048576).toFixed(1)} → ${(lean.raw / 1048576).toFixed(1)} МБ`);
+  ok(lean.size < full.size, 'лёгкий архив меньше', `${full.size} → ${lean.size} Б`);
+  ok(full.files > lean.files + 20, 'библиотеки и логи не попали', `файлов ${full.files} → ${lean.files}`);
+  const leanNames = await seven.list(lean.file);
+  const leanPaths = leanNames.filter((x) => !x.isDir).map((x) => x.Path).filter(Boolean);
+  ok(!leanPaths.some((x) => /(^|\/)libraries\//.test(x)), 'libraries исключены');
+  ok(!leanPaths.some((x) => /(^|\/)logs\//.test(x)), 'logs исключены');
+  ok(leanPaths.some((x) => /world\/level\.dat$/.test(x)), 'мир на месте');
+  ok(leanPaths.some((x) => /server\.properties$/.test(x)), 'конфиги на месте');
+
+  console.log('\n=== отчёт: что занимает место ===');
+  const heavy = backup.topDirs(leanSrc, 3);
+  ok(heavy.length >= 3, 'папки посчитаны', heavy.map((d) => `${d.name} ${d.bytes}`).join(', '));
+  ok(heavy[0].bytes >= heavy[1].bytes, 'самая тяжёлая папка первая', heavy[0].name + ' ' + heavy[0].bytes);
+
   console.log(fails ? `\nПРОВАЛОВ: ${fails}` : '\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error('ОШИБКА', e); process.exit(1); });

@@ -281,8 +281,10 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   ok(dl.includes('o/r'), 'репозиторий предложен в подсказке списка', JSON.stringify(dl));
   ok(await page.$eval('#f_syncMode', (e) => e.checked === true), 'пересылка архивом включена по умолчанию');
   const hint = await page.$eval('.sync-hint', (e) => e.textContent);
-  ok(/упаковывает папку сервера в архив/i.test(hint) && /распаковывает/i.test(hint),
-    'в подсказке описан поток: архив → GitHub → распаковка', hint.slice(0, 90));
+  ok(/упаковывает папку сервера/i.test(hint) && /распаковывает/i.test(hint) && /по 45 МБ/.test(hint),
+    'в подсказке описан поток: архив → части → GitHub → распаковка', hint.slice(0, 90));
+  ok(await page.$eval('#f_syncKeep', (e) => e.checked === false),
+    'части архива по умолчанию не остаются в репозитории');
 
   await page.$eval('#modal .modal-body', (e) => { e.scrollTop = e.scrollHeight; });
   await page.waitForTimeout(400);

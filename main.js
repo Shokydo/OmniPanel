@@ -14,6 +14,7 @@ const files = require('./core/files');
 const archive = require('./core/archive');
 const modrinth = require('./core/modrinth');
 const ports = require('./core/ports');
+const playersCore = require('./core/players');
 const addons = require('./core/addons');
 const opener = require('./core/opener');
 const github = require('./core/github');
@@ -415,6 +416,8 @@ function syncOptions(srv) {
     scope: sc.scope || 'all',
     /* основной режим — одним архивом: сначала архивация, потом отправка файла */
     mode: sc.mode || 'archive',
+    /* по умолчанию части архива стираются из репозитория сразу после распаковки */
+    cleanup: sc.keepParts !== true,
     stateFile: syncStateFile(srv.id),
     message: `OmniPanel: ${srv.name} — ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
     onLog: (text) => {
@@ -424,6 +427,53 @@ function syncOptions(srv) {
     },
   };
 }
+
+/* -------------------- свои окна вместо системных -------------------- */
+
+/* Системный MessageBox выглядит чужеродно на фоне панели, поэтому вопросы
+   задаём своим окном в интерфейсе. Если окна нет (свёрнуто в трей и закрыто,
+   ещё не загрузилось) — падаем обратно на системный диалог, чтобы вопрос
+   не потерялся. */
+let uiReady = false;
+let askSeq = 0;
+const askWaiting = new Map();
+
+async function askUI({ title, text, buttons = [], kind = 'warn' }) {
+  const list = (buttons.length ? buttons : [{ id: 'ok', label: 'Понятно', primary: true }])
+    .map((b) => ({ id: b.id, label: b.label, primary: !!b.primary, danger: !!b.danger }));
+  if (!win || win.isDestroyed() || !uiReady) {
+    const res = await dialog.showMessageBox(win || null, {
+      type: kind === 'err' ? 'error' : 'warning',
+      title,
+      message: title,
+      detail: text,
+      buttons: list.map((b) => b.label),
+      defaultId: 0,
+      cancelId: 0,
+    });
+    return list[res.response] ? list[res.response].id : list[0].id;
+  }
+  if (win.isMinimized()) win.restore();
+  const rid = ++askSeq;
+  return new Promise((resolve) => {
+    askWaiting.set(rid, resolve);
+    win.webContents.send('ui:ask', { rid, title, text, buttons: list, kind });
+    /* окно не ответило (перезагрузка интерфейса) — не держим запуск вечно */
+    setTimeout(() => {
+      if (askWaiting.has(rid)) { askWaiting.delete(rid); resolve(null); }
+    }, 5 * 60 * 1000);
+  });
+}
+
+ipcMain.on('ui:ready', () => { uiReady = true; });
+
+ipcMain.on('ui:answer', (_e, payload) => {
+  const rid = payload && payload.rid;
+  const done = askWaiting.get(rid);
+  if (!done) return;
+  askWaiting.delete(rid);
+  done(payload.id);
+});
 
 /** Идентификаторы «общих» серверов — их не трогаем массовыми кнопками. */
 function sharedIds() {
@@ -439,16 +489,16 @@ async function startWithSync(id) {
     const res = await github.pull(syncOptions(srv));
     if (!res.ok) {
       manager.note(id, 'GitHub: ' + res.error);
-      const cont = await dialog.showMessageBox(win, {
-        type: 'warning',
+      const choice = await askUI({
+        kind: 'warn',
         title: 'Синхронизация не удалась',
-        message: 'Не удалось получить обновления из GitHub',
-        detail: res.error + '\n\nСервер всё равно запустить?',
-        buttons: ['Не запускать', 'Запустить как есть'],
-        defaultId: 0,
-        cancelId: 0,
+        text: res.error,
+        buttons: [
+          { id: 'cancel', label: 'Не запускать' },
+          { id: 'start', label: 'Запустить как есть', primary: true },
+        ],
       });
-      if (cont.response !== 1) return manager.status(id);
+      if (choice !== 'start') return manager.status(id);
     } else if (res.upToDate) {
       manager.note(id, 'GitHub: обновлений нет');
     } else {
@@ -526,6 +576,11 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, 'ui', 'index.html'));
+  /* Готовность окна подтверждает сам интерфейс: события загрузки приходят
+     вразнобой (did-start-loading бывает уже после did-finish-load из-за
+     картинок и протокола обоев), а «здесь и сейчас готов» — это сигнал от
+     страницы, а не от Chromium. */
+  uiReady = false;
   win.once('ready-to-show', () => {
     const mode = readWindowPrefs().startMode;
     if (mode === 'maximized') win.maximize();
@@ -953,9 +1008,10 @@ function wireIpc() {
     manager.note(id, res.ok
       ? (res.upToDate
         ? 'GitHub: всё уже актуально'
-        : (res.format
-          ? `GitHub: архив ${res.format} скачан и распакован — файлов ${res.downloaded}`
-          : `GitHub: скачано ${res.downloaded}, удалено ${res.removed}`))
+        : ((res.format
+          ? `GitHub: архив ${res.format}${res.parts > 1 ? ` из ${res.parts} частей` : ''} скачан и распакован — файлов ${res.downloaded}`
+          : `GitHub: скачано ${res.downloaded}, удалено ${res.removed}`)
+          + (res.repoCleaned ? ', части архива удалены из репозитория' : '')))
       : 'GitHub: ' + res.error);
     return res;
   });
@@ -969,7 +1025,9 @@ function wireIpc() {
       ? (res.upToDate
         ? 'GitHub: отправлять нечего'
         : (res.archive
-          ? `GitHub: архив ${(res.format || 'zip')} ${(res.size / 1048576).toFixed(1)} МБ (из ${(res.raw / 1048576).toFixed(1)} МБ) отправлен, коммит ${String(res.commit).slice(0, 7)}`
+          ? `GitHub: архив ${(res.format || 'zip')} ${(res.size / 1048576).toFixed(1)} МБ (из ${(res.raw / 1048576).toFixed(1)} МБ)`
+            + (res.parts > 1 ? `, частей ${res.parts}` : '')
+            + ` отправлен, коммит ${String(res.commit).slice(0, 7)}`
           : `GitHub: отправлено ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`))
       : 'GitHub: ' + res.error);
     return res;
@@ -1568,6 +1626,45 @@ function wireIpc() {
     return srv.cwd;
   };
 
+  /* блокировки: список из banned-players.json и banned-ips.json */
+  ipcMain.handle('bans:list', (_e, id) => {
+    const srv = manager.get(id);
+    if (!srv) return { players: [], ips: [] };
+    const cwd = serverCwd(id);
+    if (!cwd) return { players: [], ips: [] };
+    return playersCore.listBans(cwd);
+  });
+
+  ipcMain.handle('bans:unban', async (_e, id, target = {}) => {
+    const srv = manager.get(id);
+    if (!srv) return { ok: false, error: 'Сервер не найден' };
+    const cwd = serverCwd(id);
+    if (!cwd) return { ok: false, error: 'У сервера не задана рабочая папка' };
+    const running = manager.status(id).state === 'running';
+    const who = target.ip ? target.ip : target.name;
+    if (running) {
+      /* на запущенном сервере команду выполняет ядро — оно же перепишет JSON */
+      manager.sendCommand(id, playersCore.unbanCommand(target), { silent: true });
+      manager.note(id, `Блокировка снята: ${who}`);
+      return { ok: true, via: 'command', text: `разбан отправлен командой: ${who}` };
+    }
+    const res = playersCore.unbanOffline(cwd, target);
+    if (res.ok) manager.note(id, `Блокировка снята в файле: ${who}`);
+    return { ...res, via: 'file' };
+  });
+
+  ipcMain.handle('bans:ban', async (_e, id, target = {}) => {
+    const srv = manager.get(id);
+    if (!srv) return { ok: false, error: 'Сервер не найден' };
+    const running = manager.status(id).state === 'running';
+    if (!running) return { ok: false, error: 'Сервер остановлен — забанить можно только на запущенном' };
+    const reason = String(target.reason || '').trim();
+    const cmd = `ban ${target.name}${reason ? ' ' + reason : ''}`;
+    manager.sendCommand(id, cmd, { silent: true });
+    manager.note(id, `Забанен: ${target.name}${reason ? ' (' + reason + ')' : ''}`);
+    return { ok: true, text: cmd };
+  });
+
   ipcMain.handle('backup:list', (_e, id) => backup.listBackups(backupsDir(id)));
 
   ipcMain.handle('backup:create', async (_e, id, opts = {}) => {
@@ -1576,15 +1673,26 @@ function wireIpc() {
       if (!srv) return { ok: false, error: 'Сервер не найден' };
       const src = serverCwd(id);
       if (!src) return { ok: false, error: 'У сервера не задана рабочая папка' };
-      manager.note(id, 'Бэкап: упаковываю папку сервера (максимальное сжатие)…');
+      const lean = opts.lean !== false;
+      manager.note(id, `Бэкап: упаковываю папку сервера (7-Zip, максимум сжатия${lean ? ', без libraries и логов' : ''})…`);
+      /* показываем, что занимает место: иначе «архив большой» — это догадки */
+      const heavy = backup.topDirs(src, 4).filter((d) => d.bytes > 0);
+      if (heavy.length) {
+        manager.note(id, 'Бэкап: самое тяжёлое — ' + heavy
+          .map((d) => `${d.name} ${(d.bytes / 1048576).toFixed(1)} МБ`).join(', '));
+      }
       const info = await backup.createBackup({
         srcDir: src,
         destDir: backupsDir(id),
         label: opts.name || srv.name,
+        format: 'auto',
+        skip: lean ? backup.leanSkip() : [],
+        skipNames: lean ? backup.leanNames() : [],
       });
       manager.note(id, `Бэкап: ${info.name} — ${(info.size / 1048576).toFixed(1)} МБ из ${(info.raw / 1048576).toFixed(1)} МБ`
         + (info.ratio ? `, плотнее в ${info.ratio} раза` : '')
-        + ` · ${info.packer || 'zip deflate'}`);
+        + ` · файлов ${info.files} · ${info.packer || 'zip deflate'}`
+        + (info.parts && info.parts.length ? ` · частей ${info.parts.length}` : ''));
       if (info.warning) manager.note(id, 'Бэкап: ' + info.warning);
       if (win && !win.isDestroyed()) win.webContents.send('toast', { kind: 'ok', text: `Бэкап создан: ${info.name}` });
       return { ok: true, ...info };

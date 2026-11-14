@@ -12,6 +12,7 @@ const { execFile } = require('child_process');
 const { ServerManager } = require('./core/manager');
 const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
+const playersCore = require('./core/players');
 const kernels = require('./core/kernels');
 const files = require('./core/files');
 const archive = require('./core/archive');
@@ -380,7 +381,13 @@ const server = http.createServer(async (req, res) => {
       if (!action && req.method === 'GET') return sendJson(res, 200, backup.listBackups(backupsDir(id)));
       if (action === 'create') {
         const body = await readBody(req);
-        const info = await backup.createBackup({ srcDir: srv.cwd, destDir: backupsDir(id), label: body.name || srv.name });
+        const info = await backup.createBackup({
+          srcDir: srv.cwd,
+          destDir: backupsDir(id),
+          label: body.name || srv.name,
+          skip: body.lean === false ? [] : backup.leanSkip(),
+          skipNames: body.lean === false ? [] : backup.leanNames(),
+        });
         return sendJson(res, 200, { ok: true, ...info });
       }
       if (action === 'restore') {
@@ -412,6 +419,35 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return sendJson(res, 500, { error: e.message });
     }
+  }
+
+  /* блокировки: список и снятие */
+  const bansMatch = p.match(/^\/api\/servers\/([^/]+)\/bans(?:\/(\w+))?$/);
+  if (bansMatch) {
+    const [, id, action] = bansMatch;
+    const srv = manager.get(id);
+    if (!srv) return sendJson(res, 404, { error: 'Сервер не найден' });
+    if (req.method === 'GET') {
+      return sendJson(res, 200, srv.cwd ? playersCore.listBans(srv.cwd) : { players: [], ips: [] });
+    }
+    const body = await readBody(req);
+    if (action === 'ban') {
+      if (manager.status(id).state !== 'running') {
+        return sendJson(res, 400, { ok: false, error: 'Сервер остановлен — забанить можно только на запущенном' });
+      }
+      const reason = String(body.reason || '').trim();
+      const cmd = `ban ${body.name}${reason ? ' ' + reason : ''}`;
+      manager.sendCommand(id, cmd, { silent: true });
+      return sendJson(res, 200, { ok: true, text: cmd });
+    }
+    if (action === 'unban') {
+      if (manager.status(id).state === 'running') {
+        manager.sendCommand(id, playersCore.unbanCommand(body), { silent: true });
+        return sendJson(res, 200, { ok: true, via: 'command' });
+      }
+      return sendJson(res, 200, playersCore.unbanOffline(srv.cwd, body));
+    }
+    return sendJson(res, 404, { error: 'Неизвестное действие' });
   }
 
   const tm = p.match(/^\/api\/servers\/([^/]+)\/tps(?:\/(\w+))?$/);
