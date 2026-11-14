@@ -658,9 +658,9 @@
             <div class="sync-order">
               <label class="switch"><input id="f_syncPull" type="checkbox" /><span class="box"></span>забирать обновления перед запуском</label>
               <label class="switch"><input id="f_syncPush" type="checkbox" /><span class="box"></span>отправлять сервер после остановки</label>
-              <label class="switch"><input id="f_syncMode" type="checkbox" /><span class="box"></span>гонять сервер одним архивом, как бэкап</label>
+              <label class="switch"><input id="f_syncMode" type="checkbox" /><span class="box"></span>пересылать сервер одним архивом</label>
             </div>
-            <div class="sync-hint">Один архив вместо десятков тысяч файлов: отправка идёт быстрее, а лимит GitHub на размер файла не мешает. Распаковка на другой машине — тем же архивом.</div>
+            <div class="sync-hint">Отправка: панель упаковывает папку сервера в архив и кладёт в репозиторий один файл. Забор: скачивает этот файл и распаковывает обратно в папку сервера. Выключи переключатель, если нужна отправка по файлам.</div>
 
             <div class="sync-actions">
               <button id="syncVerify" class="btn btn-mini">Проверить</button>

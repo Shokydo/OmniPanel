@@ -69,7 +69,7 @@ srv.listen(8787, '127.0.0.1', async () => {
   ok((await github.getUser('bad')).ok === false, 'плохой токен отклонён');
 
   console.log('\n=== ПОЛНЫЙ СЕРВЕР (scope=all по умолчанию) ===');
-  const push1 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateA, message: 'full' });
+  const push1 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateA, message: 'full' });
   ok(push1.ok, 'push прошёл', JSON.stringify(push1));
   const tree = [...require('./mock-gh').store.trees.values()].pop().map((e) => e.path).sort();
   ok(tree.includes('server.jar') && tree.includes('plugins/Essentials.jar'), 'ядро и плагины-джарники синхронизируются', tree.join(', '));
@@ -78,21 +78,21 @@ srv.listen(8787, '127.0.0.1', async () => {
   ok(tree.length === 5, 'всего файлов в коммите: 5', String(tree.length));
 
   console.log('\n=== ОБНОВЛЕНИЕ НА ВТОРОМ ПК ===');
-  const chk = await github.check({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateB });
+  const chk = await github.check({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateB });
   ok(chk.ok && chk.behind > 0, 'видны обновления', `behind=${chk.behind}`);
-  const pull = await github.pull({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateB });
+  const pull = await github.pull({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateB });
   ok(pull.ok && pull.downloaded === 5, 'скачан полный сервер', JSON.stringify(pull));
   ok(fs.readFileSync(path.join(B, 'server.jar'), 'utf8') === 'CORE-JAR', 'ядро обновилось локально');
 
   console.log('\n=== ПОВТОРНЫЙ PUSH БЕЗ ИЗМЕНЕНИЙ ===');
-  const push2 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateA });
+  const push2 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateA });
   ok(push2.ok && push2.upToDate, 'нечего отправлять', JSON.stringify(push2));
 
   console.log('\n=== УДАЛЕНИЕ ФАЙЛА ===');
   fs.unlinkSync(path.join(A, 'plugins/Essentials/config.yml'));
-  const push3 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateA });
+  const push3 = await github.push({ dir: A, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateA });
   ok(push3.ok && push3.removed === 1, 'удаление отправлено', JSON.stringify(push3));
-  const pull3 = await github.pull({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', stateFile: stateB });
+  const pull3 = await github.pull({ dir: B, repo: 'o/r', branch: 'main', token: T, scope: 'all', mode: 'files', stateFile: stateB });
   ok(pull3.ok && pull3.removed === 1 && !fs.existsSync(path.join(B, 'plugins/Essentials/config.yml')), 'удаление применилось локально');
 
   console.log('\n=== ОШИБКИ ===');

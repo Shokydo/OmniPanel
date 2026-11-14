@@ -772,6 +772,7 @@ const S = {
   tpsFull: new Map(),  // id -> [{t,v}]
   metrics: new Map(),  // id -> {cpu, rss, procs, history}
   backups: [],
+  ghBusy: false,
   tab: 'console',
   players: new Map(),   // id -> {names:Set, max, at}
   issues: new Map(),    // id -> [{id, t, kind, line, stack}]
@@ -3466,7 +3467,7 @@ function openModal(server) {
   $('f_syncScope').value = sc.scope || 'all';
   $('f_syncPull').checked = sc.pullOnStart !== false;
   $('f_syncPush').checked = sc.pushOnStop !== false;
-  if ($('f_syncMode')) $('f_syncMode').checked = sc.mode === 'archive';
+  if ($('f_syncMode')) $('f_syncMode').checked = sc.mode !== 'files';
   syncToggleBody();
   syncStatusReset(server);
   loadAutoFolder(server);
@@ -4170,23 +4171,66 @@ function syncBind(editingServer) {
     return editingServer.id;
   };
 
+  /* шаги синхронизации приходят из главного процесса: «шаг 1 из 2: архивирую…».
+     Показ идёт только пока операция в работе — иначе последний шаг затирал итог. */
+  if (API.onGhStage) {
+    API.onGhStage((p) => {
+      const st = $('syncStatus');
+      if (st && p && p.text && S.ghBusy) st.textContent = p.text;
+    });
+  }
+
   $('syncPull').onclick = async () => {
     const id = need(); if (!id) return;
-    $('syncStatus').textContent = 'скачиваю из GitHub…';
-    const res = await API.ghPull(id);
-    if (!res.ok) { $('syncStatus').textContent = res.error; notify({ title: 'Не удалось скачать', text: res.error, kind: 'err' }); return; }
-    $('syncStatus').textContent = res.upToDate ? 'уже актуально' : `скачано ${res.downloaded}, удалено ${res.removed}`;
-    notify({ title: 'Скачано с GitHub', text: res.upToDate ? 'Изменений не было' : `Файлов: ${res.downloaded}, удалено: ${res.removed}`, kind: 'ok' });
+    S.ghBusy = true;
+    $('syncStatus').textContent = 'шаг 1 из 2: скачиваю архив с GitHub…';
+    let res;
+    try {
+      res = await API.ghPull(id);
+    } finally {
+      S.ghBusy = false;
+    }
+    if (!res.ok) { $('syncStatus').textContent = res.error; notify({ title: 'Не удалось забрать', text: res.error, kind: 'err' }); return; }
+    $('syncStatus').textContent = res.upToDate
+      ? 'уже актуально — архив в репозитории тот же'
+      : (res.format
+        ? `архив ${res.format} распакован · файлов ${res.downloaded}`
+        : `скачано ${res.downloaded}, удалено ${res.removed}`);
+    notify({
+      title: 'Забрано с GitHub',
+      text: res.upToDate
+        ? 'Изменений не было'
+        : (res.format ? `Архив ${res.format} скачан и распакован в папку сервера · файлов ${res.downloaded}` : `Файлов: ${res.downloaded}`),
+      kind: 'ok',
+    });
     await refresh();
   };
 
   $('syncPush').onclick = async () => {
     const id = need(); if (!id) return;
-    $('syncStatus').textContent = 'отправляю на GitHub…';
-    const res = await API.ghPush(id);
+    S.ghBusy = true;
+    $('syncStatus').textContent = 'шаг 1 из 2: архивирую сервер…';
+    let res;
+    try {
+      res = await API.ghPush(id);
+    } finally {
+      S.ghBusy = false;
+    }
     if (!res.ok) { $('syncStatus').textContent = res.error; notify({ title: 'Не удалось отправить', text: res.error, kind: 'err' }); return; }
-    $('syncStatus').textContent = res.upToDate ? 'отправлять нечего' : `отправлено ${res.uploaded} · ${String(res.commit).slice(0, 7)}`;
-    notify({ title: 'Отправлено на GitHub', text: res.upToDate ? 'Изменений не было' : `Файлов: ${res.uploaded}${res.skipped ? ', пропущено крупных: ' + res.skipped : ''}`, kind: 'ok' });
+    $('syncStatus').textContent = res.upToDate
+      ? 'отправлять нечего — на GitHub уже этот же архив'
+      : (res.archive
+        ? `архив ${res.format || 'zip'} ${updFmtMB(res.size)} отправлен · коммит ${String(res.commit).slice(0, 7)}`
+        : `отправлено ${res.uploaded} файлов · ${String(res.commit).slice(0, 7)}`);
+    notify({
+      title: 'Отправлено на GitHub',
+      text: res.upToDate
+        ? 'Изменений не было'
+        : (res.archive
+          ? `Сервер упакован в архив ${res.format || 'zip'} (${updFmtMB(res.size)} из ${updFmtMB(res.raw)}) и отправлен одним файлом`
+          : `Файлов: ${res.uploaded}${res.skipped ? ', пропущено крупных: ' + res.skipped : ''}`),
+      kind: 'ok',
+    });
   };
 }
 

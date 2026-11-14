@@ -145,6 +145,7 @@ const server = http.createServer(async (req, res) => {
     branch: 'main',
     token: 'test-token',
     scope: 'all',
+    mode: 'files',
     stateFile,
     message: 'OmniPanel: проверка',
   };
@@ -177,27 +178,41 @@ const server = http.createServer(async (req, res) => {
   assert.strictEqual(third.ok, true);
   assert.strictEqual(third.upToDate, true, 'нечего отправлять');
 
-  /* ── режим «одним архивом, как бэкап» ── */
+  /* ── пересылка одним архивом: архивация → GitHub → распаковка ── */
   state.commits = 0;
   state.refs.clear();
   state.trees.clear();
   state.calls.length = 0;
+  /* чуть «мяса», чтобы архив действительно сжимал: конфиги плагина с повторами */
+  fs.mkdirSync(path.join(dir, 'plugins', 'MyPlugin'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plugins', 'MyPlugin', 'config.yml'),
+    'settings:\n  enabled: true\n  interval: 20\n  worlds:\n    - world\n    - world_nether\n'.repeat(400));
   const archOpts = { ...opts, mode: 'archive', repo: 'friend/archive-server', stateFile: path.join(stateDir, 'state2.json') };
-  const archPush = await github.push(archOpts);
+  const archLogs = [];
+  const archPush = await github.push({ ...archOpts, onLog: (t) => archLogs.push(t) });
   assert.strictEqual(archPush.ok, true, 'отправка архивом: ' + archPush.error);
-  assert.ok(archPush.archive && /\.zip$/.test(archPush.archive), 'собран zip сервера');
+  assert.ok(/\.7z$/.test(archPush.archive), 'собран архив 7z: ' + archPush.archive);
+  assert.strictEqual(archPush.format, '7z', 'формат архива — 7z');
   assert.ok(archPush.size > 0, 'размер архива известен');
+  assert.ok(archPush.raw > archPush.size * 3, 'архив заметно меньше исходника: ' + archPush.size + ' из ' + archPush.raw);
+  assert.ok(archLogs.some((l) => /шаг 1 из 2: архивирую/.test(l)), 'первый шаг — архивация', archLogs.join(' | ').slice(0, 120));
+  assert.ok(archLogs.some((l) => /шаг 2 из 2: отправляю архив на GitHub/.test(l)), 'второй шаг — отправка');
+  assert.ok(archLogs.some((l) => /архив готов/.test(l)), 'в логе видно имя и плотность архива');
+
   const archTree = state.trees.get(state.trees.get('commit:' + state.refs.get('main')).tree) || [];
-  assert.ok(archTree.some((e) => /\.omnipanel\/сервер\.zip$/.test(e.path)), 'в репозитории один файл сервера');
-  assert.ok(archTree.some((e) => /манифест\.json$/.test(e.path)), 'манифест бэкапа на месте');
+  assert.ok(archTree.some((e) => /\.omnipanel\/сервер\.7z$/.test(e.path)), 'в репозитории один файл сервера (.7z)');
+  assert.ok(!archTree.some((e) => /\.omnipanel\/сервер\.zip$/.test(e.path)), 'старый zip в репозитории не остался');
+  assert.ok(archTree.some((e) => /манифест\.json$/.test(e.path)), 'манифест архива на месте');
+  assert.ok(!archTree.some((e) => e.path === 'server.properties'), 'пофайловых копий нет — только архив');
 
   /* второй прогон — «нечего отправлять» */
   const archAgain = await github.push(archOpts);
   assert.strictEqual(archAgain.ok, true, 'повтор архивом: ' + archAgain.error);
   assert.strictEqual(archAgain.upToDate, true, 'архив не изменился — отправлять нечего');
 
-  /* забираем архив на «другую машину» */
+  /* забираем архив на «другую машину»: скачать и распаковать */
   const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh409-other-'));
+  const pullLogs = [];
   const archPull = await github.pull({
     dir: otherDir,
     repo: 'friend/archive-server',
@@ -205,15 +220,65 @@ const server = http.createServer(async (req, res) => {
     token: 'test-token',
     stateFile: path.join(stateDir, 'state3.json'),
     mode: 'archive',
+    onLog: (t) => pullLogs.push(t),
   });
   assert.strictEqual(archPull.ok, true, 'забрать архив: ' + archPull.error);
+  assert.strictEqual(archPull.format, '7z', 'распознан формат 7z');
+  assert.ok(pullLogs.some((l) => /шаг 1 из 2: скачиваю архив/.test(l)), 'первый шаг забора — скачивание');
+  assert.ok(pullLogs.some((l) => /шаг 2 из 2: распаковываю/.test(l)), 'второй шаг забора — распаковка');
   assert.strictEqual(fs.readFileSync(path.join(otherDir, 'server.properties'), 'utf8'), 'level-name=world\n',
     'server.properties восстановлен из архива');
   assert.strictEqual(fs.readFileSync(path.join(otherDir, 'world', 'level.dat'), 'utf8'), 'мир изменился',
     'мир восстановлен из архива');
 
+  /* режим по умолчанию — именно архив, без указания mode */
+  const { mode: _omitted, ...optsNoMode } = opts;
+  const defPush = await github.push({ ...optsNoMode, repo: 'friend/default-mode', stateFile: path.join(stateDir, 'state4.json') });
+  assert.strictEqual(defPush.format, '7z', 'без указания режима отправляется архив');
+
+  /* обратная совместимость: в репозитории лежит старый zip из прошлых версий */
+  const legacyRepo = 'friend/legacy-server';
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gh409-legacy-'));
+  fs.writeFileSync(path.join(legacyDir, 'server.properties'), 'level-name=legacy\n');
+  fs.writeFileSync(path.join(legacyDir, 'motd.txt'), 'старый сервер');
+  const legacyZip = path.join(stateDir, 'legacy.zip');
+  await require('../core/backup').createBackup({ srcDir: legacyDir, destDir: stateDir, label: 'legacy', format: 'zip' });
+  const packed = fs.readdirSync(stateDir).find((f) => /^legacy_.*\.zip$/.test(f));
+  fs.renameSync(path.join(stateDir, packed), legacyZip);
+  const zipBuf = fs.readFileSync(legacyZip);
+  const blobRes = await fetch(`${process.env.OMNI_GITHUB_API}/repos/${legacyRepo}/git/blobs`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ content: zipBuf.toString('base64'), encoding: 'base64' }),
+  }).then((r) => r.json());
+  const treeRes = await fetch(`${process.env.OMNI_GITHUB_API}/repos/${legacyRepo}/git/trees`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ tree: [{ path: '.omnipanel/сервер.zip', mode: '100644', type: 'blob', sha: blobRes.sha }] }),
+  }).then((r) => r.json());
+  const commitRes = await fetch(`${process.env.OMNI_GITHUB_API}/repos/${legacyRepo}/git/commits`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'старая версия панели: zip', tree: treeRes.sha, parents: [] }),
+  }).then((r) => r.json());
+  await fetch(`${process.env.OMNI_GITHUB_API}/repos/${legacyRepo}/git/refs`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ ref: 'refs/heads/main', sha: commitRes.sha }),
+  });
+
+  const legacyOut = fs.mkdtempSync(path.join(os.tmpdir(), 'gh409-legacy-out-'));
+  const legacyPull = await github.pull({
+    dir: legacyOut, repo: legacyRepo, branch: 'main', token: 'test-token',
+    stateFile: path.join(stateDir, 'state5.json'), mode: 'archive',
+  });
+  assert.strictEqual(legacyPull.ok, true, 'старый zip забирается: ' + legacyPull.error);
+  assert.strictEqual(legacyPull.format, 'zip', 'формат распознан как zip');
+  assert.strictEqual(fs.readFileSync(path.join(legacyOut, 'server.properties'), 'utf8'), 'level-name=legacy\n',
+    'старый zip распакован');
+
   console.log('409 на пустом репозитории: первый коммит создан через Contents API, вторая отправка обычная — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
-  console.log('режим «одним архивом»: отправка, «нечего отправлять», распаковка на другой машине — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
+  console.log('пересылка архивом: архивация → GitHub → скачивание и распаковка, включая старый zip и режим по умолчанию — ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
   server.close();
 })().catch((err) => {
   console.error('ОШИБКА:', err.message);

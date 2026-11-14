@@ -413,10 +413,15 @@ function syncOptions(srv) {
     branch: sc.branch || 'main',
     token: sc.token || accountToken(),
     scope: sc.scope || 'all',
-    mode: sc.mode || 'files',
+    /* основной режим — одним архивом: сначала архивация, потом отправка файла */
+    mode: sc.mode || 'archive',
     stateFile: syncStateFile(srv.id),
     message: `OmniPanel: ${srv.name} — ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
-    onLog: (text) => manager && manager.note(srv.id, 'GitHub: ' + text),
+    onLog: (text) => {
+      if (manager) manager.note(srv.id, 'GitHub: ' + text);
+      /* шаги видны и в окне настроек сервера, не только в консоли */
+      if (win && !win.isDestroyed()) win.webContents.send('gh:stage', { id: srv.id, text });
+    },
   };
 }
 
@@ -467,7 +472,7 @@ async function pushAfterStop(id) {
   if (quitting || pushing.has(id)) return;
   pushing.add(id);
   try {
-    manager.note(id, 'GitHub: отправляю изменения…');
+    manager.note(id, 'GitHub: отправляю сервер архивом…');
     const res = await github.push(syncOptions(srv));
     if (res.ok) {
       if (res.upToDate) manager.note(id, 'GitHub: отправлять нечего');
@@ -943,10 +948,14 @@ function wireIpc() {
     if (st === 'running' || st === 'starting') {
       return { ok: false, error: 'Сначала останови сервер — файлы мира заняты' };
     }
-    manager.note(id, 'GitHub: скачиваю изменения…');
+    manager.note(id, 'GitHub: забираю сервер архивом…');
     const res = await github.pull(syncOptions(srv));
     manager.note(id, res.ok
-      ? (res.upToDate ? 'GitHub: всё уже актуально' : `GitHub: скачано ${res.downloaded}, удалено ${res.removed}`)
+      ? (res.upToDate
+        ? 'GitHub: всё уже актуально'
+        : (res.format
+          ? `GitHub: архив ${res.format} скачан и распакован — файлов ${res.downloaded}`
+          : `GitHub: скачано ${res.downloaded}, удалено ${res.removed}`))
       : 'GitHub: ' + res.error);
     return res;
   });
@@ -960,7 +969,7 @@ function wireIpc() {
       ? (res.upToDate
         ? 'GitHub: отправлять нечего'
         : (res.archive
-          ? `GitHub: сервер отправлен архивом ${(res.size / 1048576).toFixed(1)} МБ (сжато из ${(res.raw / 1048576).toFixed(1)} МБ), коммит ${String(res.commit).slice(0, 7)}`
+          ? `GitHub: архив ${(res.format || 'zip')} ${(res.size / 1048576).toFixed(1)} МБ (из ${(res.raw / 1048576).toFixed(1)} МБ) отправлен, коммит ${String(res.commit).slice(0, 7)}`
           : `GitHub: отправлено ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`))
       : 'GitHub: ' + res.error);
     return res;

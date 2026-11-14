@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('desktop', {
   onUpdState: (cb) => ipcRenderer.on('upd:state', (_e, p) => cb(p)),
   onUpdAvailable: (cb) => ipcRenderer.on('upd:available', (_e, p) => cb(p)),
   onUpdProgress: (cb) => ipcRenderer.on('upd:progress', (_e, p) => cb(p)),
+  onGhStage: (cb) => ipcRenderer.on('gh:stage', (_e, p) => cb(p)),
   ghVerify: (cfg) => ipcRenderer.invoke('gh:verify', cfg),
   ghAccount: () => ipcRenderer.invoke('gh:account'),
   ghLogin: (token) => ipcRenderer.invoke('gh:login', token),

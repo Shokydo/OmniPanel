@@ -15,10 +15,23 @@ const crypto = require('crypto');
 const os = require('os');
 const backup = require('./backup');
 const zip = require('./zip');
+const seven = require('./seven');
 
-/* Режим «через бэкап»: весь сервер одним архивом. */
-const ARCHIVE_PATH = '.omnipanel/сервер.zip';
+/*
+ * Пересылка сервера в GitHub одним архивом — основной режим:
+ *   отправка:  архивация папки сервера  →  один файл в репозиторий;
+ *   забор:     файл из репозитория      →  распаковка в папку сервера.
+ *
+ * Архив собирается 7-Zip (плотнее и меньше риск упереться в лимит 95 МБ),
+ * но читается и старый zip из прошлых версий панели.
+ */
+const ARCHIVE_7Z = '.omnipanel/сервер.7z';
+const ARCHIVE_ZIP = '.omnipanel/сервер.zip';
+const LEGACY_ARCHIVES = [ARCHIVE_7Z, ARCHIVE_ZIP];
 const MANIFEST_PATH = '.omnipanel/манифест.json';
+
+/* Обратная совместимость: старые тесты и код говорят про «сервер.zip». */
+const ARCHIVE_PATH = ARCHIVE_7Z;
 
 const MAX_FILE = 40 * 1024 * 1024;    // больше — не отправляем по умолчанию
 const HARD_LIMIT = 95 * 1024 * 1024;  // жёсткий лимит GitHub на один blob
@@ -270,18 +283,30 @@ async function downloadBlob(token, repo, sha) {
 
 /* ─────────────────── отправка «через бэкап» (одним архивом) ─────────────────── */
 
+const MB = (bytes) => (bytes / 1048576).toFixed(1);
+
 /**
- * Упаковывает папку сервера в zip с максимальным сжатием и кладёт в репозиторий
- * одним файлом. Для больших миров это надёжнее поштучной отправки: десятки тысяч
- * мелких файлов превращаются в один, и лимит на размер одного файла не мешает.
+ * Шаг 1: архивация папки сервера. Шаг 2: отправка одного файла в репозиторий.
+ *
+ * Для больших миров это надёжнее поштучной отправки: десятки тысяч мелких файлов
+ * превращаются в один, git-дерево не разрастается, а лимит на размер одного blob
+ * проверяется один раз.
  */
 async function pushArchive(token, repo, branch, opts) {
   const { dir, message, stateFile, onLog = () => {} } = opts;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-'));
   let info;
   try {
-    onLog('упаковываю сервер в архив…');
-    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format: 'zip' });
+    const format = seven.available() ? '7z' : 'zip';
+    const archivePath = format === '7z' ? ARCHIVE_7Z : ARCHIVE_ZIP;
+
+    /* ── шаг 1: архив ── */
+    onLog(`шаг 1 из 2: архивирую сервер${format === '7z' ? ' (7-Zip, максимум сжатия)' : ' (zip)'}…`);
+    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format });
+    onLog(`архив готов: ${info.name} — ${MB(info.size)} МБ из ${MB(info.raw)} МБ`
+      + (info.ratio ? `, плотнее в ${info.ratio} раза` : '')
+      + `, файлов ${info.files}`);
+
     const head = await getHead(token, repo, branch);
     const state = loadState(stateFile);
     const buf = fs.readFileSync(info.file);
@@ -289,21 +314,28 @@ async function pushArchive(token, repo, branch, opts) {
       return {
         ok: false,
         error: `Архив сервера получился ${(buf.length / 1048576).toFixed(0)} МБ — GitHub не принимает файлы больше 95 МБ. `
-          + 'Включи в настройках синхронизацию по файлам или убери крупные файлы из папки сервера.',
+          + 'Убери крупные файлы из папки сервера или выбери в настройках отправку по файлам.',
       };
     }
-    const remoteSha = head ? await shaOfPath(token, repo, head.commit, ARCHIVE_PATH) : null;
+    const remoteSha = head ? await shaOfPath(token, repo, head.commit, archivePath) : null;
     const localSha = blobSha(buf);
     if (head && remoteSha === localSha) {
-      saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [ARCHIVE_PATH]: localSha } });
-      return { ok: true, upToDate: true, commit: head.commit, uploaded: 0, removed: 0, changed: 0, archive: info.name, size: buf.length };
+      saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [archivePath]: localSha } });
+      return {
+        ok: true, upToDate: true, commit: head.commit, uploaded: 0, removed: 0, changed: 0,
+        archive: info.name, size: buf.length, raw: info.raw, format,
+      };
     }
 
+    /* ── шаг 2: отправка ── */
+    onLog(`шаг 2 из 2: отправляю архив на GitHub (${MB(buf.length)} МБ)…`);
     const blob = await gh(token, `/repos/${repo}/git/blobs`, {
       body: { content: buf.toString('base64'), encoding: 'base64' },
     });
     const manifest = Buffer.from(JSON.stringify({
       createdAt: new Date().toISOString(),
+      format,
+      archive: info.name,
       files: info.files,
       raw: info.raw,
       packed: buf.length,
@@ -314,16 +346,27 @@ async function pushArchive(token, repo, branch, opts) {
     });
 
     const entries = [
-      { path: ARCHIVE_PATH, mode: '100644', type: 'blob', sha: blob.sha },
+      { path: archivePath, mode: '100644', type: 'blob', sha: blob.sha },
       { path: MANIFEST_PATH, mode: '100644', type: 'blob', sha: manifestBlob.sha },
     ];
-    /* старые поштучные файлы из прошлых отправок убираем, чтобы не дублировать сервер */
+    /* прошлые поштучные файлы и архив другого формата убираем, чтобы не дублировать сервер */
     let removed = 0;
     const prev = (state.files || {});
     for (const rel of Object.keys(prev)) {
-      if (rel === ARCHIVE_PATH || rel === MANIFEST_PATH) continue;
+      if (rel === archivePath || rel === MANIFEST_PATH) continue;
       entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
       removed += 1;
+    }
+    if (head) {
+      const remoteTree = await getTreeOfCommit(token, repo, head.commit);
+      const stale = remoteTree.entries
+        .filter((e) => e.type === 'blob' && LEGACY_ARCHIVES.includes(e.path) && e.path !== archivePath)
+        .map((e) => e.path);
+      for (const rel of stale) {
+        entries.push({ path: rel, mode: '100644', type: 'blob', sha: null });
+        removed += 1;
+        onLog(`в репозитории был архив другого формата — убираю ${rel}`);
+      }
     }
 
     const sendTree = async (baseTree, parent) => {
@@ -355,7 +398,8 @@ async function pushArchive(token, repo, branch, opts) {
       commit = await sendTree(t.treeSha, head.commit);
     }
 
-    saveState(stateFile, { commit: commit.sha, branch, mode: 'archive', files: { [ARCHIVE_PATH]: localSha } });
+    saveState(stateFile, { commit: commit.sha, branch, mode: 'archive', files: { [archivePath]: localSha } });
+    onLog(`готово: архив в репозитории, коммит ${String(commit.sha).slice(0, 7)}`);
     return {
       ok: true,
       commit: commit.sha,
@@ -363,12 +407,14 @@ async function pushArchive(token, repo, branch, opts) {
       removed,
       changed: 1,
       archive: info.name,
+      archivePath,
+      format,
       size: buf.length,
       raw: info.raw,
+      files: info.files,
     };
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
-    void zip;
   }
 }
 
@@ -379,35 +425,68 @@ async function shaOfPath(token, repo, commitSha, rel) {
   return hit ? hit.sha : null;
 }
 
-/** Забрать сервер из архива в репозитории. */
+/**
+ * Забрать сервер из архива в репозитории.
+ * Шаг 1: скачать архив. Шаг 2: распаковать в папку сервера.
+ * Понимает и новый 7z, и zip из прошлых версий панели.
+ */
 async function pullArchive(token, repo, branch, opts) {
   const { dir, stateFile, onLog = () => {} } = opts;
   const head = await getHead(token, repo, branch);
   if (!head) return { ok: false, error: `В репозитории ${repo} ещё нет отправленного сервера — сначала отправь его.` };
   const state = loadState(stateFile);
-  if (state.commit === head.commit) {
-    return { ok: true, changed: 0, downloaded: 0, removed: 0, commit: head.commit, upToDate: true };
-  }
-  const sha = await shaOfPath(token, repo, head.commit, ARCHIVE_PATH);
-  if (!sha) {
+
+  const tree = await getTreeOfCommit(token, repo, head.commit);
+  const found = LEGACY_ARCHIVES
+    .map((rel) => ({ rel, entry: tree.entries.find((e) => e.type === 'blob' && e.path === rel) }))
+    .find((x) => x.entry);
+  if (!found) {
     return { ok: false, error: 'В репозитории нет файла сервера. Его нужно отправить из панели (архивом).' };
   }
-  onLog('скачиваю архив сервера…');
+  const sha = found.entry.sha;
+  if (state.commit === head.commit && state.files && state.files[found.rel] === sha) {
+    return { ok: true, changed: 0, downloaded: 0, removed: 0, commit: head.commit, upToDate: true };
+  }
+
+  /* ── шаг 1: скачать архив ── */
+  onLog(`шаг 1 из 2: скачиваю архив с GitHub (${found.rel})…`);
   const buf = await downloadBlob(token, repo, sha);
+  onLog(`архив скачан: ${MB(buf.length)} МБ`);
+
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-pull-'));
-  const zipFile = path.join(tmpDir, 'server.zip');
+  const file = path.join(tmpDir, path.basename(found.rel));
   try {
-    fs.writeFileSync(zipFile, buf);
-    const res = zip.extractFile(zipFile, dir);
-    saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [ARCHIVE_PATH]: sha } });
+    fs.writeFileSync(file, buf);
+
+    /* ── шаг 2: распаковать ── */
+    const is7z = /\.7z$/i.test(found.rel) || buf.subarray(0, 6).equals(Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]));
+    onLog(`шаг 2 из 2: распаковываю архив в папку сервера (${is7z ? '7z' : 'zip'})…`);
+    let files = 0;
+    let list = [];
+    if (is7z) {
+      if (!seven.available()) {
+        return { ok: false, error: 'В репозитории архив .7z, а рядом с панелью нет 7-Zip — обнови панель' };
+      }
+      files = (await seven.list(file)).filter((x) => x.Path && !x.isDir).length;
+      await seven.extract({ file, destDir: dir });
+    } else {
+      const res = zip.extractFile(file, dir);
+      files = res.files.length;
+      list = res.files.slice(0, 10);
+    }
+    saveState(stateFile, { commit: head.commit, branch, mode: 'archive', files: { [found.rel]: sha } });
+    onLog(`готово: распаковано файлов ${files}`);
     return {
       ok: true,
       commit: head.commit,
-      changed: res.files.length,
-      downloaded: res.files.length,
+      changed: files,
+      downloaded: files,
       removed: 0,
-      total: res.files.length,
-      list: res.files.slice(0, 10),
+      total: files,
+      format: is7z ? '7z' : 'zip',
+      archive: found.rel,
+      size: buf.length,
+      list,
     };
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* временная папка */ }
@@ -439,7 +518,7 @@ function saveState(file, state) {
  * Возвращает {ok, changed, downloaded, removed, commit} либо {ok:false, error}.
  */
 async function pull(opts) {
-  const { dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all', stateFile, onLog = () => {}, mode = 'files' } = opts;
+  const { dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all', stateFile, onLog = () => {}, mode = 'archive' } = opts;
   try {
     const repo = normRepo(rawRepo);
     const branch = normBranch(rawBranch);
@@ -524,7 +603,7 @@ async function push(opts) {
   const {
     dir, repo: rawRepo, branch: rawBranch, token: rawToken, scope = 'all',
     message = 'OmniPanel: сохранение мира', stateFile, onLog = () => {},
-    maxFile = MAX_FILE, mode = 'files',
+    maxFile = MAX_FILE, mode = 'archive',
   } = opts;
   try {
     const repo = normRepo(rawRepo);

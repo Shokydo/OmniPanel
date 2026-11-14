@@ -279,6 +279,11 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   ok(await page.$eval('#f_syncRepo', (e) => !!e.getAttribute('list')), 'поле репозитория связано со списком');
   const dl = await page.$$eval('#f_syncRepoList option', (els) => els.map((e) => e.value));
   ok(dl.includes('o/r'), 'репозиторий предложен в подсказке списка', JSON.stringify(dl));
+  ok(await page.$eval('#f_syncMode', (e) => e.checked === true), 'пересылка архивом включена по умолчанию');
+  const hint = await page.$eval('.sync-hint', (e) => e.textContent);
+  ok(/упаковывает папку сервера в архив/i.test(hint) && /распаковывает/i.test(hint),
+    'в подсказке описан поток: архив → GitHub → распаковка', hint.slice(0, 90));
+
   await page.$eval('#modal .modal-body', (e) => { e.scrollTop = e.scrollHeight; });
   await page.waitForTimeout(400);
   await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-sync-scope.png' });
