@@ -29,7 +29,12 @@ const ARCHIVE_7Z = '.omnipanel/сервер.7z';
 const ARCHIVE_DIR = '.omnipanel';
 /* Разбивка на части: GitHub не принимает файлы больше 95 МБ, поэтому архив
    режется на тома и каждый уезжает отдельным файлом. */
-const SPLIT_MB = Number(process.env.OMNI_SPLIT_MB) || 45;   // размер одной части архива
+/* GitHub отвечает 422 «input was too large», если тело запроса слишком большое,
+   а base64 раздувает часть почти на треть. 20 МБ → ~27 МБ тела: с запасом. */
+const SPLIT_MB = Number(process.env.OMNI_SPLIT_MB) || 20;   // размер одной части архива
+/* если GitHub всё равно не принял — режем мельче и пробуем снова */
+const MIN_SPLIT_MB = 1;
+const SPLIT_TRIES = 3;
 const MAX_PARTS = 90;                 // ≈ 4 ГБ — дальше GitHub не тянет
 const ARCHIVE_ZIP = '.omnipanel/сервер.zip';
 const LEGACY_ARCHIVES = [ARCHIVE_7Z, ARCHIVE_ZIP];
@@ -83,7 +88,12 @@ function humanError(status, body) {
     return `Ветка изменилась во время отправки (409)${msg ? ': ' + msg : ''}. Повтори отправку.`;
   }
   if (status === 413) return 'Файл слишком большой для GitHub (413).';
-  if (status === 422) return `GitHub не принял данные (422): ${msg || 'проверь имя ветки'}`;
+  if (status === 422) {
+    if (/too large/i.test(msg)) {
+      return 'GitHub не принял данные: тело запроса слишком большое (422). Панель режет архив мельче — повтори отправку.';
+    }
+    return `GitHub не принял данные (422): ${msg || 'проверь имя ветки'}`;
+  }
   return `GitHub ответил ${status}${msg ? ': ' + msg : ''}`;
 }
 
@@ -297,16 +307,44 @@ const MB = (bytes) => (bytes / 1048576).toFixed(1);
  * превращаются в один, git-дерево не разрастается, а лимит на размер одного blob
  * проверяется один раз.
  */
+/**
+ * Отправка архивом с запасным путём: если GitHub не принял слишком большое
+ * тело запроса (422), архив собирается заново более мелкими частями.
+ */
 async function pushArchive(token, repo, branch, opts) {
+  let size = opts.volumeMb || SPLIT_MB;
+  let lastError = null;
+  for (let attempt = 0; attempt <= SPLIT_TRIES; attempt += 1) {
+    let res;
+    try {
+      res = await pushArchiveOnce(token, repo, branch, { ...opts, volumeMb: size });
+    } catch (err) {
+      /* отказ приходит исключением: «input was too large» — повод резать мельче */
+      res = { ok: false, error: err.message };
+      if (err.status === 401 || err.status === 403 || err.status === 404) return res;
+    }
+    if (res.ok || !/too large|422/i.test(res.error || '')) return res;
+    lastError = res.error;
+    /* каждый раз вдвое мельче; 1 МБ — это уже минимум, который умеет 7-Zip */
+    const next = Math.floor(size / 2);
+    if (next < MIN_SPLIT_MB || next === size) break;
+    size = next;
+    if (opts.onLog) opts.onLog(`GitHub не принял часть целиком — режу мельче: по ${size} МБ…`);
+  }
+  return { ok: false, error: lastError || 'GitHub не принял архив' };
+}
+
+async function pushArchiveOnce(token, repo, branch, opts) {
   const { dir, message, stateFile, onLog = () => {}, cleanup = true } = opts;
+  const splitMb = opts.volumeMb || SPLIT_MB;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omni-gh-'));
   try {
     const format = seven.available() ? '7z' : 'zip';
     /* zip-писатель панели не умеет тома, поэтому разбивка только для 7z */
-    const volumeMb = format === '7z' ? SPLIT_MB : 0;
+    const volumeMb = format === '7z' ? splitMb : 0;
 
     /* ── шаг 1: архив ── */
-    onLog(`шаг 1 из 2: архивирую сервер${format === '7z' ? ` (7-Zip, части по ${SPLIT_MB} МБ)` : ' (zip)'}…`);
+    onLog(`шаг 1 из 2: архивирую сервер${format === '7z' ? ` (7-Zip, части по ${splitMb} МБ)` : ' (zip)'}…`);
     const info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format, volumeMb });
     const parts = info.file ? (info.parts && info.parts.length ? info.parts : [info.file]) : [];
     const local = parts.map((file) => ({
@@ -326,7 +364,7 @@ async function pushArchive(token, repo, branch, opts) {
       return {
         ok: false,
         error: `Сервер упакован в ${MB(totalSize)} МБ — это больше, чем GitHub готов принять `
-          + `(${MAX_PARTS} частей по ${SPLIT_MB} МБ). Убери крупные файлы из папки сервера `
+          + `(${MAX_PARTS} частей по ${splitMb} МБ). Убери крупные файлы из папки сервера `
           + 'или выбери в настройках отправку по файлам.',
       };
     }

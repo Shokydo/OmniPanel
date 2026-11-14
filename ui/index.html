@@ -655,16 +655,23 @@
 
           <div id="syncBody" class="sync-body">
             <div class="sync-grid">
-              <label class="mini-field">Репозиторий
-                <input id="f_syncRepo" type="text" placeholder="владелец/репозиторий" spellcheck="false" list="f_syncRepoList" />
-                <datalist id="f_syncRepoList"></datalist>
+              <label class="mini-field">Куда пересылать
+                <select id="f_syncProvider">
+                  <option value="github" selected>GitHub</option>
+                  <option value="gitlab">GitLab</option>
+                </select>
               </label>
               <label class="mini-field">Ветка
                 <input id="f_syncBranch" type="text" placeholder="main" spellcheck="false" />
               </label>
             </div>
 
-            <label class="mini-field syn-wide">Свой токен <em>(необязательно — можно войти в настройках панели)</em>
+            <label class="mini-field syn-wide" id="syncRepoTab">Репозиторий
+              <input id="f_syncRepo" type="text" placeholder="владелец/репозиторий" spellcheck="false" list="f_syncRepoList" />
+              <datalist id="f_syncRepoList"></datalist>
+            </label>
+
+            <label class="mini-field syn-wide">Токен <em id="syncTokenHint">(необязательно — можно войти в настройках панели)</em>
               <input id="f_syncToken" type="password" placeholder="ghp_…" spellcheck="false" autocomplete="off" />
             </label>
 

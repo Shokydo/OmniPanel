@@ -1,7 +1,7 @@
 // Мок GitHub API (Git Data + аккаунт) для тестов OmniPanel без интернета.
 const http = require('http');
 const crypto = require('crypto');
-const store = { blobs: new Map(), trees: new Map(), commits: new Map(), refs: new Map(), repos: [] };
+const store = { blobs: new Map(), trees: new Map(), commits: new Map(), refs: new Map(), repos: [], blobLimit: 0, tooLarge: 0 };
 const sha = (b) => crypto.createHash('sha1').update(b).digest('hex');
 const blobSha = (buf) => crypto.createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
 
@@ -56,6 +56,11 @@ function makeServer(repoFull = 'o/r') {
     }
     if (/^\/repos\/[^/]+\/[^/]+\/git\/blobs$/.test(p) && req.method === 'POST') {
       const buf = Buffer.from(json.content, json.encoding === 'base64' ? 'base64' : 'utf8');
+      /* как настоящий GitHub: слишком большое тело запроса → 422 */
+      if (store.blobLimit && buf.length > store.blobLimit) {
+        store.tooLarge += 1;
+        return send(422, { message: 'Sorry, your input was too large to process.' });
+      }
       const s = blobSha(buf);
       store.blobs.set(s, buf);
       return send(201, { sha: s, size: buf.length });
@@ -93,4 +98,4 @@ function makeServer(repoFull = 'o/r') {
   });
 }
 
-module.exports = { makeServer, store };
+module.exports = { store, makeServer };

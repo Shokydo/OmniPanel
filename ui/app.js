@@ -85,6 +85,9 @@ const httpApi = {
   async backupDelete(file) { return post(`/api/servers/${id}/backups/delete`, { file }); },
   async backupReveal() { return { ok: false, error: 'Только в exe-версии' }; },
   async backupSize() { return { bytes: 0, files: 0 }; },
+  async glAccount() { return { hasToken: false }; },
+  async glCheck() { return { ok: false, error: 'Только в exe-версии' }; },
+  async glProjects() { return { ok: false, error: 'Только в exe-версии' }; },
   async bansList(id) { return (await fetch(`/api/servers/${id}/bans`)).json(); },
   async bansUnban(id, target) { return post(`/api/servers/${id}/bans/unban`, target); },
   async bansBan(id, target) { return post(`/api/servers/${id}/bans/ban`, target); },
@@ -3543,6 +3546,8 @@ function openModal(server) {
   $('f_syncScope').value = sc.scope || 'all';
   $('f_syncPull').checked = sc.pullOnStart !== false;
   $('f_syncPush').checked = sc.pushOnStop !== false;
+  if ($('f_syncProvider')) $('f_syncProvider').value = sc.provider === 'gitlab' ? 'gitlab' : 'github';
+  syncProviderLook();
   if ($('f_syncMode')) $('f_syncMode').checked = sc.mode !== 'files';
   if ($('f_syncKeep')) $('f_syncKeep').checked = sc.keepParts === true;
   syncToggleBody();
@@ -3638,6 +3643,7 @@ async function saveModal() {
       pullOnStart: $('f_syncPull').checked,
       pushOnStop: $('f_syncPush').checked,
       mode: ($('f_syncMode') && $('f_syncMode').checked) ? 'archive' : 'files',
+      provider: ($('f_syncProvider') && $('f_syncProvider').value === 'gitlab') ? 'gitlab' : 'github',
       keepParts: !!($('f_syncKeep') && $('f_syncKeep').checked),
     },
   };
@@ -3647,7 +3653,13 @@ async function saveModal() {
       toast('Для синхронизации нужны репозиторий и токен (или вход в настройках панели → GitHub)', 'err');
       return;
     }
-    if (!/^[^/\s]+\/[^/\s]+$/.test(data.sync.repo.replace(/^https?:\/\/github\.com\//i, ''))) {
+    if (data.sync.provider === 'gitlab') {
+      /* у GitLab путь может быть с подгруппами: группа/подгруппа/проект */
+      if (!/^[^\s]+\/[^\s]+$/.test(data.sync.repo.replace(/^https?:\/\/[^/]+\//i, ''))) {
+        toast('Проект GitLab пишется как владелец/название (можно с подгруппами)', 'err');
+        return;
+      }
+    } else if (!/^[^/\s]+\/[^/\s]+$/.test(data.sync.repo.replace(/^https?:\/\/github\.com\//i, ''))) {
       toast('Репозиторий пишется как владелец/название', 'err');
       return;
     }
@@ -4189,11 +4201,49 @@ function bindGithubAccount() {
 /** Подставляем в подсказку репозитории из аккаунта GitHub. */
 async function fillRepoOptions() {
   const list = $('f_syncRepoList');
-  if (!list || !API.ghRepos) return;
-  const res = await API.ghRepos('');
-  if (!res || !res.ok) return;
+  if (!list) return;
+  const gl = $('f_syncProvider') && $('f_syncProvider').value === 'gitlab';
+  const res = gl
+    ? (API.glProjects ? await API.glProjects('') : { ok: false })
+    : (API.ghRepos ? await API.ghRepos('') : { ok: false });
+  if (!res || !res.ok) { list.innerHTML = ''; return; }
   list.innerHTML = (res.repos || []).slice(0, 80)
     .map((r) => `<option value="${esc(r.full)}"></option>`).join('');
+}
+
+/**
+ * Подписи полей синхронизации зависят от провайдера: у GitHub — репозиторий,
+ * у GitLab — проект, и токен нужен свой (glpat-…).
+ */
+function syncProviderLook() {
+  const gl = $('f_syncProvider') && $('f_syncProvider').value === 'gitlab';
+  const repo = $('f_syncRepo');
+  const token = $('f_syncToken');
+  const hint = $('syncTokenHint');
+  const wrap = $('syncRepoTab');
+  if (repo) repo.placeholder = gl ? 'группа/проект' : 'владелец/репозиторий';
+  if (token) {
+    token.placeholder = gl ? 'glpat-…' : 'ghp_…';
+    token.disabled = false;
+  }
+  if (hint) {
+    hint.textContent = gl
+      ? '(токен GitLab с правом api — создаётся в Settings → Access Tokens)'
+      : '(необязательно — можно войти в настройках панели)';
+  }
+  if (wrap && wrap.firstChild && wrap.firstChild.nodeType === 3) {
+    wrap.firstChild.textContent = gl ? 'Проект' : 'Репозиторий';
+  }
+  const modeSwitch = $('f_syncMode');
+  if (modeSwitch) {
+    const label = modeSwitch.closest('label');
+    if (label && label.lastChild && label.lastChild.nodeType === 3) {
+      label.lastChild.textContent = gl
+        ? ' одним архивом (в GitLab — всегда архивом)'
+        : ' пересылать сервер одним архивом';
+    }
+    modeSwitch.disabled = gl;
+  }
 }
 
 function syncToggleBody() {
@@ -4218,6 +4268,7 @@ function syncStatusReset(server) {
 /** Временные (ещё не сохранённые) настройки из полей модалки. */
 function syncFormConfig() {
   return {
+    provider: ($('f_syncProvider') && $('f_syncProvider').value === 'gitlab') ? 'gitlab' : 'github',
     repo: $('f_syncRepo').value.trim(),
     branch: $('f_syncBranch').value.trim() || 'main',
     token: $('f_syncToken').value.trim(),
@@ -4225,18 +4276,49 @@ function syncFormConfig() {
 }
 
 function syncBind(editingServer) {
+  const providerSel = $('f_syncProvider');
+  if (providerSel) {
+    providerSel.onchange = () => {
+      syncProviderLook();
+      Sound.play('nav');
+      fillRepoOptions();
+      if (API.glHasToken !== undefined) { /* признак наличия токена GitLab */ }
+      const st = $('syncStatus');
+      if (st) st.textContent = providerSel.value === 'gitlab'
+        ? 'GitLab: сервер уедет пакетом в хранилище проекта'
+        : 'GitHub: сервер уедет архивом в репозиторий';
+    };
+  }
+
   const btnVerify = $('syncVerify');
   if (btnVerify) {
     btnVerify.onclick = async () => {
       const cfg = syncFormConfig();
-      if (!cfg.repo || !cfg.token) { notify({ title: 'Мало данных', text: 'Нужны репозиторий и токен.', kind: 'err' }); return; }
+      if (!cfg.repo) { notify({ title: 'Мало данных', text: cfg.provider === 'gitlab' ? 'Нужен проект GitLab.' : 'Нужен репозиторий.', kind: 'err' }); return; }
+      if (!cfg.token) {
+        /* токен может лежать в настройках панели — тогда поле можно оставить пустым */
+        const saved = cfg.provider === 'gitlab'
+          ? (API.glAccount ? await API.glAccount() : { hasToken: false })
+          : (API.ghAccount ? await API.ghAccount() : { hasToken: false });
+        if (!saved || !saved.hasToken) {
+          notify({ title: 'Мало данных', text: 'Нужен токен доступа.', kind: 'err' });
+          return;
+        }
+      }
+      const isGl = cfg.provider === 'gitlab';
       btnVerify.disabled = true;
       $('syncStatus').textContent = 'проверяю…';
-      const res = await API.ghVerify(cfg);
+      const res = isGl ? await API.glCheck(cfg) : await API.ghVerify(cfg);
       btnVerify.disabled = false;
       if (!res.ok) {
         $('syncStatus').textContent = res.error;
-        notify({ title: 'GitHub', text: res.error, kind: 'err' });
+        notify({ title: isGl ? 'GitLab' : 'GitHub', text: res.error, kind: 'err' });
+        return;
+      }
+      if (isGl) {
+        $('syncStatus').textContent = `${res.project} · ${res.branchExists ? 'ветка есть' : 'ветки пока нет'}`
+          + (res.packages ? ' · хранилище пакетов доступно' : ' · хранилище пакетов выключено');
+        notify({ title: 'Проект GitLab доступен', text: res.project, kind: res.packages ? 'ok' : 'warn' });
         return;
       }
       $('syncStatus').textContent = `${res.name}${res.private ? ' (приватный)' : ''} · ${res.branchExists ? 'ветка есть' : 'ветки пока нет'}`;
@@ -4265,7 +4347,7 @@ function syncBind(editingServer) {
   $('syncPull').onclick = async () => {
     const id = need(); if (!id) return;
     S.ghBusy = true;
-    $('syncStatus').textContent = 'шаг 1 из 2: скачиваю архив с GitHub…';
+    $('syncStatus').textContent = 'шаг 1 из 2: скачиваю архив…';
     let res;
     try {
       res = await API.ghPull(id);

@@ -165,6 +165,23 @@ async function openSync(page, serverIndex) {
   }));
   ok(ui.mode === true, 'пересылка архивом включена по умолчанию');
   ok(ui.keep === false, 'части архива по умолчанию удаляются из репозитория');
+  const prov = await page.evaluate(() => {
+    const sel = document.getElementById('f_syncProvider');
+    if (!sel) return null;
+    sel.value = 'gitlab';
+    sel.dispatchEvent(new Event('change'));
+    const repo = document.getElementById('f_syncRepo');
+    const token = document.getElementById('f_syncToken');
+    const out = { value: sel.value, ph: repo.placeholder, tok: token.placeholder };
+    sel.value = 'github';
+    sel.dispatchEvent(new Event('change'));
+    out.back = repo.placeholder;
+    return out;
+  });
+  ok(prov && prov.value === 'gitlab', 'провайдера можно переключить на GitLab');
+  ok(prov && /группа\/проект/.test(prov.ph), 'поле называется «проект» для GitLab', prov && prov.ph);
+  ok(prov && /glpat/.test(prov.tok), 'подсказка токена GitLab', prov && prov.tok);
+  ok(prov && /владелец\/репозиторий/.test(prov.back), 'возврат к GitHub возвращает подписи', prov && prov.back);
   ok(/делит архив на части/i.test(ui.hint), 'подсказка объясняет нарезку архива');
   ok(/удаляет части из репозитория/i.test(ui.hint), 'подсказка объясняет автоудаление частей');
 

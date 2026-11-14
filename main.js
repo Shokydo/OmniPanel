@@ -18,6 +18,7 @@ const playersCore = require('./core/players');
 const addons = require('./core/addons');
 const opener = require('./core/opener');
 const github = require('./core/github');
+const gitlab = require('./core/gitlab');
 const zip = require('./core/zip');
 const os = require('os');
 const https = require('https');
@@ -406,16 +407,23 @@ function accountToken() {
   return readGithubAccount().token || '';
 }
 
+/* Токен GitLab хранится отдельно от аккаунта GitHub: панель не путает провайдеров. */
+function gitlabToken() {
+  try { return String(readPanel().gitlabToken || '').trim(); } catch { return ''; }
+}
+
 function syncOptions(srv) {
   const sc = srv.sync || {};
   return {
     dir: srv.cwd,
     repo: sc.repo,
     branch: sc.branch || 'main',
-    token: sc.token || accountToken(),
+    token: sc.token || (sc.provider === 'gitlab' ? gitlabToken() : accountToken()),
     scope: sc.scope || 'all',
     /* основной режим — одним архивом: сначала архивация, потом отправка файла */
     mode: sc.mode || 'archive',
+    /* куда пересылаем: GitHub (по файлам или архивом) или GitLab (пакетом) */
+    provider: sc.provider === 'gitlab' ? 'gitlab' : 'github',
     /* по умолчанию части архива стираются из репозитория сразу после распаковки */
     cleanup: sc.keepParts !== true,
     stateFile: syncStateFile(srv.id),
@@ -475,9 +483,24 @@ ipcMain.on('ui:answer', (_e, payload) => {
   done(payload.id);
 });
 
+/** Как звать провайдера в логах сервера. */
+function providerName(opts) {
+  return opts && opts.provider === 'gitlab' ? 'GitLab' : 'GitHub';
+}
+
 /** Идентификаторы «общих» серверов — их не трогаем массовыми кнопками. */
 function sharedIds() {
   return manager.list().filter((s) => s.sync && s.sync.enabled).map((s) => s.id);
+}
+
+/** Забрать сервер: GitHub (архивом/по файлам) или GitLab (пакетом). */
+function syncPull(opts) {
+  return opts.provider === 'gitlab' ? gitlab.pull(opts) : github.pull(opts);
+}
+
+/** Отправить сервер тем же провайдером, что выбран в настройках. */
+function syncPush(opts) {
+  return opts.provider === 'gitlab' ? gitlab.push(opts) : github.push(opts);
 }
 
 /** Запуск с проверкой обновлений на GitHub (если включено). */
@@ -485,10 +508,12 @@ async function startWithSync(id) {
   const srv = manager.get(id);
   if (!srv) throw new Error('Сервер не найден');
   if (syncEnabled(srv) && srv.sync.pullOnStart !== false) {
-    manager.note(id, 'GitHub: проверяю обновления перед запуском…');
-    const res = await github.pull(syncOptions(srv));
+    const opts = syncOptions(srv);
+    const who = providerName(opts);
+    manager.note(id, `${who}: проверяю обновления перед запуском…`);
+    const res = await syncPull(opts);
     if (!res.ok) {
-      manager.note(id, 'GitHub: ' + res.error);
+      manager.note(id, `${who}: ` + res.error);
       const choice = await askUI({
         kind: 'warn',
         title: 'Синхронизация не удалась',
@@ -522,18 +547,20 @@ async function pushAfterStop(id) {
   if (quitting || pushing.has(id)) return;
   pushing.add(id);
   try {
-    manager.note(id, 'GitHub: отправляю сервер архивом…');
-    const res = await github.push(syncOptions(srv));
+    const opts = syncOptions(srv);
+    const who = providerName(opts);
+    manager.note(id, `${who}: отправляю сервер архивом…`);
+    const res = await syncPush(opts);
     if (res.ok) {
-      if (res.upToDate) manager.note(id, 'GitHub: отправлять нечего');
-      else manager.note(id, `GitHub: отправлено файлов — ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`);
+      if (res.upToDate) manager.note(id, `${who}: отправлять нечего`);
+      else manager.note(id, `${who}: отправлено ${res.parts ? `частей ${res.parts}` : 'файлов — ' + res.uploaded}`);
     } else {
-      manager.note(id, 'GitHub: ' + res.error);
+      manager.note(id, `${who}: ` + res.error);
     }
     if (win && !win.isDestroyed()) {
       win.webContents.send('toast', res.ok
-        ? { kind: 'ok', text: res.upToDate ? `${srv.name}: изменений для GitHub нет` : `${srv.name}: сервер отправлен на GitHub` }
-        : { kind: 'err', text: `${srv.name}: GitHub — ${res.error}` });
+        ? { kind: 'ok', text: res.upToDate ? `${srv.name}: изменений для ${who} нет` : `${srv.name}: сервер отправлен в ${who}` }
+        : { kind: 'err', text: `${srv.name}: ${who} — ${res.error}` });
     }
   } finally {
     pushing.delete(id);
@@ -987,13 +1014,42 @@ function wireIpc() {
     }
   });
 
+  /* GitLab: свой токен и свои проекты, аккаунт GitHub не мешает */
+  ipcMain.handle('gl:account', () => ({ hasToken: !!gitlabToken(), token: gitlabToken() ? '***' : '' }));
+
+  ipcMain.handle('gl:check', async (_e, cfg = {}) => {
+    const token = cfg.token || gitlabToken();
+    const res = await gitlab.check({ ...cfg, token });
+    if (res.ok && cfg.token) writePanel({ gitlabToken: String(cfg.token).trim() });
+    return res;
+  });
+
+  ipcMain.handle('gl:projects', async (_e, query) => {
+    const token = gitlabToken();
+    if (!token) return { ok: false, error: 'Нет токена GitLab — впиши его в настройках сервера' };
+    try {
+      const all = await gitlab.listProjects(token);
+      const q = String(query || '').toLowerCase();
+      const repos = all.filter((r) => !q || r.full.toLowerCase().includes(q));
+      return { ok: true, repos };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('gl:save', (_e, token) => {
+    writePanel({ gitlabToken: String(token || '').trim() });
+    return { ok: true };
+  });
+
   ipcMain.handle('gh:repos', async (_e, query) => github.listRepos(accountToken(), query));
   ipcMain.handle('gh:createRepo', async (_e, name, isPrivate) => github.createRepo(accountToken(), name, isPrivate !== false));
   ipcMain.handle('gh:check', async (_e, id) => {
     const srv = manager.get(id);
     if (!srv) return { ok: false, error: 'Сервер не найден' };
     if (!syncEnabled(srv)) return { ok: false, error: 'Синхронизация не настроена' };
-    return github.check(syncOptions(srv));
+    const opts = syncOptions(srv);
+    return opts.provider === 'gitlab' ? gitlab.check(opts) : github.check(opts);
   });
   ipcMain.handle('gh:pull', async (_e, id) => {
     const srv = manager.get(id);
@@ -1003,33 +1059,37 @@ function wireIpc() {
     if (st === 'running' || st === 'starting') {
       return { ok: false, error: 'Сначала останови сервер — файлы мира заняты' };
     }
-    manager.note(id, 'GitHub: забираю сервер архивом…');
-    const res = await github.pull(syncOptions(srv));
+    const opts = syncOptions(srv);
+    const who = providerName(opts);
+    manager.note(id, `${who}: забираю сервер архивом…`);
+    const res = await syncPull(opts);
     manager.note(id, res.ok
       ? (res.upToDate
-        ? 'GitHub: всё уже актуально'
+        ? `${who}: всё уже актуально`
         : ((res.format
-          ? `GitHub: архив ${res.format}${res.parts > 1 ? ` из ${res.parts} частей` : ''} скачан и распакован — файлов ${res.downloaded}`
-          : `GitHub: скачано ${res.downloaded}, удалено ${res.removed}`)
-          + (res.repoCleaned ? ', части архива удалены из репозитория' : '')))
-      : 'GitHub: ' + res.error);
+          ? `${who}: архив ${res.format}${res.parts > 1 ? ` из ${res.parts} частей` : ''} скачан и распакован — файлов ${res.downloaded}`
+          : `${who}: скачано ${res.downloaded}, удалено ${res.removed}`)
+          + (res.repoCleaned ? ', архив удалён из хранилища' : '')))
+      : `${who}: ` + res.error);
     return res;
   });
   ipcMain.handle('gh:push', async (_e, id) => {
     const srv = manager.get(id);
     if (!srv) return { ok: false, error: 'Сервер не найден' };
     if (!syncEnabled(srv)) return { ok: false, error: 'Синхронизация не настроена' };
-    manager.note(id, 'GitHub: отправляю изменения…');
-    const res = await github.push(syncOptions(srv));
+    const opts = syncOptions(srv);
+    const who = providerName(opts);
+    manager.note(id, `${who}: отправляю изменения…`);
+    const res = await syncPush(opts);
     manager.note(id, res.ok
       ? (res.upToDate
-        ? 'GitHub: отправлять нечего'
+        ? `${who}: отправлять нечего`
         : (res.archive
-          ? `GitHub: архив ${(res.format || 'zip')} ${(res.size / 1048576).toFixed(1)} МБ (из ${(res.raw / 1048576).toFixed(1)} МБ)`
+          ? `${who}: архив ${(res.format || 'zip')} ${(res.size / 1048576).toFixed(1)} МБ (из ${(res.raw / 1048576).toFixed(1)} МБ)`
             + (res.parts > 1 ? `, частей ${res.parts}` : '')
-            + ` отправлен, коммит ${String(res.commit).slice(0, 7)}`
-          : `GitHub: отправлено ${res.uploaded}, коммит ${String(res.commit).slice(0, 7)}`))
-      : 'GitHub: ' + res.error);
+            + ` отправлен, версия ${res.commit}`
+          : `${who}: отправлено ${res.uploaded}, версия ${res.commit}`))
+      : `${who}: ` + res.error);
     return res;
   });
   ipcMain.handle('gh:status', (_e, id) => {
