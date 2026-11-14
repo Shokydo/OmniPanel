@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OmniPanel</title>
+<link rel="icon" href="favicon.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ───────────── своя шапка окна ───────────── -->
+  <header class="titlebar">
+    <div class="tb-brand">
+      <img class="brand-logo" src="../assets/icon.png" alt="" width="20" height="20" />
+      <span class="brand-title">OmniPanel</span>
+    </div>
+    <div class="tb-drag"></div>
+    <div class="win-ctrl">
+      <button id="winMin" class="wc wc-min" aria-label="Свернуть">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <button id="winMax" class="wc wc-max" aria-label="На весь экран">
+        <svg class="ic-max" width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="1.2" y="1.2" width="7.6" height="7.6" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
+        <svg class="ic-restore hidden" width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="1" y="3" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M3 2.6V1.6a.6.6 0 0 1 .6-.6h4.8a.6.6 0 0 1 .6.6v4.8a.6.6 0 0 1-.6.6h-1" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+      <button id="winClose" class="wc wc-close" aria-label="Свернуть в трей">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.6 1.6l6.8 6.8M8.4 1.6 1.6 8.4" stroke="currentColor" stroke-width="1.2"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="app-body">
+
+  <!-- ───────────── сайдбар ───────────── -->
+  <aside class="sidebar">
+    <div class="profile">
+      <div class="profile-ava"><img src="../assets/icon.png" alt="" /></div>
+      <div class="profile-info">
+        <div class="profile-name">OmniPanel</div>
+        <div class="profile-sub" id="profileStatus">менеджер серверов</div>
+      </div>
+      <button id="profileBtn" class="btn btn-icon" aria-label="Настройки панели">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+      </button>
+    </div>
+
+    <div class="side-top">
+      <div class="side-label">Серверы <span id="countBadge" class="badge">0</span></div>
+      <div class="row" style="gap:4px">
+        <button id="gridBtnSide" class="btn btn-ghost btn-mini">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
+        </button>
+        <button id="scanBtn" class="btn btn-ghost btn-mini"><svg class="i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg> Сканировать</button>
+      </div>
+    </div>
+
+    <nav id="serverList" class="server-list"></nav>
+
+    <button id="createBtn" class="btn btn-primary add-btn"><svg class="i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg> Создать сервер</button>
+    <button id="addBtn" class="btn btn-ghost add-btn"><span class="plus">+</span> Добавить существующий</button>
+
+    <div class="side-footer">
+      <div class="sf-row"><span>Активно</span><b id="runningCount">0 / 0</b></div>
+      <div class="sf-actions">
+        <button id="allStart" class="btn sf-btn">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5-13-7.5Z"/></svg> Запустить все
+        </button>
+        <button id="allStop" class="btn sf-btn">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.6"/></svg> Остановить все
+        </button>
+      </div>
+      <div class="sf-actions">
+        <button id="allRestart" class="btn sf-btn">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg> Перезапустить все
+        </button>
+        <button id="settingsBtn" class="btn btn-icon sf-gear" aria-label="Настройки панели">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ───────────── основная часть ───────────── -->
+  <main class="main">
+    <div id="empty" class="empty">
+      <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
+        <rect x="2.2" y="3.4" width="19.6" height="17.2" rx="4.2" stroke="var(--line-2)" stroke-width="1.3"/>
+        <path d="M6.6 9.2 9.8 12 6.6 14.8" stroke="var(--line-2)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M12.4 15h5" stroke="var(--line-2)" stroke-width="1.3" stroke-linecap="round"/>
+      </svg>
+      <h2>Сервер не выбран</h2>
+      <div class="empty-actions">
+        <button id="emptyCreate" class="btn btn-primary"><svg class="i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg> Создать сервер</button>
+        <button id="emptyScan" class="btn"><svg class="i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg> Найти серверы</button>
+        <button id="emptyAdd" class="btn">Добавить существующий</button>
+      </div>
+    </div>
+
+    <div id="view" class="view hidden">
+      <header class="topbar">
+        <div class="tb-left">
+          <div id="bigIcon" class="big-ico">S</div>
+          <div>
+            <h1 id="serverName">—</h1>
+            <div class="meta">
+              <span id="statusDot" class="dot"></span>
+              <span id="stateText">остановлен</span>
+              <span class="sep">•</span>
+              <span id="uptimeChip" class="up-chip">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.6"/><path d="M12 7.4V12l3.2 2"/></svg>
+                <span id="uptimeText">не запущен</span>
+              </span>
+              <span class="sep">•</span>
+              <span id="pidText">—</span>
+              <span id="tpsBadge" class="tps hidden">
+                <span class="lbl">TPS</span>
+                <span id="tpsVal" class="val">—</span>
+                <svg id="tpsSpark" width="46" height="16" viewBox="0 0 46 16"></svg>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="tb-actions">
+          <div class="tb-group">
+            <button id="btnGrid" class="btn btn-icon tb-ico" aria-label="Все серверы">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
+            </button>
+            <button id="btnVSCode" class="btn btn-icon tb-ico" aria-label="Открыть в VS Code">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 3.5 9 10.8 5.4 8 4 8.7v6.6L5.4 16 9 13.2l7.5 7.3L20 18.6V5.4Z"/><path d="M4 8.7 9 12l-5 3.3"/></svg>
+            </button>
+            <button id="btnFolder" class="btn btn-icon tb-ico" aria-label="Открыть папку сервера">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h9A1.5 1.5 0 0 1 21 10v8.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-11Z"/></svg>
+            </button>
+            <button id="btnSettings" class="btn btn-icon tb-ico" aria-label="Настройки сервера">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+            </button>
+          </div>
+
+          <div class="tb-group tb-group-run">
+            <button id="btnStart" class="btn btn-start tb-ico" aria-label="Запустить">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5-13-7.5Z"/></svg>
+            </button>
+            <button id="btnRestart" class="btn btn-restart tb-ico" aria-label="Перезапустить">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg>
+            </button>
+            <button id="btnStop" class="btn btn-stop tb-ico" aria-label="Остановить">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.6"/></svg>
+            </button>
+            <button id="btnKill" class="btn btn-icon tb-ico" aria-label="Принудительно завершить">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="console">Консоль</button>
+        <button class="tab" data-tab="files">Файлы</button>
+        <button class="tab" data-tab="perf">Производительность</button>
+        <button class="tab" data-tab="tps">TPS-история</button>
+        <button class="tab" data-tab="backups">Бэкапы</button>
+      </nav>
+
+      <section id="tab-console" class="console-wrap tab-pane">
+        <div class="console-bar">
+          <span class="cb-title">Консоль</span>
+          <input id="logFilter" class="filter" type="search" placeholder="фильтр по тексту…" spellcheck="false" />
+          <div class="right">
+            <label class="switch">
+              <input id="tglColors" type="checkbox" /><span class="box"></span>цвета
+            </label>
+            <label class="switch">
+              <input id="autoscroll" type="checkbox" checked /><span class="box"></span>автоскролл
+            </label>
+            <button id="btnDownload" class="btn btn-mini">Сохранить</button>
+            <button id="btnClear" class="btn btn-mini">Очистить</button>
+          </div>
+        </div>
+        <div id="console" class="console"></div>
+        <div class="cmd-row">
+          <span class="prompt">&gt;</span>
+          <input id="cmdInput" class="cmd" type="text" placeholder="команда в консоль сервера (Enter — отправить)" spellcheck="false" autocomplete="off" />
+          <button id="cmdSend" class="btn btn-mini">Отправить</button>
+        </div>
+      </section>
+
+      <!-- файлы -->
+      <section id="tab-files" class="pane tab-pane hidden files-pane">
+        <div class="fm">
+          <aside class="fm-side">
+            <div class="fm-side-head">
+              <input id="fmSearch" class="filter" type="search" placeholder="найти файл…" spellcheck="false" />
+              <button id="fmNewFile" class="btn btn-mini">+ файл</button>
+              <button id="fmNewFolder" class="btn btn-mini">+ папка</button>
+            </div>
+            <div id="fmTree" class="fm-tree"><div class="fm-empty">Папка сервера не задана</div></div>
+            <div id="fmSearchRes" class="fm-search hidden"></div>
+          </aside>
+
+          <div class="fm-main">
+            <div class="fm-bar">
+              <div id="fmCrumb" class="fm-crumb">файл не выбран</div>
+              <div class="right">
+                <span id="fmDirty" class="fm-dirty hidden"></span>
+                <button id="fmOpenExt" class="btn btn-mini">Внешне</button>
+                <button id="fmVSCode" class="btn btn-mini"><svg class="i" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 3.5 9 10.8 5.4 8 4 8.7v6.6L5.4 16 9 13.2l7.5 7.3L20 18.6V5.4Z"/><path d="M4 8.7 9 12l-5 3.3"/></svg></button>
+                <button id="fmWikiBtn" class="btn btn-mini">Шпаргалка</button>
+                <button id="fmSave" class="btn btn-primary btn-mini" disabled>Сохранить</button>
+              </div>
+            </div>
+
+            <div class="fm-editor">
+              <div class="fm-gutter"><div id="fmGutterInner">1</div></div>
+              <div class="fm-codewrap">
+                <pre id="fmHl" class="fm-hl"><code id="fmHlCode"></code></pre>
+                <textarea id="fmText" class="fm-text" spellcheck="false" wrap="off" disabled
+                  placeholder="Выбери файл слева"></textarea>
+              </div>
+            </div>
+
+            <div class="fm-status">
+              <span id="fmPath">—</span>
+              <span class="spacer"></span>
+              <span id="fmPos">стр 1, стлб 1</span>
+              <span id="fmKind" class="fm-badge">—</span>
+              <span id="fmSize">—</span>
+            </div>
+          </div>
+
+          <aside id="fmWiki" class="fm-wiki hidden">
+            <div class="fm-wiki-head">
+              <div>
+                <div class="fw-title">Шпаргалка MythicMobs</div>
+                <div class="fw-sub">MythicMobs + MythicCrucible — вставка шаблонов в файл</div>
+              </div>
+              <button id="fmWikiClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </div>
+            <div id="fmWikiList" class="fm-wiki-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- производительность -->
+      <section id="tab-perf" class="pane tab-pane hidden">
+        <div class="perf-cards">
+          <div class="perf-card">
+            <div class="pc-label">CPU</div>
+            <div class="pc-value"><span id="cpuNow">—</span><em>%</em></div>
+            <div id="cpuChart" class="chart"></div>
+          </div>
+          <div class="perf-card">
+            <div class="pc-label">RAM</div>
+            <div class="pc-value"><span id="ramNow">—</span><em id="ramUnit">МБ</em></div>
+            <div id="ramChart" class="chart"></div>
+          </div>
+          <div class="perf-card small">
+            <div class="pc-label">Процессов</div>
+            <div class="pc-value"><span id="procNow">—</span></div>
+            <div class="pc-hint">включая дочерние</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TPS история -->
+      <section id="tab-tps" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">История TPS</div>
+            <div class="ph-sub" id="tpsStats">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <select id="tpsRange" class="mini-select">
+              <option value="15">15 минут</option>
+              <option value="60" selected>1 час</option>
+              <option value="360">6 часов</option>
+              <option value="1440">24 часа</option>
+            </select>
+            <button id="tpsClearBtn" class="btn btn-mini">Очистить историю</button>
+          </div>
+        </div>
+        <div id="tpsChart" class="chart big"></div>
+      </section>
+
+      <!-- бэкапы -->
+      <section id="tab-backups" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Бэкапы папки сервера</div>
+            <div class="ph-sub" id="backupSub">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="backupReveal" class="btn btn-mini">Открыть папку бэкапов</button>
+            <button id="backupCreate" class="btn btn-primary btn-mini">Создать бэкап</button>
+          </div>
+        </div>
+        <div id="backupList" class="backup-list"></div>
+      </section>
+    </div>
+  </main>
+
+  </div><!-- /app-body -->
+</div>
+
+<!-- ───────────── ввод строки (своё окно вместо window.prompt) ───────────── -->
+<div id="textModal" class="modal hidden">
+  <div class="modal-box small">
+    <header class="modal-head">
+      <h2 id="txTitle">Ввод</h2>
+    </header>
+    <div class="modal-body">
+      <p id="txText" class="tx-text">—</p>
+      <input id="txInput" type="text" spellcheck="false" autocomplete="off" />
+    </div>
+    <footer class="modal-foot">
+      <div class="spacer"></div>
+      <button id="txCancel" class="btn btn-ghost">Отмена</button>
+      <button id="txOk" class="btn btn-primary">OK</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── контекстное меню ───────────── -->
+<div id="ctx" class="ctx hidden"></div>
+
+<!-- ───────────── настройки сервера ───────────── -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h2 id="modalTitle">Новый сервер</h2>
+      <button id="modalClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <label class="field">
+        <span class="lbl">Название</span>
+        <input id="f_name" type="text" placeholder="Minecraft 1.20.4" />
+      </label>
+
+      <div class="field">
+        <span class="lbl">Иконка сервера</span>
+        <div class="icon-row">
+          <div id="iconPrev" class="icon-prev">S</div>
+          <div class="icon-side">
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button id="pickIcon" class="btn btn-mini">Выбрать иконку…</button>
+              <button id="iconToServer" class="btn btn-mini">В server-icon.png</button>
+              <button id="iconFromServer" class="btn btn-mini">Из server-icon.png</button>
+              <button id="clearIcon" class="btn btn-mini btn-ghost">Убрать</button>
+            </div>
+            <div id="iconEditor" class="icon-editor hidden">
+              <div class="ie-stage">
+                <canvas id="ieCanvas" width="256" height="256"></canvas>
+              </div>
+              <div class="ie-controls">
+                <label class="ie-ctl"><span>Масштаб</span>
+                  <input id="ieZoom" type="range" min="100" max="400" value="100" />
+                </label>
+                <label class="ie-ctl"><span>Поворот</span>
+                  <input id="ieRotate" type="range" min="-180" max="180" value="0" />
+                </label>
+                <div class="ie-xy">
+                  <label class="ie-num"><span>Смещение X</span>
+                    <input id="ieShiftX" type="number" step="1" min="-100" max="100" value="0" />
+                  </label>
+                  <label class="ie-num"><span>Смещение Y</span>
+                    <input id="ieShiftY" type="number" step="1" min="-100" max="100" value="0" />
+                  </label>
+                </div>
+                <div class="ie-row">
+                  <button id="ieReset" class="btn btn-mini">Сброс</button>
+                  <button id="ieApply" class="btn btn-mini btn-primary">Применить</button>
+                </div>
+                <div class="ie-hint" id="ieInfo">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <label class="field">
+        <span class="lbl">Команда запуска</span>
+        <div class="row">
+          <input id="f_command" type="text" placeholder='java -Xmx4G -jar server.jar nogui' spellcheck="false" />
+          <button id="pickFile" class="btn btn-mini">файл…</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span class="lbl">Рабочая папка</span>
+        <div class="row">
+          <input id="f_cwd" type="text" placeholder="C:\Servers\minecraft" spellcheck="false" />
+          <button id="pickFolder" class="btn btn-mini">обзор…</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span class="lbl">Команда корректной остановки <em>(необязательно)</em></span>
+        <input id="f_stopCommand" type="text" placeholder="stop" spellcheck="false" />
+      </label>
+
+      <div class="field">
+        <span class="lbl">server.properties</span>
+        <div class="props-box">
+          <div class="props-head">
+            <span id="propsState" class="fm-badge">—</span>
+            <button id="propsReload" class="btn btn-mini">Перечитать</button>
+          </div>
+          <div class="props-grid">
+            <label class="field">
+              <span class="lbl">MOTD</span>
+              <input id="p_motd" type="text" placeholder="Добро пожаловать" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="lbl">Порт</span>
+              <input id="p_port" type="number" min="1" max="65535" placeholder="25565" />
+            </label>
+            <label class="field">
+              <span class="lbl">Лимит онлайна</span>
+              <input id="p_maxplayers" type="number" min="1" max="10000" placeholder="20" />
+            </label>
+            <label class="field">
+              <span class="lbl">Сложность</span>
+              <select id="p_difficulty">
+                <option value="">—</option>
+                <option value="peaceful">мирная</option>
+                <option value="easy">лёгкая</option>
+                <option value="normal">обычная</option>
+                <option value="hard">сложная</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="lbl">Режим игры</span>
+              <select id="p_gamemode">
+                <option value="">—</option>
+                <option value="survival">выживание</option>
+                <option value="creative">творческий</option>
+                <option value="adventure">приключение</option>
+                <option value="spectator">наблюдатель</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="lbl">Дальность прорисовки</span>
+              <input id="p_viewdistance" type="number" min="2" max="32" placeholder="10" />
+            </label>
+          </div>
+          <div class="props-flags">
+            <label class="check"><input id="p_onlinemode" type="checkbox" /><span>online-mode</span></label>
+            <label class="check"><input id="p_pvp" type="checkbox" /><span>pvp</span></label>
+            <label class="check"><input id="p_flight" type="checkbox" /><span>allow-flight</span></label>
+            <label class="check"><input id="p_whitelist" type="checkbox" /><span>white-list</span></label>
+            <label class="check"><input id="p_hardcore" type="checkbox" /><span>hardcore</span></label>
+            <label class="check"><input id="p_cmdblock" type="checkbox" /><span>command-block</span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Синхронизация с GitHub</span>
+        <div class="props-box sync-box">
+          <label class="check"><input id="f_syncEnabled" type="checkbox" /><span>Держать мир в репозитории GitHub</span></label>
+
+          <div id="syncBody" class="sync-body">
+            <div class="sync-grid">
+              <label class="mini-field">Репозиторий
+                <input id="f_syncRepo" type="text" placeholder="владелец/репозиторий" spellcheck="false" list="f_syncRepoList" />
+                <datalist id="f_syncRepoList"></datalist>
+              </label>
+              <label class="mini-field">Ветка
+                <input id="f_syncBranch" type="text" placeholder="main" spellcheck="false" />
+              </label>
+            </div>
+
+            <label class="mini-field syn-wide">Свой токен <em>(необязательно)</em>
+              <input id="f_syncToken" type="password" placeholder="ghp_…" spellcheck="false" autocomplete="off" />
+            </label>
+
+            <label class="mini-field mini-field-wide syn-wide">Что синхронизировать
+              <select id="f_syncScope">
+                <option value="all" selected>весь сервер (мир, плагины, конфиги, ядро)</option>
+                <option value="config">мир + конфиги плагинов</option>
+                <option value="world">только мир</option>
+              </select>
+            </label>
+
+            <div class="sync-order">
+              <label class="check"><input id="f_syncPull" type="checkbox" /><span>скачивать обновления перед запуском</span></label>
+              <label class="check"><input id="f_syncPush" type="checkbox" /><span>отправлять мир после остановки</span></label>
+            </div>
+
+            <div class="row sync-actions">
+              <button id="syncVerify" class="btn btn-mini">Проверить</button>
+              <button id="syncPull" class="btn btn-mini">Скачать</button>
+              <button id="syncPush" class="btn btn-mini">Отправить</button>
+              <span id="syncStatus" class="wall-name">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="lbl">Папка программы</span>
+        <div class="row">
+          <input id="f_cwdLocal" type="text" readonly value="" spellcheck="false" />
+          <button id="moveToApp" class="btn btn-mini">Перенести сюда</button>
+        </div>
+      </div>
+
+      <div class="row-2">
+        <label class="field">
+          <span class="lbl">Кодировка вывода</span>
+          <select id="f_encoding">
+            <option value="auto">Авто (рекомендуется)</option>
+            <option value="utf8">UTF-8</option>
+            <option value="cp866">CP866 (консоль Windows)</option>
+            <option value="cp1251">CP1251 (Windows-1251)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="lbl">TPS-монитор <em>(Minecraft)</em></span>
+          <div class="row">
+            <input id="f_tpsCommand" type="text" placeholder="tps" spellcheck="false" />
+            <input id="f_tpsInterval" type="number" min="5" max="300" value="30" style="max-width:70px" />
+          </div>
+        </label>
+      </div>
+
+      <div class="field-row">
+        <label class="check"><input id="f_autoStart" type="checkbox" /><span>Автозапуск при старте панели</span></label>
+        <label class="check"><input id="f_autoRestart" type="checkbox" /><span>Перезапускать при падении</span></label>
+      </div>
+
+      <label class="field">
+        <span class="lbl">Переменные окружения <em>(необязательно)</em></span>
+        <textarea id="f_env" rows="2" placeholder="PORT=25565&#10;JAVA_FLAGS=-Xms512M" spellcheck="false"></textarea>
+      </label>
+    </div>
+    <footer class="modal-foot">
+      <button id="btnDelete" class="btn btn-danger hidden">Удалить сервер</button>
+      <div class="spacer"></div>
+      <button id="modalCancel" class="btn btn-ghost">Отмена</button>
+      <button id="modalSave" class="btn btn-primary">Сохранить</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── сканер ───────────── -->
+<div id="scanModal" class="modal hidden">
+  <div class="modal-box">
+    <header class="modal-head">
+      <h2>Поиск серверов на этом компьютере</h2>
+      <button id="scanClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="row">
+        <button id="scanAll" class="btn btn-primary">Сканировать все диски</button>
+        <button id="scanPick" class="btn">Выбрать папку…</button>
+        <button id="scanStop" class="btn btn-ghost hidden">Остановить</button>
+      </div>
+      <div class="field" style="max-width:260px">
+        <span class="lbl">Глубина поиска</span>
+        <button id="scanDepthBtn" class="btn depth-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h9A1.5 1.5 0 0 1 21 10v8.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5v-11Z"/><path d="M9 13.5h6"/></svg>
+          <span id="scanDepthVal">5</span>
+          <span class="depth-dots" id="scanDepthDots"></span>
+        </button>
+      </div>
+      <div class="field">
+        <span class="lbl">Что ищем</span>
+        <div id="scanFilters" class="scan-filters"></div>
+      </div>
+      <div id="scanProgressWrap" class="hidden">
+        <div class="scan-bar"><i id="scanBar"></i></div>
+        <div id="scanProgress" class="scan-progress">—</div>
+        <div id="scanCurrent" class="scan-current">—</div>
+        <div id="scanStats" class="scan-stats"></div>
+      </div>
+      <div id="scanResults" class="scan-list"></div>
+    </div>
+    <footer class="modal-foot">
+      <span id="scanCount" class="hint" style="text-align:left"></span>
+      <div class="spacer"></div>
+      <button id="scanAddAll" class="btn btn-primary hidden">Добавить все</button>
+      <button id="scanDone" class="btn btn-ghost">Закрыть</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── подтверждение ───────────── -->
+<div id="confirmModal" class="modal hidden">
+  <div class="modal-box small">
+    <header class="modal-head">
+      <h2 id="cfTitle">Подтверждение</h2>
+    </header>
+    <div class="modal-body">
+      <p id="cfText">—</p>
+    </div>
+    <footer class="modal-foot">
+      <div class="spacer"></div>
+      <button id="cfCancel" class="btn btn-ghost">Отмена</button>
+      <button id="cfOk" class="btn btn-primary">Да</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── мастер создания сервера ───────────── -->
+<div id="wizModal" class="modal hidden">
+  <div class="modal-box wide">
+    <header class="modal-head">
+      <h2>Создать сервер</h2>
+      <button id="wizClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="modal-body">
+
+      <div class="field">
+        <span class="lbl">1. Ядро сервера</span>
+        <div id="wizKernels" class="kernel-grid"></div>
+      </div>
+
+      <div class="wiz-row">
+        <label class="field" id="wizVersionField">
+          <span class="lbl">2. Версия</span>
+          <select id="wizVersion"><option>загрузка…</option></select>
+          <small id="wizVersionHint">Список версий подтягивается с официального API ядра.</small>
+        </label>
+
+        <label class="field hidden" id="wizUrlField">
+          <span class="lbl">2. Прямая ссылка на jar</span>
+          <input id="wizUrl" type="text" placeholder="https://example.com/server.jar" spellcheck="false" />
+        </label>
+
+        <label class="field hidden" id="wizFileNameField">
+          <span class="lbl">Имя файла</span>
+          <input id="wizFileName" type="text" placeholder="server.jar" spellcheck="false" />
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="lbl">3. Куда создать</span>
+        <div class="row">
+          <input id="wizParent" type="text" placeholder="C:\Servers" spellcheck="false" />
+          <button id="wizPickParent" class="btn btn-mini">обзор…</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <input id="wizFolderName" type="text" placeholder="paper-26.3" spellcheck="false" />
+        </div>
+        <small id="wizPathPreview">—</small>
+      </div>
+
+      <div class="wiz-row">
+        <label class="field">
+          <span class="lbl">Название в панели</span>
+          <input id="wizName" type="text" placeholder="Paper 26.3" />
+        </label>
+        <label class="field">
+          <span class="lbl">Порт</span>
+          <input id="wizPort" type="number" min="1" max="65535" value="25565" />
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="lbl">4. Java</span>
+        <div class="row">
+          <select id="wizJava" style="flex:1"></select>
+          <button id="wizJavaRefresh" class="btn btn-mini">⟳</button>
+          <button id="wizJavaDownload" class="btn btn-mini">где взять Java?</button>
+        </div>
+        <small id="wizJavaHint">—</small>
+      </div>
+
+      <div class="wiz-row">
+        <label class="field">
+          <span class="lbl">Память: минимум (МБ)</span>
+          <input id="wizRamMin" type="number" min="256" step="256" value="1024" />
+        </label>
+        <label class="field">
+          <span class="lbl">Память: максимум (МБ)</span>
+          <input id="wizRamMax" type="number" min="512" step="256" value="4096" />
+        </label>
+        <label class="field">
+          <span class="lbl">Флаги JVM</span>
+          <select id="wizFlags">
+            <option value="aikar" selected>Aikar (рекомендуется)</option>
+            <option value="simple">Простые G1GC</option>
+            <option value="none">Без флагов</option>
+            <option value="custom">Свои (поле ниже)</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="field hidden" id="wizExtraField">
+        <span class="lbl">Свои флаги</span>
+        <input id="wizExtra" type="text" placeholder="-XX:+UseZGC" spellcheck="false" />
+      </label>
+
+      <div class="wiz-row">
+        <label class="field">
+          <span class="lbl">MOTD</span>
+          <input id="wizMotd" type="text" value="OmniPanel" />
+        </label>
+        <label class="check" style="align-self:flex-end;padding-bottom:9px">
+          <input id="wizOnline" type="checkbox" checked /><span>online-mode (лицензия)</span>
+        </label>
+      </div>
+
+      <div class="field hidden" id="wizProgressField">
+        <span class="lbl">Прогресс</span>
+        <div class="scan-bar"><i id="wizBar" style="width:0%"></i></div>
+        <div id="wizStage" class="scan-progress">Готов к созданию</div>
+        <div id="wizLog" class="wiz-log hidden"></div>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <div class="spacer"></div>
+      <button id="wizCancel" class="btn btn-ghost">Отмена</button>
+      <button id="wizCreate" class="btn btn-primary">Создать и добавить</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── сетка всех серверов ───────────── -->
+<div id="gridModal" class="modal hidden">
+  <div class="modal-box wide">
+    <header class="modal-head">
+      <h2>Все серверы <span id="gridCount" class="badge">0</span></h2>
+      <button id="gridClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="grid-tools">
+        <input id="gridSearch" class="filter" type="search" placeholder="поиск по названию или пути…" spellcheck="false" />
+        <div class="row" style="gap:6px">
+          <button id="gridStartAll" class="btn btn-mini">Запустить все</button>
+          <button id="gridStopAll" class="btn btn-mini">Остановить все</button>
+        </div>
+      </div>
+      <div id="gridList" class="server-grid"></div>
+    </div>
+    <footer class="modal-foot">
+      <span class="hint" id="gridHint" style="text-align:left"></span>
+      <div class="spacer"></div>
+      <button id="gridCreate" class="btn"><svg class="i" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg> Создать сервер</button>
+      <button id="gridAdd" class="btn btn-ghost">Добавить существующий</button>
+      <button id="gridDone" class="btn btn-primary">Закрыть</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── настройки панели ───────────── -->
+<div id="prefsModal" class="modal hidden">
+  <div class="modal-box prefs-box">
+    <header class="modal-head">
+      <h2>Настройки панели</h2>
+      <button id="prefsClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+
+    <div class="prefs-layout">
+      <nav class="prefs-nav" id="prefsNav">
+        <button class="prefs-tab active" data-cat="look">Оформление</button>
+        <button class="prefs-tab" data-cat="bg">Фон</button>
+        <button class="prefs-tab" data-cat="fx">Эффекты</button>
+        <button class="prefs-tab" data-cat="win">Окно</button>
+        <button class="prefs-tab" data-cat="notif">Уведомления</button>
+        <button class="prefs-tab" data-cat="gh">GitHub</button>
+        <button class="prefs-tab" data-cat="sound">Звуки</button>
+        <button class="prefs-tab" data-cat="upd">Обновления</button>
+      </nav>
+
+      <div class="modal-body prefs-body">
+        <!-- ОФОРМЛЕНИЕ -->
+        <section class="prefs-cat" data-cat="look">
+          <div class="field">
+            <span class="lbl">Тема оформления</span>
+            <div id="themeGrid" class="theme-grid"></div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Свои цвета <em>(тема «Кастом»)</em></span>
+            <div class="color-row">
+              <label class="color-item">Фон<input type="color" id="cBg" value="#070708" /></label>
+              <label class="color-item">Панели<input type="color" id="cPanel" value="#141417" /></label>
+              <label class="color-item">Текст<input type="color" id="cText" value="#ececee" /></label>
+              <label class="color-item">Акцент<input type="color" id="cAccent" value="#ffffff" /></label>
+            </div>
+            <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
+              <input id="themeName" type="text" class="mini-input" placeholder="название темы" spellcheck="false" />
+              <button id="themeSave" class="btn btn-mini">Сохранить тему</button>
+              <button id="themeResetCustom" class="btn btn-mini btn-ghost">Сбросить цвета</button>
+            </div>
+            <div id="themePresets" class="theme-presets"></div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Форма элементов</span>
+            <div id="radiusGrid" class="chip-grid">
+              <button class="chip" data-radius="square">Квадратные</button>
+              <button class="chip" data-radius="soft">Мягкие</button>
+              <button class="chip" data-radius="round">Закруглённые</button>
+              <button class="chip" data-radius="pill">Таблетки</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ФОН -->
+        <section class="prefs-cat hidden" data-cat="bg">
+          <div class="field">
+            <span class="lbl">Обои</span>
+            <div id="wallGrid" class="wall-grid"></div>
+            <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
+              <button id="wallPick" class="btn btn-mini">Свой файл…</button>
+              <button id="wallClear" class="btn btn-mini btn-ghost">Убрать фон</button>
+              <span id="wallName" class="wall-name">фон не выбран</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Недавние фоны</span>
+            <div id="wallRecent" class="wall-recent"></div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Как показывать</span>
+            <div class="sync-grid">
+              <label class="mini-field">Вписать
+                <select id="wallFit">
+                  <option value="cover">Заполнить</option>
+                  <option value="contain">Вписать</option>
+                  <option value="fill">Растянуть</option>
+                  <option value="tile">Плиткой</option>
+                </select>
+              </label>
+              <label class="mini-field">Размытие фона
+                <input id="wallBlur" type="range" min="0" max="20" value="0" />
+              </label>
+            </div>
+            <label class="mini-field hidden" id="wallVidRow" style="margin-top:8px">Видео
+              <span class="row" style="gap:6px">
+                <button id="wallVidSound" class="btn btn-mini">Звук</button>
+                <button id="wallVidPause" class="btn btn-mini">Пауза</button>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <!-- ЭФФЕКТЫ -->
+        <section class="prefs-cat hidden" data-cat="fx">
+          <div class="field">
+            <span class="lbl">Цвет, прозрачность и насыщенность</span>
+            <div class="fx-grid">
+              <label class="fx-item"><span>Тон</span><input id="fxHue" type="range" min="-180" max="180" value="0" /><b id="fxHueVal">0°</b></label>
+              <label class="fx-item"><span>Насыщенность</span><input id="fxSat" type="range" min="0" max="250" value="100" /><b id="fxSatVal">100%</b></label>
+              <label class="fx-item"><span>Яркость</span><input id="fxBright" type="range" min="40" max="160" value="100" /><b id="fxBrightVal">100%</b></label>
+              <label class="fx-item"><span>Контраст</span><input id="fxContrast" type="range" min="50" max="180" value="100" /><b id="fxContrastVal">100%</b></label>
+              <label class="fx-item"><span>Прозрачность панелей</span><input id="fxAlpha" type="range" min="0" max="100" value="100" /><b id="fxAlphaVal">непрозр.</b></label>
+              <label class="fx-item"><span>Размытие подложки</span><input id="fxGlass" type="range" min="0" max="30" value="0" /><b id="fxGlassVal">0 px</b></label>
+            </div>
+            <div class="row" style="gap:6px;margin-top:8px">
+              <button id="fxMono" class="btn btn-mini">Ч/б</button>
+              <button id="fxResetFx" class="btn btn-mini btn-ghost">Сбросить эффекты</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lbl">Анимации</span>
+            <label class="check"><input id="pFx" type="checkbox" /><span>Эффекты интерфейса (волна на кнопках, анимации)</span></label>
+            <label class="check"><input id="pColors" type="checkbox" /><span>Цветные уровни в консоли</span></label>
+          </div>
+        </section>
+
+        <!-- ОКНО -->
+        <section class="prefs-cat hidden" data-cat="win">
+          <div class="field">
+            <span class="lbl">Окно при запуске</span>
+            <div id="startGrid" class="chip-grid">
+              <button class="chip" data-start="window">В окне</button>
+              <button class="chip" data-start="maximized">Развёрнутое</button>
+              <button class="chip" data-start="fullscreen">На весь экран</button>
+            </div>
+            <label class="check hidden" id="pAutostartRow" style="margin-top:8px"><input id="pAutostart" type="checkbox" /><span>Запускать вместе с Windows</span></label>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Масштаб интерфейса</span>
+            <div id="scaleGrid" class="chip-grid">
+              <button class="chip" data-scale="85">Мельче</button>
+              <button class="chip" data-scale="100">Обычный</button>
+              <button class="chip" data-scale="115">Крупнее</button>
+              <button class="chip" data-scale="130">Крупно</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- УВЕДОМЛЕНИЯ -->
+        <section class="prefs-cat hidden" data-cat="notif">
+          <div class="field">
+            <span class="lbl">Уведомления</span>
+            <label class="check"><input id="pNotif" type="checkbox" /><span>Всплывающие уведомления в окне</span></label>
+            <label class="check"><input id="pDesktopNotif" type="checkbox" /><span>Системные уведомления, когда панель свёрнута в трей</span></label>
+            <label class="check"><input id="pNotifSound" type="checkbox" /><span>Мягкий звук уведомления</span></label>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Сколько держать на экране</span>
+            <div id="notifMsGrid" class="chip-grid">
+              <button class="chip" data-ms="2500">2 секунды</button>
+              <button class="chip" data-ms="4200">4 секунды</button>
+              <button class="chip" data-ms="7000">7 секунд</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- GITHUB -->
+        <section class="prefs-cat hidden" data-cat="gh">
+          <div class="field">
+            <span class="lbl">Аккаунт GitHub</span>
+            <div id="ghAccount" class="gh-account">
+              <div class="gh-ava" id="ghAva">?</div>
+              <div class="gh-who">
+                <div id="ghLoginName">не выполнен вход</div>
+              </div>
+              <button id="ghLogout" class="btn btn-mini btn-ghost hidden">Выйти</button>
+            </div>
+            <div id="ghLoginRow" class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
+              <input id="ghToken" type="password" class="mini-input" placeholder="ghp_… (токен)" spellcheck="false" autocomplete="off" />
+              <button id="ghLogin" class="btn btn-mini btn-primary">Войти</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Репозитории</span>
+            <div class="row" style="gap:6px">
+              <input id="ghRepoSearch" type="text" class="mini-input" placeholder="поиск репозитория" spellcheck="false" />
+              <button id="ghRepoReload" class="btn btn-mini">Обновить список</button>
+            </div>
+            <div id="ghRepoList" class="gh-repos"></div>
+            <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
+              <input id="ghNewName" type="text" class="mini-input" placeholder="новый репозиторий: my-world" spellcheck="false" />
+              <button id="ghCreate" class="btn btn-mini">Создать приватный</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ЗВУКИ -->
+        <section class="prefs-cat hidden" data-cat="sound">
+          <div class="field">
+            <span class="lbl">Звуки</span>
+            <label class="check"><input id="pSound" type="checkbox" /><span>Звуки интерфейса</span></label>
+            <label class="fx-item" style="margin-top:8px"><span>Громкость</span><input id="pVolume" type="range" min="0" max="100" value="55" /><b id="pVolVal">55%</b></label>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Проверка громкости</span>
+            <div class="chip-grid">
+              <button class="chip" data-snd="click">Щелчок</button>
+              <button class="chip" data-snd="ok">Успех</button>
+              <button class="chip" data-snd="err">Ошибка</button>
+              <button class="chip" data-snd="nav">Переход</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ОБНОВЛЕНИЯ -->
+        <section class="prefs-cat hidden" data-cat="upd">
+          <div class="field">
+            <span class="lbl">Версия и канал</span>
+            <div class="upd-version">
+              <b id="updCurVer">—</b>
+              <span id="updState" class="upd-state">проверка не выполнялась</span>
+            </div>
+            <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
+              <input id="updRepo" type="text" class="mini-input" placeholder="владелец/репозиторий обновлений" spellcheck="false" />
+              <input id="updBranch" type="text" class="mini-input" style="flex:0 0 110px" placeholder="main" spellcheck="false" />
+            </div>
+            <label class="check" style="margin-top:8px"><input id="updAuto" type="checkbox" checked /><span>Проверять обновления при запуске</span></label>
+            <label class="check"><input id="updAutoInstall" type="checkbox" checked /><span>Ставиться автоматически, без вопросов (как Discord)</span></label>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Действия</span>
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button id="updCheckBtn" class="btn btn-mini">Проверить обновления</button>
+              <button id="updApplyBtn" class="btn btn-mini btn-primary">Обновить и перезапустить</button>
+              <button id="updFullBtn" class="btn btn-mini btn-ghost">Скачать установщик</button>
+              <button id="updBackups" class="btn btn-mini btn-ghost">Папка бэкапов</button>
+            </div>
+            <div class="upd-prog hidden" id="updProg"><i></i></div>
+            <div class="upd-notes" id="updNotes"></div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">Что это значит</span>
+            <div class="upd-hint">
+              Код панели обновляется сам: качается маленький архив с GitHub и заменяет файлы программы —
+              перекачивать сборку целиком не нужно. Полная сборка (новый exe) скачивается только по кнопке
+              и ставится отдельным ярлыком «Обновить-OmniPanel.bat» рядом с папкой программы.
+              Перед заменой файлы панели копируются в бэкап.
+              Настройки, список серверов, профиль GitHub, история TPS и миры не трогаются:
+              обновление заменяет только код панели. При включённой автоустановке панель
+              обновляется сама при запуске (а если работали серверы — при закрытии).
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <footer class="modal-foot">
+      <button id="prefsReset" class="btn btn-ghost">Сбросить всё</button>
+      <div class="spacer"></div>
+      <button id="prefsDone" class="btn btn-primary">Готово</button>
+    </footer>
+  </div>
+</div>
+
+<div id="toasts" class="notif-stack"></div>
+<script src="icons.js"></script>
+<script src="mythic.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

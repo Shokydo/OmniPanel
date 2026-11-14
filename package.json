@@ -1,0 +1,43 @@
+{
+  "name": "omnipanel",
+  "version": "1.12.0",
+  "description": "Локальная панель управления серверами (аналог Pterodactyl для своего ПК)",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "web": "node web.js",
+    "dist": "electron-builder --win portable",
+    "dist-installer": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "omnipanel.app",
+    "productName": "OmniPanel",
+    "files": [
+      "main.js",
+      "preload.js",
+      "web.js",
+      "core/**",
+      "ui/**",
+      "assets/**",
+      "servers.example.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "portable": {
+      "artifactName": "LocalServerPanel.exe"
+    }
+  }
+}

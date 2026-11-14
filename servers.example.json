@@ -1,0 +1,22 @@
+[
+  {
+    "id": "example-minecraft",
+    "name": "Minecraft",
+    "command": "java -Xms1G -Xmx4G -jar server.jar nogui",
+    "cwd": "C:\\Servers\\minecraft",
+    "stopCommand": "stop",
+    "autoStart": false,
+    "autoRestart": true,
+    "env": {}
+  },
+  {
+    "id": "example-node",
+    "name": "Node.js бот",
+    "command": "node index.js",
+    "cwd": "C:\\Servers\\bot",
+    "stopCommand": "",
+    "autoStart": false,
+    "autoRestart": true,
+    "env": { "PORT": "3000" }
+  }
+]

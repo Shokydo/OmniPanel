@@ -1,0 +1,14 @@
+node_modules/
+OmniPanelData/
+data/
+dist/
+build/
+release/
+installer/build-setup.exe
+installer/*.o
+installer/omni.build.rc
+tests/node_modules/
+*.log
+error.log
+.DS_Store
+update-installed.json
