@@ -1,0 +1,10 @@
+{
+  "id": "mythic-mobs",
+  "name": "Мифические мобы",
+  "version": "1.0.0",
+  "author": "OmniPanel",
+  "icon": "M",
+  "description": "Панель для MythicMobs: список мобов, проверка YAML, создание нового моба по шаблону и открытие файла в редакторе панели.",
+  "permissions": ["files", "command"],
+  "panel": { "title": "Мифические мобы", "file": "panel.html" }
+}

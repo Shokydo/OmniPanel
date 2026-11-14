@@ -631,7 +631,7 @@ async function deviceStart(clientId, scope = 'repo read:user') {
 /** Шаг 2: спросить, ввёл ли человек код. pending=true — ждём дальше. */
 async function devicePoll(clientId, deviceCode) {
   const id = String(clientId || '').trim();
-  if (!id || !deviceCode) return { ok: false, error: 'Нет данных для ожидания входа' };
+  if (!id || !deviceCode) return { ok: false, code: 'no-data', error: 'Нет данных для ожидания входа' };
   try {
     const data = await formPost('https://github.com/login/oauth/access_token', {
       client_id: id,
@@ -644,11 +644,15 @@ async function devicePoll(clientId, deviceCode) {
     }
     if (data.error === 'authorization_pending') return { ok: false, pending: true };
     if (data.error === 'slow_down') return { ok: false, pending: true, slow: true };
-    if (data.error === 'expired_token') return { ok: false, error: 'Код устарел — начни вход заново.' };
-    if (data.error === 'access_denied') return { ok: false, error: 'Вход отменён на GitHub.' };
-    return { ok: false, error: data.error_description || data.error || 'Не удалось войти' };
+    if (data.error === 'expired_token') return { ok: false, code: 'expired_token', error: 'Код устарел — начни вход заново.' };
+    if (data.error === 'access_denied') return { ok: false, code: 'access_denied', error: 'Вход отменён на GitHub.' };
+    if (data.error === 'incorrect_device_code' || data.error === 'device_flow_disabled') {
+      return { ok: false, code: data.error, error: data.error_description || data.error };
+    }
+    return { ok: false, code: data.error || '', error: data.error_description || data.error || 'Не удалось войти' };
   } catch (err) {
-    return { ok: false, error: err.message };
+    /* сеть моргнула — это не повод обрывать вход */
+    return { ok: false, code: 'network', error: err.message };
   }
 }
 

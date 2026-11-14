@@ -13,10 +13,12 @@ const kernels = require('./core/kernels');
 const files = require('./core/files');
 const modrinth = require('./core/modrinth');
 const ports = require('./core/ports');
+const addons = require('./core/addons');
 const opener = require('./core/opener');
 const github = require('./core/github');
 const zip = require('./core/zip');
 const os = require('os');
+const https = require('https');
 const updater = require('./core/updater');
 const { readJson, writeJson } = require('./core/store');
 
@@ -650,6 +652,31 @@ const WALL_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'mp4', 'webm'];
  * Подбор палитры под фон: превью уменьшается до 64×64, пиксели собираются
  * в корзины, из них берутся фон, панель, текст и акцент.
  */
+/** Ник → uuid через api.mojang.com (для белого списка и аддонов). */
+function mojangUuid(name) {
+  return new Promise((resolve) => {
+    const req = https.get({
+      hostname: 'api.mojang.com',
+      path: '/users/profiles/minecraft/' + encodeURIComponent(name),
+      headers: { 'User-Agent': 'OmniPanel', Accept: 'application/json' },
+    }, (res) => {
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(buf || 'null');
+          if (!data || !data.id) return resolve('');
+          const id = String(data.id);
+          resolve(`${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`);
+        } catch { resolve(''); }
+      });
+    });
+    req.on('error', () => resolve(''));
+    req.setTimeout(8000, () => { req.destroy(); resolve(''); });
+  });
+}
+
 function paletteOf(source) {
   const src = source || {};
   let file = '';
@@ -1332,6 +1359,86 @@ function wireIpc() {
   ipcMain.handle('wall:palette', async (_e, source) => {
     try {
       return paletteOf(source);
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  /* ── аддоны: расширения панели ── */
+  const addonById = (id) => addons.list(dataDir()).find((x) => x.id === String(id || ''));
+  const addonEnabled = (id) => {
+    const it = addonById(id);
+    return it && it.enabled ? it : null;
+  };
+  ipcMain.handle('addons:list', () => addons.list(dataDir()));
+  ipcMain.handle('addons:setEnabled', (_e, id, on) => addons.setEnabled(dataDir(), id, on));
+  ipcMain.handle('addons:panel', (_e, id) => addons.panel(dataDir(), id));
+  ipcMain.handle('addons:dirs', () => addons.dirs(dataDir()));
+  ipcMain.handle('addons:reveal', async (_e, id) => {
+    const it = id ? addonById(id) : null;
+    const target = it ? it.dir : addons.userDir(dataDir());
+    try {
+      if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+      await shell.openPath(target);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  /* мост «аддон → панель»: только разрешённые действия и только для своего сервера */
+  ipcMain.handle('addons:call', async (_e, id, method, args, serverId) => {
+    const it = addonEnabled(id);
+    if (!it) return { ok: false, error: 'Аддон выключен' };
+    const perms = it.permissions || [];
+    const root = () => {
+      const srv = manager.get(serverId);
+      if (!srv || !srv.cwd) throw new Error('Сервер не найден или у него нет папки');
+      return srv.cwd;
+    };
+    try {
+      const a = Array.isArray(args) ? args : [];
+      if (method === 'list' || method === 'read' || method === 'write' || method === 'props') {
+        if (!perms.includes('files')) return { ok: false, error: 'Аддону не разрешены файлы' };
+      }
+      if (method === 'command' && !perms.includes('command')) return { ok: false, error: 'Аддону не разрешена консоль' };
+      switch (method) {
+        case 'list': {
+          const r = await files.listDir(root(), String(a[0] || ''));
+          return { ok: true, data: r };
+        }
+        case 'read': {
+          const r = await files.readFile(root(), String(a[0] || ''));
+          return { ok: true, data: r };
+        }
+        case 'write': {
+          const r = await files.writeFile(root(), String(a[0] || ''), String(a[1] == null ? '' : a[1]));
+          return { ok: true, data: r };
+        }
+        case 'props': {
+          const r = await files.writeServerProperties(root(), a[0] && typeof a[0] === 'object' ? a[0] : {});
+          return { ok: true, data: r };
+        }
+        case 'command': {
+          const text = String(a[0] || '').trim();
+          if (!text) return { ok: false, error: 'Пустая команда' };
+          const srv = manager.get(serverId);
+          if (!srv || srv.state !== 'running') return { ok: false, error: 'Сервер не запущен' };
+          manager.sendCommand(srv.id, text);
+          return { ok: true };
+        }
+        case 'openEditor': {
+          const r = await opener.openInEditor(files.resolveSafe(root(), String(a[0] || '')));
+          return { ok: true, data: r };
+        }
+        case 'lookupUuid': {
+          const name = String(a[0] || '').trim();
+          if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) return { ok: false, error: 'Плохой ник' };
+          const uuid = await mojangUuid(name);
+          return { ok: true, data: { uuid } };
+        }
+        default:
+          return { ok: false, error: 'Аддону неизвестно действие: ' + method };
+      }
     } catch (err) {
       return { ok: false, error: err.message };
     }

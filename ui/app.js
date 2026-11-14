@@ -103,6 +103,12 @@ const httpApi = {
     for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
     return post('/api/files/upload', { id, rel: relDir, name, data: btoa(bin) });
   },
+  async addonsList() { return (await fetch('/api/addons/list')).json(); },
+  async addonsSetEnabled(id, on) { return post('/api/addons/toggle', { id, on }); },
+  async addonsPanel(id) { return (await fetch('/api/addons/panel?id=' + encodeURIComponent(id))).json(); },
+  async addonsDirs() { return { user: '', builtin: '' }; },
+  async addonsReveal(id) { return { ok: false }; },
+  async addonsCall(id, method, args, serverId) { return post('/api/addons/call', { id, method, args, serverId }); },
   async portsCheck(id) { return (await fetch('/api/ports/check?id=' + encodeURIComponent(id))).json(); },
   async portsFree(id, from) { return (await fetch('/api/ports/free?id=' + encodeURIComponent(id) + '&from=' + encodeURIComponent(from))).json(); },
   async portsSet(id, key, port) { return post('/api/ports/set', { id, key, port }); },
@@ -202,7 +208,10 @@ const prefs = {
   theme: localStorage.getItem('lsp.theme') || 'dark',
   radius: localStorage.getItem('lsp.radius') || 'soft',
   startMode: localStorage.getItem('lsp.startMode') || 'window',
-  scale: Number(localStorage.getItem('lsp.scale') || 0), // 0 — под размер окна
+  // 0 — под размер окна. Новый ключ: у старых версий масштаб был зафиксирован,
+  // поэтому один раз переводим настройку в «под окно».
+  scale: Number((localStorage.getItem('lsp.scale2')
+    ?? (localStorage.getItem('lsp.scale') === null ? '0' : '0')) || 0),
   notifSound: localStorage.getItem('lsp.notifSound') !== '0',
   notifMs: Number(localStorage.getItem('lsp.notifMs') || 4200),
   // фон панели: id встроенных обоев, 'custom' или 'none'
@@ -239,6 +248,7 @@ const prefs = {
     localStorage.setItem('lsp.radius', this.radius);
     localStorage.setItem('lsp.startMode', this.startMode);
     localStorage.setItem('lsp.scale', String(this.scale));
+    localStorage.setItem('lsp.scale2', String(this.scale));
     localStorage.setItem('lsp.notifSound', this.notifSound ? '1' : '0');
     localStorage.setItem('lsp.notifMs', String(this.notifMs));
     localStorage.setItem('lsp.wall', this.wall);
@@ -768,6 +778,8 @@ const S = {
   players: new Map(),   // id -> {names:Set, max, at}
   issues: new Map(),    // id -> [{id, t, kind, line, stack}]
   issuesNew: new Map(), // id -> сколько непрочитанных
+  addonList: [],          // аддоны панели
+  addonOpen: '',          // id открытого аддона
   addons: {               // вкладка плагинов
     type: 'plugin', loader: '', version: '', category: '', sort: 'relevance',
     query: '', hits: [], offset: 0, total: 0, loading: false,
@@ -1709,9 +1721,14 @@ async function propsSave(server) {
 function setTab(name) {
   S.tab = name;
   for (const btn of document.querySelectorAll('.tab')) btn.classList.toggle('active', btn.dataset.tab === name);
+  const addonId = name.startsWith('addon:') ? name.slice(6) : '';
   for (const pane of document.querySelectorAll('.tab-pane')) {
-    pane.classList.toggle('hidden', pane.id !== 'tab-' + name);
+    const isAddon = pane.dataset && pane.dataset.addonPane;
+    pane.classList.toggle('hidden', isAddon ? isAddon !== addonId : pane.id !== 'tab-' + name);
   }
+  if (addonId) { S.addonOpen = addonId; openAddonPanel(addonId); }
+  const activeTab = document.querySelector('.tabs .tab.active');
+  if (activeTab && activeTab.scrollIntoView) activeTab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   Sound.play('nav');
   if (name === 'perf') renderPerf();
   if (name === 'tps') loadTpsTab();
@@ -3459,14 +3476,19 @@ function applyPrefs() {
 }
 
 /** Масштаб интерфейса: «под размер окна» или выбранный вручную. */
+/**
+ * Под окно: базовый размер, при котором интерфейс ещё читается — 1120×700.
+ * Всё, что больше, растягивает интерфейс (до 150 %), что меньше — сжимает (до 80 %).
+ */
+const SCALE_BASE_W = 1120;
+const SCALE_BASE_H = 700;
+
 function autoScalePercent() {
   const w = window.innerWidth || 1440;
   const h = window.innerHeight || 900;
-  const byW = w / 1440;
-  const byH = h / 900;
-  const k = Math.min(byW, byH);
-  const pct = Math.round((Math.max(0.85, Math.min(1.3, k)) * 100) / 5) * 5;
-  return Math.max(85, Math.min(130, pct));
+  const k = Math.min(w / SCALE_BASE_W, h / SCALE_BASE_H);
+  const pct = Math.round((Math.max(0.8, Math.min(1.5, k)) * 100) / 5) * 5;
+  return Math.max(80, Math.min(150, pct));
 }
 
 function currentScalePercent() {
@@ -3478,18 +3500,21 @@ function applyScale() {
   const k = pct / 100;
   document.documentElement.style.zoom = pct === 100 ? '' : String(k);
   document.documentElement.style.setProperty('--ui-zoom', String(k));
+  if (typeof pushAddonTheme === 'function') pushAddonTheme();
   document.documentElement.dataset.scale = String(pct);
 }
 
 let scaleResizeTimer = null;
-window.addEventListener('resize', () => {
+function scaleOnResize() {
   if (prefs.scale > 0) return;
   clearTimeout(scaleResizeTimer);
   scaleResizeTimer = setTimeout(() => {
     applyScale();
     if (typeof fsbUpdate === 'function') fsbUpdate();
-  }, 160);
-});
+  }, 140);
+}
+window.addEventListener('resize', scaleOnResize);
+document.addEventListener('fullscreenchange', scaleOnResize);
 
 /** Глубина сканирования: одна кнопка, четыре ступени. */
 const SCAN_DEPTHS = [4, 5, 7, 10];
@@ -3905,6 +3930,7 @@ function pushWallRecent(entry) {
 }
 
 function openPrefs() {
+  loadAddonList();
   buildThemeGrid();
   buildThemePresets();
   buildWallRecent();
@@ -4098,9 +4124,13 @@ function bindActions() {
   $('gridStartAll').onclick = async () => { await Promise.all(S.servers.map((s) => API.start(s.id))); setTimeout(() => { refresh(); renderGrid(); }, 600); };
   $('gridStopAll').onclick = async () => { await Promise.all(S.servers.map((s) => API.stop(s.id))); setTimeout(() => { refresh(); renderGrid(); }, 600); };
 
-  // вкладки
-  for (const btn of document.querySelectorAll('.tab')) {
-    btn.onclick = () => setTab(btn.dataset.tab);
+  // вкладки (клик делегируем: вкладки аддонов появляются позже)
+  for (const nav of document.querySelectorAll('.tabs')) {
+    nav.addEventListener('click', (e) => {
+      const btn = e.target.closest('.tab');
+      if (!btn || !btn.dataset.tab) return;
+      setTab(btn.dataset.tab);
+    });
   }
 
   // настройки панели
@@ -4285,6 +4315,7 @@ function bindActions() {
   bindAddons();
   bindFileDrop();
   bindCmdComplete();
+  bindAddonsPage();
 
   const playersRefresh = $('playersRefresh');
   if (playersRefresh) {
@@ -4798,7 +4829,7 @@ function bindGithubAdd() {
 
 /* ═════════════════ вход в аккаунт GitHub по коду ═════════════════ */
 
-const GD = { timer: null, code: '', interval: 5 };
+const GD = { timer: null, code: '', interval: 5, run: 0, busy: false, fails: 0 };
 
 function gdShow(on) {
   $('ghDeviceBox').classList.toggle('hidden', !on);
@@ -4806,48 +4837,82 @@ function gdShow(on) {
 }
 
 function gdStop(msg) {
-  if (GD.timer) { clearInterval(GD.timer); GD.timer = null; }
+  GD.run += 1;
+  if (GD.timer) { clearTimeout(GD.timer); GD.timer = null; }
+  GD.busy = false;
+  GD.fails = 0;
   GD.code = '';
   if (msg) $('ghDeviceState').textContent = msg;
+  if (!msg) $('ghDeviceState').textContent = 'вход завершён';
+}
+
+/** Один шаг ожидания: setTimeout, а не setInterval — иначе запросы накладываются. */
+function gdSchedule(run) {
+  if (run !== GD.run) return;
+  GD.timer = setTimeout(() => gdTick(run), GD.interval * 1000);
+}
+
+async function gdTick(run) {
+  if (run !== GD.run) return;
+  if (GD.busy) { gdSchedule(run); return; }
+  const code = GD.code;
+  if (!code) { gdStop(''); gdShow(false); return; }
+  GD.busy = true;
+  const r = await API.ghDevicePoll(code).catch(() => null);
+  GD.busy = false;
+  if (run !== GD.run) return;
+
+  if (r && r.pending) {
+    GD.fails = 0;
+    $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
+    if (r.slow) GD.interval += 5;
+    gdSchedule(run);
+    return;
+  }
+  if (r && r.ok) {
+    gdStop('');
+    gdShow(false);
+    $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
+    await ghRefreshAccount();
+    gaLoadRepos();
+    notify({ title: 'Вход выполнен', text: `GitHub: ${r.login || 'аккаунт'}`, kind: 'ok' });
+    return;
+  }
+  /* сеть моргнула — пробуем ещё пару раз, вход не обрываем */
+  const transient = r && (r.code === 'network' || r.code === 'no-data' || (!r.code && r.error));
+  if (transient && GD.fails < 3) {
+    GD.fails += 1;
+    $('ghDeviceState').textContent = 'связь с GitHub пропала — пробую снова…';
+    gdSchedule(run);
+    return;
+  }
+  /* настоящая ошибка: одно уведомление и стоп */
+  gdStop('');
+  gdShow(false);
+  notify({ title: 'Вход не выполнен', text: (r && r.error) || 'не удалось', kind: 'err' });
 }
 
 async function gdStart() {
+  if (GD.code && GD.timer) { gdTick(GD.run); return; }   // уже ждём — второй код не просим
   const btn = $('ghDeviceBtn');
   btn.disabled = true;
-  const res = await API.ghDeviceStart();
+  const res = await API.ghDeviceStart().catch(() => null);
   btn.disabled = false;
-  if (!res || !res.ok) {
-    notify({ title: 'Не удалось начать вход', text: (res && res.error) || 'ошибка GitHub', kind: 'err' });
+  if (!res || !res.ok || !res.deviceCode) {
+    notify({ title: 'Не удалось начать вход', text: (res && res.error) || 'GitHub не выдал код', kind: 'err' });
     return;
   }
-  GD.code = res.deviceCode;
+  GD.run += 1;
+  const run = GD.run;
+  GD.code = String(res.deviceCode);
   GD.interval = Math.max(5, Number(res.interval) || 5);
+  GD.busy = false;
+  GD.fails = 0;
   $('ghDeviceCode').textContent = String(res.userCode || '').toUpperCase();
   $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
   gdShow(true);
   Sound.play('ok');
-
-  let ticks = 0;
-  const maxTicks = Math.ceil((res.expiresIn || 900) / GD.interval);
-  GD.timer = setInterval(async () => {
-    ticks += 1;
-    if (ticks > maxTicks) { gdStop('Код устарел — начни вход заново.'); gdShow(false); return; }
-    const r = await API.ghDevicePoll(GD.code);
-    if (r && r.pending) {
-      $('ghDeviceState').textContent = 'ждём подтверждения на GitHub…';
-      if (r.slow) GD.interval += 5;
-      return;
-    }
-    gdStop('');
-    gdShow(false);
-    if (r && r.ok) {
-      notify({ title: 'Вход выполнен', text: `GitHub: ${r.login}`, kind: 'ok' });
-      await ghRefreshAccount();
-      gaLoadRepos();
-    } else {
-      notify({ title: 'Вход не выполнен', text: (r && r.error) || 'не удалось', kind: 'err' });
-    }
-  }, GD.interval * 1000);
+  gdSchedule(run);
 }
 
 function bindGithubDevice() {
@@ -4865,7 +4930,15 @@ function bindGithubDevice() {
   const stop = $('ghDeviceStop');
   if (stop) stop.onclick = () => { gdStop('вход отменён'); gdShow(false); };
   const toggle = $('ghTokenToggle');
-  if (toggle) toggle.onclick = () => $('ghTokenRow').classList.toggle('hidden');
+  if (toggle) {
+    toggle.onclick = () => {
+      const row = $('ghTokenRow');
+      const open = row.classList.contains('hidden');
+      row.classList.toggle('hidden', !open);
+      toggle.classList.toggle('active', open);
+      if (open) setTimeout(() => $('ghToken').focus(), 30);
+    };
+  }
 }
 
 /* ═════════════════════ обновления из GitHub ═════════════════════ */
@@ -5890,6 +5963,177 @@ async function themeFromWallpaper() {
   notify({ title: 'Цвета взяты из фона', text: res.colors.bg + ' · ' + res.colors.accent, kind: 'ok' });
 }
 
+/* ═════════════════════ аддоны панели ═════════════════════ */
+
+let addonSeq = 0;
+
+function addonTheme() {
+  const cs = getComputedStyle(document.body);
+  const get = (name, fb) => (cs.getPropertyValue(name) || '').trim() || fb;
+  return {
+    bg: get('--bg', '#0f1014'),
+    panel: get('--bg-2', '#16181d'),
+    panel3: get('--bg-3', '#1e2128'),
+    line: get('--line', '#2a2d36'),
+    text: get('--text', '#e8eaf0'),
+    dim: get('--dim', '#9aa0ae'),
+    accent: get('--accent-bar', '#8ab4ff'),
+  };
+}
+
+function addonServer() {
+  const s = current();
+  return s ? { id: s.id, name: s.name, running: s.state === 'running' } : null;
+}
+
+async function loadAddonList() {
+  const list = await API.addonsList().catch(() => null);
+  S.addonList = Array.isArray(list) ? list : [];
+  renderAddonTabs();
+  renderAddonManager();
+  return S.addonList;
+}
+
+/** Вкладки включённых аддонов после обычных вкладок. */
+function renderAddonTabs() {
+  const nav = document.querySelector('#view .tabs');
+  if (!nav) return;
+  for (const old of nav.querySelectorAll('.tab.tab-addon')) old.remove();
+  for (const pane of document.querySelectorAll('[data-addon-pane]')) pane.remove();
+  const host = document.querySelector('#view .view-body') || document.querySelector('#view');
+  for (const a of S.addonList) {
+    if (!a.enabled || !a.hasPanel) continue;
+    const tab = document.createElement('button');
+    tab.className = 'tab tab-addon';
+    tab.dataset.tab = 'addon:' + a.id;
+    tab.textContent = a.panelTitle || a.name;
+    nav.appendChild(tab);
+
+    const pane = document.createElement('section');
+    pane.className = 'tab-pane addon-pane hidden';
+    pane.dataset.addonPane = a.id;
+    const frame = document.createElement('iframe');
+    frame.className = 'addon-frame';
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.dataset.addonId = a.id;
+    pane.appendChild(frame);
+    (host || nav.parentElement).appendChild(pane);
+  }
+  if (S.tab && S.tab.startsWith('addon:')) {
+    const id = S.tab.slice(6);
+    if (!S.addonList.some((a) => a.id === id && a.enabled)) setTab('console');
+  }
+}
+
+function addonFrame(id) {
+  return document.querySelector(`.addon-frame[data-addon-id="${id}"]`);
+}
+
+/** Загружает панель аддона в изолированное окно. */
+async function openAddonPanel(id) {
+  const frame = addonFrame(id);
+  if (!frame) return;
+  if (frame.dataset.loaded === '1') return;
+  const res = await API.addonsPanel(id).catch(() => null);
+  if (!res || !res.ok) {
+    const doc = frame.contentDocument;
+    if (doc) {
+      doc.open();
+      doc.write('<body style="font:13px sans-serif;color:#999;padding:20px">' +
+        esc((res && res.error) || 'панель аддона не открылась') + '</body>');
+      doc.close();
+    }
+    return;
+  }
+  frame.dataset.loaded = '1';
+  frame.srcdoc = res.html;
+}
+
+/** Ответ аддону: страница в iframe спрашивает — панель отвечает. */
+async function addonBridge(ev) {
+  const data = ev.data;
+  if (!data || data.omni !== 1) return;
+  const frame = ev.source ? [...document.querySelectorAll('.addon-frame')].find((f) => f.contentWindow === ev.source) : null;
+  const id = frame ? frame.dataset.addonId : '';
+  if (!id) return;
+  const answer = (payload) => {
+    try { frame.contentWindow.postMessage({ omni: 2, ...payload }, '*'); } catch { /* окно закрыто */ }
+  };
+  if (data.method === 'init') {
+    await openAddonPanel(id);
+    answer({ type: 'init-ok', rid: data.rid, server: addonServer(), theme: addonTheme() });
+    return;
+  }
+  const s = current();
+  const r = await API.addonsCall(id, data.method, data.args || [], s ? s.id : '').catch(() => ({ ok: false, error: 'нет связи' }));
+  answer({ rid: data.rid, ok: !!(r && r.ok), data: (r && r.data) || null, error: (r && r.error) || '' });
+}
+
+function pushAddonTheme() {
+  const theme = addonTheme();
+  const server = addonServer();
+  for (const f of document.querySelectorAll('.addon-frame')) {
+    try { f.contentWindow.postMessage({ omni: 2, type: 'theme', theme }, '*'); } catch { /* ignore */ }
+    try { f.contentWindow.postMessage({ omni: 2, type: 'server-changed', server }, '*'); } catch { /* ignore */ }
+  }
+}
+
+/** Список аддонов в настройках: переключатели вкл/выкл. */
+function renderAddonManager() {
+  const host = $('addonManager');
+  if (!host) return;
+  if (!S.addonList.length) {
+    host.innerHTML = '<div class="empty-note">аддонов нет — положи папку с addon.json в OmniPanelData/addons</div>';
+    return;
+  }
+  host.innerHTML = '';
+  for (const a of S.addonList) {
+    const card = document.createElement('div');
+    card.className = 'addon-manage-row';
+    card.innerHTML = `
+      <div class="am-ico">${esc(a.icon || a.name.slice(0, 1).toUpperCase())}</div>
+      <div class="am-body">
+        <div class="am-top">
+          <span class="am-name">${esc(a.name)}</span>
+          <span class="am-ver">${esc(a.version || '')}</span>
+          ${a.builtin ? '<span class="am-tag">встроенный</span>' : '<span class="am-tag">свой</span>'}
+        </div>
+        <div class="am-desc">${esc(a.description || '')}</div>
+      </div>
+      <label class="mini-toggle am-toggle"><input type="checkbox" ${a.enabled ? 'checked' : ''} /><span class="sw"></span></label>`;
+    const input = card.querySelector('input');
+    input.onchange = async () => {
+      const on = input.checked;
+      const res = await API.addonsSetEnabled(a.id, on).catch(() => null);
+      if (!res || !res.ok) {
+        input.checked = !on;
+        notify({ title: 'Не переключилось', text: (res && res.error) || 'нет доступа', kind: 'err' });
+        return;
+      }
+      a.enabled = on;
+      Sound.play(on ? 'ok' : 'click');
+      await loadAddonList();
+      if (on && a.hasPanel && current()) notify({ title: 'Аддон включён', text: a.name, kind: 'ok' });
+    };
+    host.appendChild(card);
+  }
+}
+
+function bindAddonsPage() {
+  const folder = $('addonsFolder');
+  if (folder) folder.onclick = async () => {
+    const res = await API.addonsReveal().catch(() => null);
+    if (!res || !res.ok) notify({ title: 'Папка не открылась', text: (res && res.error) || 'только в exe-версии', kind: 'err' });
+  };
+  const reload = $('addonsReload');
+  if (reload) reload.onclick = async () => {
+    await loadAddonList();
+    notify({ title: 'Список обновлён', text: 'аддонов: ' + S.addonList.length, kind: 'info' });
+  };
+  window.addEventListener('message', addonBridge);
+}
+
 /* ═════════════════════ старт ═════════════════════ */
 
 (async function init() {
@@ -5925,6 +6169,7 @@ async function themeFromWallpaper() {
   }
 
   await refresh();
+  await loadAddonList();
 
   setInterval(() => {
     const s = current();

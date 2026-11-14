@@ -16,6 +16,7 @@ const kernels = require('./core/kernels');
 const files = require('./core/files');
 const modrinth = require('./core/modrinth');
 const ports = require('./core/ports');
+const addons = require('./core/addons');
 const opener = require('./core/opener');
 const pkgVersion = () => { try { return require('./package.json').version; } catch { return '0.0.0'; } };
 const { readJson, writeJson } = require('./core/store');
@@ -23,6 +24,7 @@ const { readJson, writeJson } = require('./core/store');
 const PORT = Number(process.env.PORT || 7777);
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'servers.json');
+const dataDir = () => DATA_DIR;
 const backupsDir = (id) => path.join(DATA_DIR, 'backups', id);
 const tpsFile = (id) => path.join(DATA_DIR, 'tps', String(id).replace(/[^\w-]/g, '_') + '.json');
 const UI_DIR = path.join(__dirname, 'ui');
@@ -175,6 +177,48 @@ const server = http.createServer(async (req, res) => {
       if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
       const r = await modrinth.install(srv.cwd, body);
       return sendJson(res, 200, r);
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/addons/list') {
+    return sendJson(res, 200, addons.list(dataDir()));
+  }
+  if (p === '/api/addons/toggle' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      return sendJson(res, 200, addons.setEnabled(dataDir(), body.id, !!body.on));
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/addons/panel') {
+    return sendJson(res, 200, addons.panel(dataDir(), url.searchParams.get('id')));
+  }
+  if (p === '/api/addons/call' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const item = addons.list(dataDir()).find((x) => x.id === body.id && x.enabled);
+      if (!item) return sendJson(res, 200, { ok: false, error: 'Аддон выключен' });
+      const srv = manager.get(body.serverId);
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      const perms = item.permissions || [];
+      const a = Array.isArray(body.args) ? body.args : [];
+      const method = String(body.method || '');
+      if (['list', 'read', 'write', 'props'].includes(method)) {
+        if (!perms.includes('files')) return sendJson(res, 200, { ok: false, error: 'Аддону не разрешены файлы' });
+      }
+      if (method === 'command' && !perms.includes('command')) return sendJson(res, 200, { ok: false, error: 'Аддону не разрешена консоль' });
+      if (method === 'list') return sendJson(res, 200, { ok: true, data: await files.listDir(srv.cwd, String(a[0] || '')) });
+      if (method === 'read') return sendJson(res, 200, { ok: true, data: await files.readFile(srv.cwd, String(a[0] || '')) });
+      if (method === 'write') return sendJson(res, 200, { ok: true, data: await files.writeFile(srv.cwd, String(a[0] || ''), String(a[1] == null ? '' : a[1])) });
+      if (method === 'props') return sendJson(res, 200, { ok: true, data: await files.writeServerProperties(srv.cwd, a[0] || {}) });
+      if (method === 'command') {
+        if (!srv.state || srv.state !== 'running') return sendJson(res, 200, { ok: false, error: 'Сервер не запущен' });
+        manager.sendCommand(srv.id, String(a[0] || ''));
+        return sendJson(res, 200, { ok: true });
+      }
+      return sendJson(res, 200, { ok: false, error: 'Аддону неизвестно действие: ' + method });
     } catch (e) {
       return sendJson(res, 200, { ok: false, error: e.message });
     }

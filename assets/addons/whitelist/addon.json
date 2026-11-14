@@ -1,0 +1,10 @@
+{
+  "id": "whitelist",
+  "name": "Белый список",
+  "version": "1.0.0",
+  "author": "OmniPanel",
+  "icon": "W",
+  "description": "Управление whitelist.json прямо из панели: добавить игрока по нику, удалить, включить или выключить белый список в server.properties.",
+  "permissions": ["files", "command"],
+  "panel": { "title": "Белый список", "file": "panel.html" }
+}

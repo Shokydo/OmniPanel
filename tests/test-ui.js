@@ -66,8 +66,8 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   await page.click('#profileBtn');
   await page.waitForTimeout(500);
   const cats = await page.$$eval('#prefsNav .prefs-tab', (els) => els.map((e) => e.dataset.cat));
-  ok(cats.length === 8, 'восемь категорий настроек', cats.join(','));
-  for (const c of ['bg', 'fx', 'win', 'notif', 'gh', 'sound', 'upd']) {
+  ok(cats.length === 9, 'девять категорий настроек', cats.join(','));
+  for (const c of ['bg', 'fx', 'win', 'notif', 'gh', 'sound', 'addons', 'upd']) {
     await page.click(`#prefsNav .prefs-tab[data-cat="${c}"]`);
     await page.waitForTimeout(150);
     const visible = await page.$eval(`.prefs-cat[data-cat="${c}"]`, (e) => !e.classList.contains('hidden'));

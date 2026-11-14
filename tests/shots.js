@@ -14,7 +14,16 @@ const SRV = path.join(os.tmpdir(), 'omni-shots-srv');
 fs.rmSync(SRV, { recursive: true, force: true });
 fs.mkdirSync(path.join(SRV, 'world'), { recursive: true });
 fs.writeFileSync(path.join(SRV, 'world/level.dat'), 'LEVEL');
-fs.writeFileSync(path.join(SRV, 'server.properties'), 'level-name=world\n');
+fs.writeFileSync(path.join(SRV, 'server.properties'), 'level-name=world\nwhite-list=false\n');
+fs.mkdirSync(path.join(SRV, 'MythicMobs/Mobs'), { recursive: true });
+fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/SkeletonKing.yml'),
+  'SkeletonKing:\n  Type: SKELETON\n  Health: 120\n  Damage: 8\n  Display: Король скелетов\n');
+fs.writeFileSync(path.join(SRV, 'MythicMobs/Mobs/AncientGolem.yml'),
+  'AncientGolem:\n  Type: IRON_GOLEM\n  Health: 400\n  Damage: 14\n');
+fs.writeFileSync(path.join(SRV, 'whitelist.json'), JSON.stringify([
+  { uuid: '8667ba71-b85a-4004-af54-457a9734eed7', name: 'Steve' },
+  { uuid: 'ec561538-f3fd-461d-aff5-086b22154bce', name: 'Alex' },
+], null, 2));
 fs.mkdirSync(DATA, { recursive: true });
 fs.rmSync(path.join(DATA, 'panel.json'), { force: true });
 fs.rmSync(path.join(DATA, 'Local Storage'), { recursive: true, force: true });
@@ -196,6 +205,24 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await page.waitForTimeout(700);
   await shot('prefs-wide');
   await page.evaluate(() => document.getElementById('prefsModal').classList.add('hidden'));
+
+  // аддоны: настройки, вкладки аддонов
+  await page.evaluate(async () => {
+    document.getElementById('prefsModal').classList.remove('hidden');
+    document.querySelector('#prefsNav .prefs-tab[data-cat="addons"]').click();
+    await loadAddonList();
+  });
+  await page.waitForTimeout(700);
+  await shot('prefs-addons');
+  await page.evaluate(() => document.getElementById('prefsModal').classList.add('hidden'));
+
+  await page.evaluate(() => setTab('addon:mythic-mobs'));
+  await page.waitForTimeout(1500);
+  await shot('addon-mythic');
+  await page.evaluate(() => setTab('addon:whitelist'));
+  await page.waitForTimeout(1500);
+  await shot('addon-whitelist');
+  await page.evaluate(() => setTab('console'));
 
   await page.evaluate(() => { setUpdPill({ hasUpdate: false }); });
   await app.close();
