@@ -281,7 +281,7 @@ async function pushArchive(token, repo, branch, opts) {
   let info;
   try {
     onLog('упаковываю сервер в архив…');
-    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server' });
+    info = await backup.createBackup({ srcDir: dir, destDir: tmpDir, label: 'server', format: 'zip' });
     const head = await getHead(token, repo, branch);
     const state = loadState(stateFile);
     const buf = fs.readFileSync(info.file);

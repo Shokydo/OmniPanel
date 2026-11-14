@@ -2276,7 +2276,7 @@ function renderBackups() {
     node.innerHTML = `
       <div class="bk-main">
         <div class="bk-name">${esc(b.name)}</div>
-        <div class="bk-meta">${new Date(b.createdAt).toLocaleString('ru-RU')} · ${fmtBytes(b.size)}</div>
+        <div class="bk-meta">${new Date(b.createdAt).toLocaleString('ru-RU')} · ${fmtBytes(b.size)} · ${/\\.7z$/i.test(b.name) ? '7z, максимум сжатия' : 'zip'}</div>
       </div>
       <button class="btn btn-mini bk-restore">Восстановить</button>
       <button class="btn btn-mini btn-ghost bk-del">Удалить</button>`;
@@ -4802,7 +4802,9 @@ function bindActions() {
       const res = await API.backupCreate(s.id, {});
       if (res && res.ok === false) throw new Error(res.error || 'не удалось упаковать папку');
       made = res && res.name ? res : null;
-      toast(made ? `Бэкап создан: ${made.name}` : 'Бэкап создан', 'ok');
+      toast(made
+        ? `Бэкап создан: ${made.name}` + (made.ratio ? ` · плотнее в ${made.ratio} раза` : '')
+        : 'Бэкап создан', 'ok');
     } catch (e) {
       toast('Не удалось создать бэкап: ' + e.message, 'err');
     } finally {

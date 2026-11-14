@@ -140,7 +140,7 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
     const host = document.getElementById('fmArchive');
     return host.textContent.trim();
   });
-  ok(/RAR и 7z/.test(rarMsg), 'rar честно не поддерживается — есть предупреждение', rarMsg.slice(0, 60));
+  ok(/RAR/.test(rarMsg) && /архиватор/.test(rarMsg), 'rar честно не поддерживается — есть предупреждение', rarMsg.slice(0, 60));
   void rar;
 
   /* ─────────── 3. картинки ─────────── */
@@ -243,9 +243,10 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   ok(after.count === before + 1, 'новый бэкап появился в списке без перезагрузки', `${before} → ${after.count}`);
   ok(after.items === after.count, 'список отрисован', 'строк: ' + after.items);
   const packFile = fs.existsSync(path.join(DATA, 'backups/s1'))
-    ? fs.readdirSync(path.join(DATA, 'backups/s1')).find((f) => f.endsWith('.zip'))
+    ? fs.readdirSync(path.join(DATA, 'backups/s1')).find((f) => /\.(7z|zip)$/.test(f))
     : '';
   ok(!!packFile, 'архив лежит на диске', packFile || 'нет файла');
+  ok(/\.7z$/.test(packFile || ''), 'бэкап собран в 7z (максимум сжатия)', packFile || 'нет файла');
 
   /* сжатие: zip с уровнем 9 должен быть заметно меньше исходника */
   const sizes = await page.evaluate(() => {

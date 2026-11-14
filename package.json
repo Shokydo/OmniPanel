@@ -1,6 +1,6 @@
 {
   "name": "omnipanel",
-  "version": "1.19.0",
+  "version": "1.19.1",
   "description": "Локальная панель управления серверами для своего ПК",
   "main": "main.js",
   "author": "Shokydo",

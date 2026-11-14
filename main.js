@@ -1578,7 +1578,10 @@ function wireIpc() {
         destDir: backupsDir(id),
         label: opts.name || srv.name,
       });
-      manager.note(id, `Бэкап: ${info.name} — ${(info.size / 1048576).toFixed(1)} МБ (сжато из ${(info.raw / 1048576).toFixed(1)} МБ)`);
+      manager.note(id, `Бэкап: ${info.name} — ${(info.size / 1048576).toFixed(1)} МБ из ${(info.raw / 1048576).toFixed(1)} МБ`
+        + (info.ratio ? `, плотнее в ${info.ratio} раза` : '')
+        + ` · ${info.packer || 'zip deflate'}`);
+      if (info.warning) manager.note(id, 'Бэкап: ' + info.warning);
       if (win && !win.isDestroyed()) win.webContents.send('toast', { kind: 'ok', text: `Бэкап создан: ${info.name}` });
       return { ok: true, ...info };
     } catch (err) {
