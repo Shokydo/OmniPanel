@@ -265,7 +265,7 @@ function applyCodeArchive(file, version, current) {
 }
 
 /**
- * Тихая проверка и установка (режим Discord).
+ * Тихая проверка и установка.
  *  - ничего не запущено → обновляемся и перезапускаемся сразу;
  *  - серверы работают → скачиваем втихую и ставим при выходе, следующий
  *    запуск уже на новой версии.
@@ -650,6 +650,7 @@ function wireIpc() {
   /* ── своя шапка окна ── */
   ipcMain.handle('win:minimize', () => { if (win) win.minimize(); return true; });
   ipcMain.handle('win:close', () => { if (win) win.hide(); return true; });
+  ipcMain.handle('win:quit', () => { quitting = true; app.quit(); return true; });
   ipcMain.handle('win:toggleMax', () => {
     if (!win) return { maximized: false, fullscreen: false };
     if (win.isFullScreen()) {
@@ -1112,7 +1113,7 @@ function wireIpc() {
     }
   });
 
-  ipcMain.handle('shell:vscode', async (_e, target) => opener.openInVSCode(target));
+  ipcMain.handle('shell:editor', async (_e, target) => opener.openInEditor(target));
 
   /* ── свои обои: выбор файла через системный диалог и копирование в данные ── */
   ipcMain.handle('wall:pick', async () => {
@@ -1194,12 +1195,12 @@ function wireIpc() {
   ipcMain.handle('files:search', fsWrap(async (id, q) => ({ results: await files.search(rootOf(id), q) })));
   ipcMain.handle('props:read', fsWrap(async (id) => files.readServerProperties(rootOf(id))));
   ipcMain.handle('props:write', fsWrap(async (id, patch) => files.writeServerProperties(rootOf(id), patch)));
-  ipcMain.handle('server:vscode', async (_e, id) => {
-    try { return await opener.openInVSCode(rootOf(id)); } catch (err) { return { ok: false, error: err.message }; }
+  ipcMain.handle('server:editor', async (_e, id) => {
+    try { return await opener.openInEditor(rootOf(id)); } catch (err) { return { ok: false, error: err.message }; }
   });
-  ipcMain.handle('files:vscode', async (_e, id, rel) => {
+  ipcMain.handle('files:editor', async (_e, id, rel) => {
     try {
-      return await opener.openInVSCode(files.resolveSafe(rootOf(id), rel));
+      return await opener.openInEditor(files.resolveSafe(rootOf(id), rel));
     } catch (err) { return { ok: false, error: err.message }; }
   });
   ipcMain.handle('files:openExternal', async (_e, id, rel) => {
@@ -1483,11 +1484,19 @@ if (!gotLock) {
     }
 
     // тихая проверка обновлений при запуске; если включена автоустановка —
-    // обновляемся сами, как Discord: скачали, поставили, перезапустились
+    // обновляемся сами: скачали, поставили, перезапустились
     const updCfg = updConfig();
     if (updCfg.auto && updCfg.repo) {
       setTimeout(() => { autoUpdate().catch(() => {}); }, 3500);
     }
+
+    // постоянная проверка канала: раз в 20 минут, пока панель открыта
+    const updTick = setInterval(() => {
+      const c = updConfig();
+      if (!c.auto || !c.repo) return;
+      updCheck({ announce: true }).catch(() => {});
+    }, 20 * 60 * 1000);
+    app.on('before-quit', () => clearInterval(updTick));
 
     const tick = setInterval(refreshTray, 30000);
     app.on('before-quit', () => clearInterval(tick));

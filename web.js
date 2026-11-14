@@ -128,7 +128,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === '/api/autostart') return sendJson(res, 200, { supported: false });
 
-  /* ── server.properties и VS Code ── */
+  /* ── server.properties и внешний редактор ── */
   if (p === '/api/props') {
     const srv = manager.get(url.searchParams.get('id'));
     if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
@@ -142,13 +142,13 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
-  if (p === '/api/server/vscode' && req.method === 'POST') {
+  if (p === '/api/server/editor' && req.method === 'POST') {
     try {
       const body = await readBody(req);
       const srv = body.id ? manager.get(body.id) : null;
       const target = srv ? srv.cwd : body.path;
       if (!target) return sendJson(res, 200, { ok: false, error: 'Нет пути' });
-      return sendJson(res, 200, { path: target, ...(await opener.openInVSCode(target)) });
+      return sendJson(res, 200, { path: target, ...(await opener.openInEditor(target)) });
     } catch (e) {
       return sendJson(res, 200, { ok: false, error: e.message });
     }
@@ -179,10 +179,10 @@ const server = http.createServer(async (req, res) => {
     try {
       if (action === 'list') return sendJson(res, 200, await files.listDir(rootOk(), rel));
       if (action === 'read') return sendJson(res, 200, await files.readFile(rootOk(), rel));
-      if (action === 'vscode') {
+      if (action === 'editor') {
         const body = req.method === 'POST' ? await readBody(req) : {};
         const target = files.resolveSafe(rootOk(), body.rel || rel);
-        return sendJson(res, 200, await opener.openInVSCode(target));
+        return sendJson(res, 200, await opener.openInEditor(target));
       }
       if (action === 'search') return sendJson(res, 200, { results: await files.search(rootOk(), url.searchParams.get('q') || '') });
       if (req.method === 'POST') {

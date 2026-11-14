@@ -35,6 +35,7 @@ const httpApi = {
   async restartAll() { for (const s of S.servers) await this.restart(s.id); return true; },
   async winMinimize() { return false; },
   async winClose() { return false; },
+  async winQuit() { return false; },
   async winToggleMax() {
     if (!document.fullscreenElement) { await document.documentElement.requestFullscreen().catch(() => {}); return { fullscreen: true, maximized: false }; }
     await document.exitFullscreen().catch(() => {});
@@ -93,9 +94,9 @@ const httpApi = {
   async filesRename(id, rel, name) { return post(`/api/files/rename?id=${encodeURIComponent(id)}`, { rel, name }); },
   async filesSearch(id, q) { return (await fetch(`/api/files/search?id=${encodeURIComponent(id)}&q=${encodeURIComponent(q)}`)).json(); },
   async filesOpenExternal() { return { ok: false, error: 'Только в exe-версии' }; },
-  async filesVSCode(id, rel) { return post('/api/files/vscode', { id, rel }); },
-  async serverVSCode(id) { return post('/api/server/vscode', { id }); },
-  async openVSCode(p) { return post('/api/server/vscode', { path: p }); },
+  async filesEditor(id, rel) { return post('/api/files/editor', { id, rel }); },
+  async serverEditor(id) { return post('/api/server/editor', { id }); },
+  async openEditor(p) { return post('/api/server/editor', { path: p }); },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },
   async iconToServer(cwd, dataUrl) { return post('/api/icon/to', { cwd, dataUrl }); },
@@ -154,9 +155,21 @@ const IS_DESKTOP = API.mode === 'desktop';
 
 const THEMES = {
   dark: { label: 'Тёмная', bg: '#070708', panel: '#141417', text: '#ececee', accent: '#ffffff' },
-  light: { label: 'Светлая', bg: '#f4f5f7', panel: '#ffffff', text: '#1a1c20', accent: '#111111' },
-  gray: { label: 'Серая', bg: '#22262b', panel: '#31373e', text: '#dfe3e8', accent: '#ffffff' },
+  graphite: { label: 'Графит', bg: '#0f0f10', panel: '#19191b', text: '#ededed', accent: '#c9c9cf' },
   contrast: { label: 'Контраст', bg: '#000000', panel: '#131313', text: '#ffffff', accent: '#ffffff' },
+  gray: { label: 'Серая', bg: '#22262b', panel: '#31373e', text: '#dfe3e8', accent: '#ffffff' },
+  navy: { label: 'Ночь', bg: '#0a0d14', panel: '#121722', text: '#e6ebf5', accent: '#6ea8fe' },
+  ocean: { label: 'Океан', bg: '#08100f', panel: '#111c1b', text: '#e3f1ef', accent: '#4fc3b5' },
+  forest: { label: 'Лес', bg: '#0b110d', panel: '#131b15', text: '#e6efe8', accent: '#63c98a' },
+  amethyst: { label: 'Аметист', bg: '#0d0a14', panel: '#171225', text: '#ece9f6', accent: '#a78bfa' },
+  sunset: { label: 'Закат', bg: '#120c10', panel: '#1d1419', text: '#f4e9ee', accent: '#f08a6c' },
+  ember: { label: 'Уголь', bg: '#0d0c0a', panel: '#171614', text: '#f0efe9', accent: '#d9a13b' },
+  steel: { label: 'Сталь', bg: '#0c1013', panel: '#151b20', text: '#e4edf2', accent: '#8fb8cc' },
+  light: { label: 'Светлая', bg: '#f4f5f7', panel: '#ffffff', text: '#1a1c20', accent: '#111111' },
+  paper: { label: 'Бумага', bg: '#f6f4ef', panel: '#ffffff', text: '#1b1a17', accent: '#111111' },
+  snow: { label: 'Снег', bg: '#eef2f7', panel: '#ffffff', text: '#141a22', accent: '#1f6feb' },
+  mint: { label: 'Мята', bg: '#eef5f1', panel: '#ffffff', text: '#12211a', accent: '#12855b' },
+  sand: { label: 'Песок', bg: '#f5f1e8', panel: '#fffdf8', text: '#211d16', accent: '#a9743a' },
   custom: { label: 'Кастом', bg: '#0f1014', panel: '#181b22', text: '#e8eaf0', accent: '#8ab4ff' },
 };
 
@@ -189,6 +202,10 @@ const prefs = {
   themes: JSON.parse(localStorage.getItem('lsp.themes') || '[]'),
   notif: localStorage.getItem('lsp.notif') !== '0',
   desktopNotif: localStorage.getItem('lsp.desktopNotif') !== '0',
+  // вид эффекта от клика: wave | dot | ring | cross | off
+  clickFx: localStorage.getItem('lsp.clickFx') || 'wave',
+  // набор звуков интерфейса: soft | mech | bell | deep | pop
+  soundPack: localStorage.getItem('lsp.soundPack') || 'soft',
   custom: JSON.parse(localStorage.getItem('lsp.custom') || 'null') || {
     bg: '#0f1014', panel: '#181b22', text: '#e8eaf0', accent: '#8ab4ff',
   },
@@ -219,6 +236,8 @@ const prefs = {
     localStorage.setItem('lsp.themes', JSON.stringify(this.themes));
     localStorage.setItem('lsp.notif', this.notif ? '1' : '0');
     localStorage.setItem('lsp.desktopNotif', this.desktopNotif ? '1' : '0');
+    localStorage.setItem('lsp.clickFx', this.clickFx);
+    localStorage.setItem('lsp.soundPack', this.soundPack);
     localStorage.setItem('lsp.custom', JSON.stringify(this.custom));
   },
 };
@@ -399,10 +418,10 @@ function applyTheme() {
   document.body.dataset.theme = prefs.theme;
   document.body.dataset.radius = prefs.radius;
 
-  // сбрасываем инлайновые переменные от предыдущей кастом-темы
-  const CUSTOM_VARS = ['--bg', '--bg-2', '--bg-3', '--bg-4', '--line', '--line-2', '--line-3', '--text', '--dim', '--dim-2', '--white', '--strong-fg',
+  // сбрасываем инлайновые переменные от предыдущей темы
+  const THEME_VARS = ['--bg', '--bg-2', '--bg-3', '--bg-4', '--line', '--line-2', '--line-3', '--text', '--dim', '--dim-2', '--white', '--strong-fg',
     '--side-grad-1', '--side-grad-2', '--top-grad-1', '--top-grad-2', '--hover-bd', '--focus-bd',
-    '--inv-bg', '--inv-bg-h', '--inv-fg', '--ghost-bd', '--ghost-fg', '--ghost-hover-bg', '--ghost-hover-bd',
+    '--inv-bg', '--inv-bg-h', '--inv-fg', '--ghost-bg', '--ghost-bd', '--ghost-fg', '--ghost-hover-bg', '--ghost-hover-bd',
     '--restart-hover-bg', '--restart-hover-bd', '--srv-hover-bg', '--srv-hover-bd', '--srv-active-bg', '--srv-active-bd',
     '--ico-bg', '--ico-bd', '--ico-fg', '--big-ico-bg', '--big-ico-fg', '--dot-off', '--dot-mid', '--dot-run', '--dot-run-glow',
     '--track', '--track-on', '--knob', '--knob-on', '--meta-sep', '--chip-bg', '--tps-fg', '--accent-bar',
@@ -410,105 +429,182 @@ function applyTheme() {
     '--msg-err', '--msg-err-bg', '--msg-err-line', '--msg-system', '--msg-input', '--msg-ok',
     '--menu-bg', '--menu-bd', '--menu-fg', '--menu-hover', '--menu-fg-h', '--code-bg', '--code-fg',
     '--foot-bg', '--scroll', '--scroll-hover', '--accent-check', '--warn', '--ed-bg', '--shadow-modal',
-    '--syn-key', '--syn-str', '--syn-num', '--syn-bool', '--syn-cmt', '--syn-tag'];
-  for (const v of CUSTOM_VARS) document.body.style.removeProperty(v);
+    '--syn-key', '--syn-str', '--syn-num', '--syn-bool', '--syn-cmt', '--syn-tag',
+    '--line-4', '--alert-bd', '--alert-fg', '--wc-close-bg', '--wc-close-fg',
+    '--fg', '--fg-dim', '--hover-bg'];
+  for (const v of THEME_VARS) document.body.style.removeProperty(v);
 
+  // все темы считаются по одной палитре: четыре базовых цвета + необязательные
+  // уточнения (для своей темы их можно задать вручную)
+  const pal = themePalette();
+  const st = document.body.style;
+  const set = (k, v) => st.setProperty(k, v);
+  const bg = pal.bg, panel = pal.panel, text = pal.text, accent = pal.accent;
+
+  set('--bg', bg);
+  set('--bg-2', mix(bg, panel, 0.55));
+  set('--bg-3', panel);
+  set('--bg-4', mix(panel, text, 0.12));
+  set('--line', pal.line || mix(bg, text, 0.14));
+  set('--line-2', pal.line ? mix(pal.line, text, 0.14) : mix(bg, text, 0.26));
+  set('--line-3', pal.line ? mix(pal.line, text, 0.3) : mix(bg, text, 0.34));
+  set('--text', text);
+  set('--dim', pal.dim || mix(text, bg, 0.42));
+  set('--dim-2', pal.dim ? mix(pal.dim, bg, 0.45) : mix(text, bg, 0.62));
+  set('--white', accent);
+  set('--strong-fg', text);
+
+  // «светлая» ли тема — от этого зависит, в какую сторону крутить оттенки
+  const light = (hexToRgb(bg).reduce((a, b) => a + b, 0) / 3) > 140;
+  const shade = (r) => mix(bg, light ? '#000000' : '#ffffff', r);
+
+  set('--side-grad-1', mix(panel, bg, 0.35));
+  set('--side-grad-2', bg);
+  set('--top-grad-1', mix(panel, bg, 0.5));
+  set('--top-grad-2', mix(panel, bg, 0.2));
+  set('--hover-bd', mix(bg, text, 0.36));
+  set('--focus-bd', mix(bg, text, 0.45));
+
+  const btnBg = pal.btn || accent;
+  const btnFg = pal.btnText || (light ? '#ffffff' : mix(bg, '#000000', 0.85));
+  set('--inv-bg', btnBg);
+  set('--inv-bg-h', mix(btnBg, text, 0.18));
+  set('--inv-fg', btnFg);
+  set('--ghost-bg', pal.ghost || 'transparent');
+  set('--ghost-bd', mix(bg, text, 0.32));
+  set('--ghost-fg', pal.ghostText || mix(text, bg, 0.12));
+  set('--ghost-hover-bg', mix(panel, text, 0.08));
+  set('--ghost-hover-bd', mix(bg, text, 0.46));
+  set('--restart-hover-bg', mix(panel, text, 0.06));
+  set('--restart-hover-bd', mix(bg, text, 0.55));
+
+  set('--srv-hover-bg', mix(panel, text, 0.05));
+  set('--srv-hover-bd', mix(bg, text, 0.2));
+  set('--srv-active-bg', mix(panel, accent, 0.10));
+  set('--srv-active-bd', mix(bg, text, 0.3));
+  set('--ico-bg', pal.icon || mix(panel, text, 0.05));
+  set('--ico-bd', mix(bg, text, 0.2));
+  set('--ico-fg', mix(text, bg, 0.25));
+  set('--big-ico-bg', pal.icon || mix(panel, text, 0.06));
+  set('--big-ico-fg', mix(text, bg, 0.15));
+  set('--dot-off', mix(bg, text, 0.3));
+  set('--dot-mid', mix(text, bg, 0.3));
+  set('--dot-run', accent);
+  set('--dot-run-glow', `rgba(${hexToRgb(accent).join(',')},.8)`);
+  set('--track', mix(panel, text, 0.1));
+  set('--track-on', mix(panel, text, 0.28));
+  set('--knob', mix(text, bg, 0.55));
+  set('--knob-on', btnBg);
+  set('--meta-sep', mix(bg, text, 0.3));
+  set('--chip-bg', mix(panel, bg, 0.5));
+  set('--tps-fg', text);
+  set('--accent-bar', accent);
+
+  set('--console-bg', shade(0.02));
+  set('--line-t', mix(text, bg, 0.7));
+  set('--msg-stdout', mix(text, bg, 0.12));
+  set('--msg-info', mix(text, bg, 0.24));
+  set('--msg-debug', mix(text, bg, 0.55));
+  set('--msg-warn', text);
+  set('--msg-warn-line', mix(bg, text, 0.3));
+  set('--msg-err', text);
+  set('--msg-err-bg', light ? 'rgba(0,0,0,.07)' : 'rgba(255,255,255,.07)');
+  set('--msg-err-line', text);
+  set('--msg-system', mix(text, bg, 0.45));
+  set('--msg-input', text);
+  set('--msg-ok', text);
+
+  set('--menu-bg', mix(panel, bg, 0.3));
+  set('--menu-bd', mix(bg, text, 0.28));
+  set('--menu-fg', text);
+  set('--menu-hover', mix(panel, text, 0.1));
+  set('--menu-fg-h', accent);
+  set('--code-bg', mix(panel, text, 0.07));
+  set('--code-fg', mix(text, bg, 0.2));
+  set('--foot-bg', mix(bg, panel, 0.6));
+  set('--scroll', mix(bg, text, 0.22));
+  set('--scroll-hover', mix(bg, text, 0.36));
+  set('--accent-check', accent);
+  set('--warn', mix(accent, '#d9a13b', 0.5));
+  set('--ed-bg', shade(0.03));
+  set('--shadow-modal', light ? '0 26px 80px rgba(20,25,35,.18)' : '0 26px 80px rgba(0,0,0,.7)');
+  set('--syn-key', light ? '#1a56b8' : '#8ab4ff');
+  set('--syn-str', light ? '#2f7a2f' : '#9ad69a');
+  set('--syn-num', light ? '#a05a00' : '#e0b070');
+  set('--syn-bool', light ? '#8b2f9c' : '#d38ee0');
+  set('--syn-cmt', light ? '#8a8f98' : '#6b7280');
+  set('--syn-tag', light ? '#0f6f78' : '#7ad0d6');
+
+  set('--fg', text);
+  set('--fg-dim', mix(text, bg, 0.42));
+  set('--hover-bg', mix(panel, text, 0.1));
+  set('--line-4', mix(bg, text, 0.42));
+  set('--alert-bd', mix(panel, text, 0.22));
+  set('--alert-fg', btnFg);
+  set('--wc-close-bg', mix(panel, text, 0.14));
+  set('--wc-close-fg', text);
+}
+
+/** Палитра текущей темы: для «Кастома» — свои цвета, для остальных — из набора. */
+function themePalette() {
   if (prefs.theme === 'custom') {
-    const c = prefs.custom;
-    const st = document.body.style;
-    const set = (k, v) => st.setProperty(k, v);
-    const bg = c.bg, panel = c.panel, text = c.text, accent = c.accent;
+    const c = prefs.custom || {};
+    const base = THEMES.custom;
+    return {
+      bg: c.bg || base.bg,
+      panel: c.panel || base.panel,
+      text: c.text || base.text,
+      accent: c.accent || base.accent,
+      dim: c.dim || '',
+      line: c.line || '',
+      btn: c.btn || '',
+      btnText: c.btnText || '',
+      ghost: c.ghost || '',
+      ghostText: c.ghostText || '',
+      icon: c.icon || '',
+    };
+  }
+  const t = THEMES[prefs.theme] || THEMES.dark;
+  return { bg: t.bg, panel: t.panel, text: t.text, accent: t.accent };
+}
 
-    set('--bg', bg);
-    set('--bg-2', mix(bg, panel, 0.55));
-    set('--bg-3', panel);
-    set('--bg-4', mix(panel, text, 0.12));
-    set('--line', mix(bg, text, 0.14));
-    set('--line-2', mix(bg, text, 0.26));
-    set('--line-3', mix(bg, text, 0.34));
-    set('--text', text);
-    set('--dim', mix(text, bg, 0.42));
-    set('--dim-2', mix(text, bg, 0.62));
-    set('--white', accent);
-    set('--strong-fg', text);
+/** Цвета своей темы: id поля → ключ в prefs.custom. */
+const CUSTOM_COLOR_KEYS = {
+  cBg: 'bg',
+  cPanel: 'panel',
+  cLine: 'line',
+  cText: 'text',
+  cDim: 'dim',
+  cAccent: 'accent',
+  cBtn: 'btn',
+  cBtnText: 'btnText',
+  cGhost: 'ghost',
+  cGhostText: 'ghostText',
+  cIcon: 'icon',
+};
 
-    // «светлая» ли тема — от этого зависит, в какую сторону крутить оттенки
-    const light = (hexToRgb(bg).reduce((a, b) => a + b, 0) / 3) > 140;
-    const shade = (r) => mix(bg, light ? '#000000' : '#ffffff', r);
+const CUSTOM_DEFAULTS = {
+  bg: '#0f1014',
+  panel: '#181b22',
+  line: '#2a2c34',
+  text: '#e8eaf0',
+  dim: '#9a9daa',
+  accent: '#8ab4ff',
+  btn: '#8ab4ff',
+  btnText: '#0b0d12',
+  ghost: '#1c1f27',
+  ghostText: '#e8eaf0',
+  icon: '#1c1f27',
+};
 
-    set('--side-grad-1', mix(panel, bg, 0.35));
-    set('--side-grad-2', bg);
-    set('--top-grad-1', mix(panel, bg, 0.5));
-    set('--top-grad-2', mix(panel, bg, 0.2));
-    set('--hover-bd', mix(bg, text, 0.36));
-    set('--focus-bd', mix(bg, text, 0.45));
-
-    set('--inv-bg', accent);
-    set('--inv-bg-h', mix(accent, text, 0.18));
-    set('--inv-fg', mix(bg, '#000000', light ? 0 : 0.85));
-    set('--ghost-bd', mix(bg, text, 0.32));
-    set('--ghost-fg', mix(text, bg, 0.12));
-    set('--ghost-hover-bg', mix(panel, text, 0.08));
-    set('--ghost-hover-bd', mix(bg, text, 0.46));
-    set('--restart-hover-bg', mix(panel, text, 0.06));
-    set('--restart-hover-bd', mix(bg, text, 0.55));
-
-    set('--srv-hover-bg', mix(panel, text, 0.05));
-    set('--srv-hover-bd', mix(bg, text, 0.2));
-    set('--srv-active-bg', mix(panel, accent, 0.10));
-    set('--srv-active-bd', mix(bg, text, 0.3));
-    set('--ico-bg', mix(panel, text, 0.05));
-    set('--ico-bd', mix(bg, text, 0.2));
-    set('--ico-fg', mix(text, bg, 0.25));
-    set('--big-ico-bg', mix(panel, text, 0.06));
-    set('--big-ico-fg', mix(text, bg, 0.15));
-    set('--dot-off', mix(bg, text, 0.3));
-    set('--dot-mid', mix(text, bg, 0.3));
-    set('--dot-run', accent);
-    set('--dot-run-glow', `rgba(${hexToRgb(accent).join(',')},.8)`);
-    set('--track', mix(panel, text, 0.1));
-    set('--track-on', mix(panel, text, 0.28));
-    set('--knob', mix(text, bg, 0.55));
-    set('--knob-on', accent);
-    set('--meta-sep', mix(bg, text, 0.3));
-    set('--chip-bg', mix(panel, bg, 0.5));
-    set('--tps-fg', text);
-    set('--accent-bar', accent);
-
-    set('--console-bg', shade(light ? 0.02 : 0.55));
-    set('--line-t', mix(text, bg, 0.7));
-    set('--msg-stdout', mix(text, bg, 0.12));
-    set('--msg-info', mix(text, bg, 0.24));
-    set('--msg-debug', mix(text, bg, 0.55));
-    set('--msg-warn', text);
-    set('--msg-warn-line', mix(bg, text, 0.3));
-    set('--msg-err', text);
-    set('--msg-err-bg', light ? 'rgba(0,0,0,.07)' : 'rgba(255,255,255,.07)');
-    set('--msg-err-line', text);
-    set('--msg-system', mix(text, bg, 0.45));
-    set('--msg-input', text);
-    set('--msg-ok', text);
-
-    set('--menu-bg', mix(panel, bg, 0.3));
-    set('--menu-bd', mix(bg, text, 0.28));
-    set('--menu-fg', text);
-    set('--menu-hover', mix(panel, text, 0.1));
-    set('--menu-fg-h', accent);
-    set('--code-bg', mix(panel, text, 0.07));
-    set('--code-fg', mix(text, bg, 0.2));
-    set('--foot-bg', mix(bg, panel, 0.6));
-    set('--scroll', mix(bg, text, 0.22));
-    set('--scroll-hover', mix(bg, text, 0.36));
-    set('--accent-check', accent);
-    set('--warn', mix(accent, '#d9a13b', 0.5));
-    set('--ed-bg', shade(light ? 0.01 : 0.6));
-    set('--shadow-modal', light ? '0 26px 80px rgba(20,25,35,.18)' : '0 26px 80px rgba(0,0,0,.7)');
-    set('--syn-key', light ? '#1a56b8' : '#8ab4ff');
-    set('--syn-str', light ? '#2f7a2f' : '#9ad69a');
-    set('--syn-num', light ? '#a05a00' : '#e0b070');
-    set('--syn-bool', light ? '#8b2f9c' : '#d38ee0');
-    set('--syn-cmt', light ? '#8a8f98' : '#6b7280');
-    set('--syn-tag', light ? '#0f6f78' : '#7ad0d6');
+/** Подставляет текущие цвета своей темы в поля настроек. */
+function syncCustomColors() {
+  const c = prefs.custom || {};
+  for (const [id, key] of Object.entries(CUSTOM_COLOR_KEYS)) {
+    const input = $(id);
+    if (!input) continue;
+    const value = c[key] || mix(THEMES.custom.bg, '#ffffff', 0.5);
+    if (/^#[0-9a-f]{6}$/i.test(value)) input.value = value;
   }
 }
 
@@ -523,7 +619,43 @@ function hexToRgb(hex) {
   return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0];
 }
 
+/* ═════════════════════ эффект от клика ═════════════════════ */
+
+function fxLayer() {
+  let layer = document.getElementById('fxLayer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'fxLayer';
+    layer.className = 'fx-layer';
+    document.body.appendChild(layer);
+  }
+  return layer;
+}
+
+/** Рисует эффект в точке клика: точка, кольцо, крест. */
+function clickFxAt(x, y, kind) {
+  if (!prefs.fx || !kind || kind === 'off' || kind === 'wave') return;
+  const el = document.createElement('span');
+  el.className = 'cfx cfx-' + kind;
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
+  fxLayer().appendChild(el);
+  setTimeout(() => el.remove(), 640);
+}
+
 /* ═════════════════════ звуки (WebAudio, без файлов) ═════════════════════ */
+
+/**
+ * Наборы звуков: одна и та же логика, разные тембры.
+ * mul — множитель частоты, type — форма волны, len — длина, gain — громкость.
+ */
+const SOUND_PACKS = {
+  soft: { label: 'Мягкие', type: 'sine', mul: 1, len: 1, gain: 1, cut: 2600 },
+  mech: { label: 'Механические', type: 'square', mul: 0.62, len: 0.55, gain: 0.55, cut: 1500 },
+  bell: { label: 'Колокольчики', type: 'triangle', mul: 1.9, len: 1.5, gain: 0.75, cut: 5200 },
+  deep: { label: 'Низкие', type: 'sine', mul: 0.55, len: 1.35, gain: 1.25, cut: 1400 },
+  pop: { label: 'Поп', type: 'triangle', mul: 1.25, len: 0.6, gain: 0.9, cut: 3200 },
+};
 
 const Sound = {
   ctx: null,
@@ -536,12 +668,22 @@ const Sound = {
     if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
     return this.ctx;
   },
-  /** Мягкий тон: синус, плавная атака и длинный хвост — без резких щелчков. */
-  tone({ freq = 520, to = null, dur = 0.09, type = 'sine', gain = 0.02, delay = 0 }) {
+  pack() {
+    return SOUND_PACKS[prefs.soundPack] || SOUND_PACKS.soft;
+  },
+  /** Мягкий тон: плавная атака и длинный хвост — без резких щелчков. */
+  tone({ freq = 520, to = null, dur = 0.09, type = null, gain = 0.02, delay = 0 }) {
     const ctx = this.ensure();
     if (!ctx) return;
     const vol = Math.max(0, Math.min(1, prefs.volume));
     if (vol <= 0) return;
+
+    const pk = this.pack();
+    freq *= pk.mul;
+    if (to) to *= pk.mul;
+    dur *= pk.len;
+    gain *= pk.gain;
+    type = type && pk.type === 'sine' ? type : pk.type;
 
     const t0 = ctx.currentTime + delay;
     const osc = ctx.createOscillator();
@@ -549,7 +691,7 @@ const Sound = {
     // фильтр срезает «стеклянные» высокие призвуки
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 2600;
+    lp.frequency.value = pk.cut;
 
     osc.type = type;
     osc.frequency.setValueAtTime(freq, t0);
@@ -648,7 +790,7 @@ const el = {
   uptime: $('uptimeText'), pid: $('pidText'),
   bigIcon: $('bigIcon'), tpsBadge: $('tpsBadge'), tpsVal: $('tpsVal'), tpsSpark: $('tpsSpark'),
   btnStart: $('btnStart'), btnStop: $('btnStop'), btnRestart: $('btnRestart'),
-  btnKill: $('btnKill'), btnSettings: $('btnSettings'), btnFolder: $('btnFolder'), btnVSCode: $('btnVSCode'),
+  btnKill: $('btnKill'), btnSettings: $('btnSettings'), btnFolder: $('btnFolder'), btnEditor: $('btnEditor'),
   consoleEl: $('console'), filter: $('logFilter'), autoscroll: $('autoscroll'),
   cmd: $('cmdInput'), cmdSend: $('cmdSend'), btnClear: $('btnClear'), btnDownload: $('btnDownload'),
   modal: $('modal'), modalTitle: $('modalTitle'), ctx: $('ctx'),
@@ -1145,7 +1287,7 @@ function fmUpdatePos() {
 function fmInsert(text) {
   const ta = fmEl('fmText');
   if (ta.disabled) {
-    toast('Сначала открой файл', 'err');
+    toast('Файл не открыт', 'err');
     return;
   }
   const start = ta.selectionStart;
@@ -1785,6 +1927,21 @@ function setUptime(s) {
 }
 
 /** Иконки кнопок окна: «развернуть» ↔ «восстановить» */
+/** Крестик: закрывает панель; если серверы работают — сначала спрашивает. */
+async function doCloseApp() {
+  const running = S.servers.filter((x) => x.state !== 'stopped');
+  if (running.length) {
+    const ok = await askConfirm({
+      title: 'Закрыть панель?',
+      text: `Сейчас работает серверов: ${running.length}. Панель остановит их и выйдет.`,
+      okLabel: 'Остановить и выйти',
+    });
+    if (!ok) return;
+  }
+  if (API.winQuit) await API.winQuit();
+  else await API.winClose();
+}
+
 function setWinIcons(st) {
   if (!st) return;
   // полный экран (F11) — своя шапка окна полностью скрывается
@@ -1973,7 +2130,7 @@ async function wizSelectKernel(id) {
     WIZ.versions = Array.isArray(list) ? list : [];
   } catch (e) {
     WIZ.versions = [];
-    $('wizVersionHint').textContent = 'Не удалось получить версии: ' + e.message;
+    notify({ title: 'Версии не загрузились', text: e.message, kind: 'err' });
   }
   sel.innerHTML = '';
   if (!WIZ.versions.length) {
@@ -2337,7 +2494,7 @@ function showContextMenu(ev, server) {
     { label: 'Принудительно выключить', key: 'kill', disabled: !running, act: () => doKill(server.id) },
     { sep: true },
     { label: 'Файлы сервера', key: 'files', disabled: !server.cwd, act: () => { selectServer(server.id); setTab('files'); } },
-    { label: 'Открыть в VS Code', key: 'vscode', disabled: !server.cwd, act: () => doOpenVSCode(server) },
+    { label: 'Открыть в редакторе', key: 'editor', disabled: !server.cwd, act: () => doOpenEditor(server) },
     { label: 'Открыть папку', key: 'folder', disabled: !IS_DESKTOP && !server.cwd, act: () => doOpenFolder(server) },
     ...(isShared(server) ? [
       { label: 'Обновить из GitHub и запустить', key: 'sync', act: () => startShared(server) },
@@ -2413,13 +2570,13 @@ async function doKill(server) {
   setTimeout(refresh, 200);
 }
 
-/** Открывает папку сервера в VS Code. */
-async function doOpenVSCode(server) {
+/** Открывает папку сервера во внешнем редакторе. */
+async function doOpenEditor(server) {
   const srv = server || current();
   if (!srv) { toast('Сервер не выбран', 'err'); return; }
   if (!srv.cwd) { toast('У сервера не задана рабочая папка', 'err'); return; }
-  const res = await API.serverVSCode(srv.id);
-  if (res && res.ok === false) { toast(res.error || 'VS Code не найден', 'err'); return; }
+  const res = await API.serverEditor(srv.id);
+  if (res && res.ok === false) { toast(res.error || 'Редактор не найден', 'err'); return; }
   Sound.play('ok');
 }
 
@@ -2605,7 +2762,7 @@ function renderView() {
   el.cmd.disabled = state !== 'running';
   el.cmd.placeholder = state === 'running'
     ? 'команда в консоль сервера (Enter — отправить)'
-    : 'сервер не запущен — консоль недоступна';
+    : 'консоль недоступна';
 
   renderTps(s);
 }
@@ -2661,7 +2818,7 @@ async function loadLogs(id) {
   LOG_CACHE.set(id, logs.slice());
   for (const e of logs) appendLine(e);
   if (!S.domLines.length) {
-    el.consoleEl.innerHTML = '<div class="placeholder">Консоль пуста. Запусти сервер — здесь появится вывод процесса.</div>';
+    el.consoleEl.innerHTML = '<div class="placeholder">консоль пуста</div>';
   }
 }
 
@@ -3126,16 +3283,21 @@ function applyPrefs() {
   $('pFx').checked = prefs.fx;
   $('pColors').checked = prefs.colors;
   $('pVolume').value = Math.round(prefs.volume * 100);
-  $('cBg').value = prefs.custom.bg;
-  $('cPanel').value = prefs.custom.panel;
-  $('cText').value = prefs.custom.text;
-  $('cAccent').value = prefs.custom.accent;
+  syncCustomColors();
   for (const cell of document.querySelectorAll('.theme-cell')) {
     cell.classList.toggle('active', cell.dataset.theme === prefs.theme);
   }
   for (const chip of document.querySelectorAll('#radiusGrid .chip')) {
     chip.classList.toggle('active', chip.dataset.radius === prefs.radius);
   }
+  for (const chip of document.querySelectorAll('#soundPackGrid .chip')) {
+    chip.classList.toggle('active', chip.dataset.pack === prefs.soundPack);
+  }
+  for (const chip of document.querySelectorAll('#clickFxGrid .chip')) {
+    chip.classList.toggle('active', chip.dataset.clickfx === prefs.clickFx);
+  }
+  const customBox = $('customBox');
+  if (customBox) customBox.classList.toggle('hidden', prefs.theme !== 'custom');
   for (const chip of document.querySelectorAll('#startGrid .chip')) {
     chip.classList.toggle('active', chip.dataset.start === prefs.startMode);
   }
@@ -3186,22 +3348,37 @@ let GH_REPOS = [];
 async function ghRefreshAccount() {
   if (!API.ghAccount) return;
   const acc = await API.ghAccount();
+  const signed = !!(acc && acc.hasToken);
+  const who = signed ? (acc.login || 'вход выполнен') : 'гость';
+  const face = signed && acc.avatar
+    ? `<img src="${acc.avatar}" alt="">`
+    : esc((signed ? (acc.login || '?') : '?').charAt(0).toUpperCase());
+
+  // карточка в настройках
   const ava = $('ghAva');
+  if (ava) ava.innerHTML = face;
   const name = $('ghLoginName');
+  if (name) name.textContent = signed ? who : 'не выполнен вход';
   const out = $('ghLogout');
+  if (out) out.classList.toggle('hidden', !signed);
+  const quick = $('ghQuickLogin');
+  if (quick) quick.classList.toggle('hidden', signed);
   const row = $('ghLoginRow');
-  if (!acc || !acc.hasToken) {
-    ava.innerHTML = '?';
-    name.textContent = 'не выполнен вход';
-    out.classList.add('hidden');
-    if (row) row.classList.remove('hidden');
-    return;
-  }
-  ava.innerHTML = acc.avatar ? `<img src="${acc.avatar}" alt="">` : esc((acc.login || '?')[0].toUpperCase());
-  name.textContent = acc.login || 'вход выполнен';
-  out.classList.remove('hidden');
-  if (row) row.classList.add('hidden');
-  if (acc.login) loadRepos();
+  if (row) row.classList.toggle('hidden', signed);
+
+  // профиль слева сверху в настройках
+  const cardAva = $('prefsGhAva');
+  if (cardAva) cardAva.innerHTML = face;
+  const cardName = $('prefsGhName');
+  if (cardName) cardName.textContent = who;
+
+  // значок аккаунта рядом с брендом
+  const tbAva = $('tbAccAva');
+  if (tbAva) tbAva.innerHTML = face;
+  const tbName = $('tbAccName');
+  if (tbName) tbName.textContent = who;
+
+  if (signed && acc.login) loadRepos();
 }
 
 async function loadRepos(query = '') {
@@ -3239,12 +3416,36 @@ async function loadRepos(query = '') {
 }
 
 function bindGithubAccount() {
+  const quick = $('ghQuickLogin');
+  if (quick) {
+    quick.onclick = () => {
+      const dev = $('ghDeviceBtn');
+      if (dev) dev.click();
+      else notify({ title: 'Вход недоступен', text: 'Нет Client ID для входа по коду.', kind: 'err' });
+    };
+  }
+  const tbAcc = $('tbAccount');
+  if (tbAcc) {
+    tbAcc.onclick = () => {
+      openPrefs();
+      setPrefsCat('gh');
+      Sound.play('click');
+    };
+  }
+  const navCard = $('prefsGhCard');
+  if (navCard) {
+    navCard.onclick = () => {
+      setPrefsCat('gh');
+      Sound.play('click');
+    };
+  }
+
   const loginBtn = $('ghLogin');
   if (!loginBtn || loginBtn.dataset.bound) return;
   loginBtn.dataset.bound = '1';
   loginBtn.onclick = async () => {
     const token = $('ghToken').value.trim();
-    if (!token) { notify({ title: 'Нужен токен', text: 'Вставь токен GitHub с правами repo.', kind: 'err' }); return; }
+    if (!token) { notify({ title: 'Нужен токен', kind: 'err' }); return; }
     loginBtn.disabled = true;
     loginBtn.textContent = 'Вход…';
     const res = await API.ghLogin(token);
@@ -3270,7 +3471,7 @@ function bindGithubAccount() {
   };
   $('ghCreate').onclick = async () => {
     const nm = $('ghNewName').value.trim();
-    if (!nm) { notify({ title: 'Имя?', text: 'Впиши имя нового репозитория.', kind: 'err' }); return; }
+    if (!nm) { notify({ title: 'Нужно имя репозитория', kind: 'err' }); return; }
     const res = await API.ghCreateRepo(nm, true);
     if (!res.ok) { notify({ title: 'Не удалось создать', text: res.error, kind: 'err' }); return; }
     $('ghNewName').value = '';
@@ -3344,7 +3545,7 @@ function syncBind(editingServer) {
   }
 
   const need = () => {
-    if (!editingServer) { notify({ title: 'Сначала сохрани', text: 'Скачивание и отправка работают для сохранённого сервера.', kind: 'warn' }); return null; }
+    if (!editingServer) { notify({ title: 'Сервер не сохранён', kind: 'warn' }); return null; }
     return editingServer.id;
   };
 
@@ -3385,7 +3586,7 @@ function bindMoveToApp() {
   const btn = $('moveToApp');
   if (!btn) return;
   btn.onclick = async () => {
-    if (!editingId) { notify({ title: 'Сначала сохрани', text: 'Перенос работает для уже созданного сервера.', kind: 'warn' }); return; }
+    if (!editingId) { notify({ title: 'Сервер не сохранён', kind: 'warn' }); return; }
     const srv = S.servers.find((x) => x.id === editingId);
     if (!srv) return;
     if (srv.state !== 'stopped') { notify({ title: 'Сервер запущен', text: 'Останови его перед переносом.', kind: 'err' }); return; }
@@ -3426,6 +3627,7 @@ function buildThemeGrid() {
     cell.innerHTML = `
       <span class="theme-swatch" style="background:${c.bg}">
         <i style="background:${c.panel}"></i>
+        <u style="background:${c.accent}"></u>
       </span>
       <span>${t.label}</span>`;
     cell.onclick = () => {
@@ -3451,6 +3653,10 @@ function setPrefsCat(cat) {
   const body = document.querySelector('.prefs-body');
   if (body) body.scrollTop = 0;
   if (cat === 'gh') ghRefreshAccount();
+  if (cat === 'upd') {
+    const tab = document.querySelector('#prefsNav .prefs-tab[data-cat="upd"]');
+    if (tab) tab.classList.remove('has-new');
+  }
 }
 
 function buildThemePresets() {
@@ -3489,7 +3695,7 @@ function buildWallRecent() {
   host.innerHTML = '';
   const list = (prefs.wallRecent || []).filter((w) => w && w.kind);
   if (!list.length) {
-    host.innerHTML = '<span class="empty-note">пока пусто — выбранные фоны будут копиться здесь</span>';
+    host.innerHTML = '<span class="empty-note">пусто</span>';
     return;
   }
   for (const w of list) {
@@ -3539,20 +3745,29 @@ function closePrefs() {
 }
 
 function bindEffects() {
-  // волна от кнопок
   document.addEventListener('pointerdown', (e) => {
     if (!prefs.fx) return;
-    const btn = e.target.closest('.btn');
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const d = Math.max(r.width, r.height);
-    const span = document.createElement('span');
-    span.className = 'ripple';
-    span.style.width = span.style.height = d + 'px';
-    span.style.left = (e.clientX - r.left - d / 2) + 'px';
-    span.style.top = (e.clientY - r.top - d / 2) + 'px';
-    btn.appendChild(span);
-    setTimeout(() => span.remove(), 520);
+    const kind = prefs.clickFx;
+
+    // волна внутри кнопки
+    if (kind === 'wave') {
+      const btn = e.target.closest('.btn');
+      if (btn) {
+        const r = btn.getBoundingClientRect();
+        const d = Math.max(r.width, r.height);
+        const span = document.createElement('span');
+        span.className = 'ripple';
+        span.style.width = span.style.height = d + 'px';
+        span.style.left = (e.clientX - r.left - d / 2) + 'px';
+        span.style.top = (e.clientY - r.top - d / 2) + 'px';
+        btn.appendChild(span);
+        setTimeout(() => span.remove(), 520);
+      }
+      return;
+    }
+
+    // эффект прямо на экране, в точке нажатия
+    clickFxAt(e.clientX, e.clientY, kind);
   });
 
   // звуки кликов
@@ -3597,7 +3812,7 @@ function bindActions() {
   el.btnKill.onclick = () => current() && doKill(current());
   el.btnSettings.onclick = () => openModal(current());
   el.btnFolder.onclick = () => current() && doOpenFolder(current());
-  el.btnVSCode.onclick = () => current() && doOpenVSCode(current());
+  el.btnEditor.onclick = () => current() && doOpenEditor(current());
 
   el.cmd.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || !el.cmd.value.trim()) return;
@@ -3648,15 +3863,10 @@ function bindActions() {
   $('tglColors').onchange = (e) => { prefs.colors = e.target.checked; prefs.save(); applyPrefs(); };
   el.autoscroll.onchange = (e) => { prefs.autoscroll = e.target.checked; prefs.save(); };
 
-  // свои кнопки окна
+  // свои кнопки окна: скрыть · уменьшить · развернуть · закрыть
+  $('winHide').onclick = () => API.winClose();
   $('winMin').onclick = () => API.winMinimize();
-  $('winClose').onclick = async () => {
-    await API.winClose();
-    if (IS_DESKTOP && !prefs._trayHinted) {
-      prefs._trayHinted = true;
-      notify({ title: 'Свёрнуто в трей', text: 'OmniPanel продолжает работать — значок в трее рядом с часами.', kind: 'info' });
-    }
-  };
+  $('winClose').onclick = doCloseApp;
   $('winMax').onclick = async () => {
     const st = await API.winToggleMax();
     setWinIcons(st);
@@ -3677,12 +3887,12 @@ function bindActions() {
       const modalOpen = !!document.querySelector('.modal:not(.hidden)');
       if (!modalOpen) { e.preventDefault(); API.winToggleFull().then(setWinIcons); return; }
     }
-    if (e.ctrlKey && (e.key === 'w' || e.key === 'W') && IS_DESKTOP) { e.preventDefault(); $('winClose').onclick(); }
+    if (e.ctrlKey && (e.key === 'w' || e.key === 'W') && IS_DESKTOP) { e.preventDefault(); doCloseApp(); }
   });
 
   // все серверы
   $('allStart').onclick = async () => {
-    if (!S.servers.length) { notify({ title: 'Серверов нет', text: 'Сначала добавь или создай сервер.', kind: 'warn' }); return; }
+    if (!S.servers.length) { notify({ title: 'Серверов нет', kind: 'warn' }); return; }
     await API.startAll();
     notify({ title: 'Запускаю все', text: `Серверов к запуску: ${S.servers.length}`, kind: 'ok' });
     setTimeout(refresh, 700);
@@ -3694,7 +3904,7 @@ function bindActions() {
     setTimeout(refresh, 700);
   };
   $('allRestart').onclick = async () => {
-    if (!S.servers.length) { notify({ title: 'Серверов нет', text: 'Сначала добавь или создай сервер.', kind: 'warn' }); return; }
+    if (!S.servers.length) { notify({ title: 'Серверов нет', kind: 'warn' }); return; }
     await API.restartAll();
     notify({ title: 'Перезапускаю все', text: 'Серверы перезапускаются по очереди.', kind: 'warn' });
     setTimeout(refresh, 900);
@@ -3788,7 +3998,7 @@ function bindActions() {
     notify({ title: 'Тема сохранена', text: name, kind: 'ok' });
   };
   $('themeResetCustom').onclick = () => {
-    prefs.custom = { bg: '#0f1014', panel: '#181b22', text: '#e8eaf0', accent: '#8ab4ff' };
+    prefs.custom = { ...CUSTOM_DEFAULTS };
     prefs.theme = 'custom';
     prefs.save();
     applyPrefs();
@@ -3848,13 +4058,36 @@ function bindActions() {
   };
   $('pVolume').oninput = (e) => { prefs.volume = Number(e.target.value) / 100; prefs.save(); $('pVolVal').textContent = e.target.value + '%'; };
   $('pVolume').onchange = () => Sound.play('click');
-  for (const id of ['cBg', 'cPanel', 'cText', 'cAccent']) {
+  for (const id of Object.keys(CUSTOM_COLOR_KEYS)) {
     $(id).oninput = (e) => {
-      const key = { cBg: 'bg', cPanel: 'panel', cText: 'text', cAccent: 'accent' }[id];
-      prefs.custom[key] = e.target.value;
-      if (prefs.theme !== 'custom') prefs.theme = 'custom';
+      prefs.custom[CUSTOM_COLOR_KEYS[id]] = e.target.value;
+      prefs.save();
+      applyTheme();
+      syncCustomColors();
+    };
+  }
+
+  // наборы звуков
+  for (const chip of document.querySelectorAll('#soundPackGrid .chip')) {
+    chip.onclick = () => {
+      prefs.soundPack = chip.dataset.pack;
       prefs.save();
       applyPrefs();
+      Sound.play('ok');
+    };
+  }
+
+  // эффект от клика
+  for (const chip of document.querySelectorAll('#clickFxGrid .chip')) {
+    chip.onclick = () => {
+      prefs.clickFx = chip.dataset.clickfx;
+      prefs.save();
+      applyPrefs();
+      Sound.play('click');
+      if (prefs.clickFx !== 'off' && prefs.fx) {
+        const r = chip.getBoundingClientRect();
+        clickFxAt(r.left + r.width / 2, r.top + r.height / 2, prefs.clickFx);
+      }
     };
   }
   for (const chip of document.querySelectorAll('#radiusGrid .chip')) {
@@ -3864,7 +4097,7 @@ function bindActions() {
     prefs.theme = 'dark';
     prefs.radius = 'soft';
     prefs.volume = 0.45;
-    prefs.custom = { bg: '#0f1014', panel: '#181b22', text: '#e8eaf0', accent: '#8ab4ff' };
+    prefs.custom = { ...CUSTOM_DEFAULTS };
     prefs.save();
     applyPrefs();
     toast('Настройки оформления сброшены', 'ok');
@@ -3941,8 +4174,8 @@ function bindActions() {
   // текущая аватарка → server-icon.png в папке сервера
   $('iconToServer').onclick = async () => {
     const cwd = $('f_cwd').value.trim();
-    if (!cwd) { toast('Сначала укажи рабочую папку', 'err'); return; }
-    if (!pendingIcon) { toast('Сначала выбери иконку', 'err'); return; }
+    if (!cwd) { toast('Папка не задана', 'err'); return; }
+    if (!pendingIcon) { toast('Иконка не выбрана', 'err'); return; }
     const res = await API.iconToServer(cwd, pendingIcon);
     if (!res || res.ok === false) { toast((res && res.error) || 'Не удалось записать server-icon.png', 'err'); return; }
     Sound.play('ok');
@@ -3957,7 +4190,7 @@ function bindActions() {
   };
   $('iconFromServer').onclick = async () => {
     const cwd = $('f_cwd').value.trim();
-    if (!cwd) { toast('Сначала укажи рабочую папку', 'err'); return; }
+    if (!cwd) { toast('Папка не задана', 'err'); return; }
     const dataUrl = await API.iconFromServer(cwd);
     if (!dataUrl) { toast('server-icon.png не найден в папке сервера', 'err'); return; }
     pendingIcon = dataUrl;
@@ -4030,6 +4263,8 @@ function fsbUpdate() {
 function bindFsBar() {
   const st = $('fsbSettings');
   if (st) st.onclick = () => openPrefs();
+  const hd = $('fsbHide');
+  if (hd) hd.onclick = () => API.winClose();
   const mn = $('fsbMin');
   if (mn) mn.onclick = () => { if (API.winMinimize) API.winMinimize(); };
   const ex = $('fsbExit');
@@ -4157,7 +4392,7 @@ function pfCollect() {
 async function pfOpen(server) {
   const s = server || S.servers.find((x) => x.id === S.currentId);
   if (!s || !s.id || !s.cwd) {
-    notify({ title: 'Нет папки сервера', text: 'Сначала укажи рабочую папку в настройках сервера.', kind: 'warn' });
+    notify({ title: 'Нет папки сервера', text: 'Папка не задана.', kind: 'warn' });
     return;
   }
   PF.id = s.id;
@@ -4219,7 +4454,7 @@ function bindPropsFull() {
       }
       pfRender();
       Sound.play('click');
-      toast('Подставлены значения по умолчанию — нажми «Сохранить»');
+      toast('Подставлены значения по умолчанию');
     };
   }
 }
@@ -4419,7 +4654,7 @@ function bindGithubDevice() {
     if (!id) { toast('Вставь Client ID', 'err'); return; }
     await API.ghSetOauthClientId(id);
     $('ghClientIdBox').classList.add('hidden');
-    notify({ title: 'Client ID сохранён', text: 'Теперь нажми «Войти через GitHub».', kind: 'ok' });
+    notify({ title: 'Client ID сохранён', kind: 'ok' });
   };
   const make = $('ghClientMake');
   if (make) make.onclick = () => API.ghOpenExternal('https://github.com/settings/applications/new');
@@ -4499,7 +4734,7 @@ async function updLoad() {
   } else if (UPD.last) {
     updRenderState(UPD.last);
   } else {
-    $('updState').textContent = cfg.lastCheck ? 'нажми «Проверить обновления»' : 'проверка не выполнялась';
+    $('updState').textContent = cfg.lastCheck ? 'готово к проверке' : 'проверка не выполнялась';
   }
   updRenderState(UPD.last);
   if (!cfg.repo) $('updState').textContent = 'укажи репозиторий обновлений';
@@ -4562,6 +4797,25 @@ async function updFullFlow() {
   }
 }
 
+/** Мерцающая плашка «доступно обновление» в шапке окна. */
+function setUpdPill(info) {
+  const pill = $('updPill');
+  if (!pill) return;
+  const has = !!(info && info.hasUpdate && info.latest);
+  const tab = document.querySelector('#prefsNav .prefs-tab[data-cat="upd"]');
+  if (tab) tab.classList.toggle('has-new', has);
+  if (!has) { pill.classList.add('hidden'); return; }
+  const text = $('updPillText');
+  if (text) text.textContent = 'обновление ' + info.latest;
+  pill.classList.remove('hidden');
+  pill.onclick = () => {
+    openPrefs();
+    setPrefsCat('upd');
+    updLoad();
+    Sound.play('click');
+  };
+}
+
 function bindUpdates() {
   if (!API.updConfig) return;
 
@@ -4575,7 +4829,7 @@ function bindUpdates() {
     e.target.value = v;
     saveCfg({ repo: v });
     UPD.last = null;
-    $('updState').textContent = v ? 'нажми «Проверить обновления»' : 'укажи репозиторий обновлений';
+    $('updState').textContent = v ? 'готово к проверке' : 'репозиторий не задан';
     $('updNotes').textContent = '';
   };
   $('updBranch').onchange = (e) => {
@@ -4593,6 +4847,10 @@ function bindUpdates() {
     const res = await API.updRevealBackups();
     if (res && res.ok) notify({ title: 'Папка бэкапов', text: res.dir, kind: 'info' });
   };
+
+  if (API.onUpdState) {
+    API.onUpdState((st) => { if (st && st.ok) setUpdPill(st); });
+  }
 
   if (API.onUpdProgress) {
     API.onUpdProgress((p) => {
@@ -4628,6 +4886,7 @@ function bindUpdates() {
   if (API.onUpdAvailable) {
     API.onUpdAvailable((info) => {
       UPD.last = info;
+      setUpdPill(info);
       notify({
         title: 'Доступно обновление',
         text: `OmniPanel ${info.latest}. Нажми, чтобы открыть настройки обновлений.`,

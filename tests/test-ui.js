@@ -75,6 +75,21 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   }
   await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-prefs-categories.png' });
 
+  console.log('\n=== ОКНО НАСТРОЕК НЕ ПРЫГАЕТ ===');
+  const sizes = [];
+  for (const c of ['look', 'bg', 'fx', 'win', 'notif', 'gh', 'sound', 'upd']) {
+    await page.click(`#prefsNav .prefs-tab[data-cat="${c}"]`);
+    await page.waitForTimeout(120);
+    sizes.push(await page.$eval('.prefs-box', (e) => Math.round(e.getBoundingClientRect().height)));
+  }
+  ok(new Set(sizes).size === 1, 'высота окна настроек одна на всех вкладках', JSON.stringify(sizes));
+
+  console.log('\n=== СВОИ КНОПКИ ОКНА ===');
+  const win = await page.evaluate(() => ['winHide', 'winMin', 'winMax', 'winClose']
+    .map((id) => { const el = document.getElementById(id); return el ? (el.getAttribute('aria-label') || '') : 'нет'; }));
+  ok(win.every((x) => x && x !== 'нет'), 'в шапке окна свои кнопки', JSON.stringify(win));
+  ok(win[0].includes('Скрыть') && win[1].includes('Уменьшить') && win[3].includes('Закрыть'), 'кнопки: скрыть, уменьшить, закрыть', win.join(' | '));
+
   console.log('\n=== ТУМБЛЕРЫ ВМЕСТО ГАЛОЧЕК ===');
   const sw = await page.evaluate(() => {
     const inp = document.getElementById('pDesktopNotif');
@@ -96,7 +111,18 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
 
   await page.click('#prefsNav .prefs-tab[data-cat="look"]');
   await page.waitForTimeout(200);
-  await page.evaluate(() => { prefs.custom = { bg: '#101820', panel: '#1a2632', text: '#e6eef6', accent: '#7fd1ff' }; prefs.save(); applyPrefs(); });
+
+  console.log('\n=== ТЕМЫ И СВОЯ ПАЛИТРА ===');
+  const themeCount = await page.$$eval('#themeGrid .theme-cell', (els) => els.length);
+  ok(themeCount >= 12, 'в наборе много готовых тем', 'тем: ' + themeCount);
+  const customHidden = await page.$eval('#customBox', (e) => e.classList.contains('hidden'));
+  ok(customHidden, 'на обычной теме панель своих цветов скрыта');
+  await page.click('#themeGrid .theme-cell[data-theme="custom"]');
+  await page.waitForTimeout(300);
+  ok(await page.$eval('#customBox', (e) => !e.classList.contains('hidden')), 'на теме «Кастом» панель цветов показана');
+  const colorInputs = await page.$$eval('#customBox input[type=color]', (els) => els.length);
+  ok(colorInputs >= 10, 'настраиваются поверхности, текст и подтипы кнопок', 'полей: ' + colorInputs);
+  await page.evaluate(() => { prefs.custom = { ...CUSTOM_DEFAULTS }; prefs.save(); applyPrefs(); });
   await page.fill('#themeName', 'Моя ночь');
   await page.click('#themeSave');
   await page.waitForTimeout(300);
@@ -159,6 +185,12 @@ mock.listen(8788, '127.0.0.1', () => updMock.listen(8790, '127.0.0.1', async () 
   await page.screenshot({ path: '/home/user/OmniPanel/docs/screens/screenshot-updates.png' });
 
   ok(await page.$eval('.prefs-tab[data-cat="upd"]', (e) => e.classList.contains('has-new')), 'на вкладке появился маркер обновления');
+  const pill = await page.evaluate(() => {
+    const el = document.getElementById('updPill');
+    return { shown: el && !el.classList.contains('hidden'), text: el ? el.textContent.trim() : '', anim: el ? getComputedStyle(el).animationName : '' };
+  });
+  ok(pill.shown && pill.text.includes(UPD_VERSION), 'в шапке мерцает плашка обновления', JSON.stringify(pill));
+  ok(pill.anim === 'updBlink', 'плашка мерцает (анимация)', pill.anim);
   await clearToasts(page);
   const savedCfg = await page.evaluate(() => window.desktop.updConfig());
   ok(savedCfg.repo === 'u/r' && savedCfg.branch === 'main' && savedCfg.auto === true, 'канал сохранён в настройках', JSON.stringify(savedCfg.repo));

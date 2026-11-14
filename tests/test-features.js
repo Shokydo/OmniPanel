@@ -2,7 +2,7 @@
 //  • полный server.properties (64 параметра, свои ключи плагинов, запись)
 //  • добавление сервера из GitHub (скачивание архива репозитория)
 //  • вход в аккаунт GitHub по коду (без Client ID — понятная ошибка)
-//  • полоса полного экрана: иконка, «сервер — состояние», три кнопки
+//  • полоса полного экрана: иконка, «сервер — состояние», кнопки управления
 //  • иконка сервера: смещение и масштаб реально попадают в итог 1:1
 // Запуск: xvfb-run -a node tests/test-features.js <playwright> <electron>
 const pwPath = process.argv[2] || 'playwright';
@@ -145,7 +145,7 @@ mock.listen(8791, '127.0.0.1', async () => {
   ok(idSet === 'Iv1.testclient', 'Client ID сохраняется');
 
   /* ─────────── 4. полоса полного экрана ─────────── */
-  console.log('\n=== полный экран: иконка, состояние, три кнопки ===');
+  console.log('\n=== полный экран: иконка, состояние, кнопки управления ===');
   const bar = await page.evaluate(async () => {
     document.body.classList.add('is-fullscreen');
     window.dispatchEvent(new Event('resize'));
@@ -162,7 +162,7 @@ mock.listen(8791, '127.0.0.1', async () => {
   ok(bar.shown, 'полоса видна в полном экране');
   ok(bar.hasIcon, 'слева иконка');
   ok(/Мир друзей/.test(bar.text) && /остановлен/.test(bar.text), 'по центру «сервер — состояние»', bar.text);
-  ok(bar.buttons === 3, 'справа три кнопки', 'кнопок: ' + bar.buttons);
+  ok(bar.buttons >= 3, 'справа кнопки управления', 'кнопок: ' + bar.buttons);
   ok(bar.titlebarHidden, 'своя шапка окна скрыта');
 
   const live = await page.evaluate(async () => {

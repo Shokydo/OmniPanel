@@ -1,14 +1,15 @@
 'use strict';
 /**
- * Открытие папок и файлов в VS Code.
- * Ищем `code` в PATH и в типовых местах установки, потому что на Windows
- * PATH обновляется только после перезапуска терминала/проводника.
+ * Открытие папок и файлов во внешнем редакторе кода.
+ * Ищем бинарник редактора в PATH и в типовых местах установки, потому что
+ * на Windows PATH обновляется только после перезапуска проводника.
+ * Если редактор не найден — открываем путь системным приложением.
  */
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-function candidates() {
+function editorBins() {
   const out = [];
   if (process.platform === 'win32') {
     const local = process.env.LOCALAPPDATA;
@@ -48,25 +49,36 @@ function run(bin, args) {
   });
 }
 
-/** Открывает папку или файл в VS Code. */
-async function openInVSCode(target) {
+/** Открывает папку или файл в редакторе кода. */
+async function openInEditor(target) {
   if (!target) return { ok: false, error: 'Путь не указан' };
   let full = target;
   try { full = path.resolve(target); } catch { /* оставляем как есть */ }
   if (!fs.existsSync(full)) return { ok: false, error: 'Не найдено: ' + full };
 
   let lastError = '';
-  for (const bin of candidates()) {
+  for (const bin of editorBins()) {
     if (bin.includes(path.sep) && !fs.existsSync(bin)) continue;
     const res = await run(bin, ['--reuse-window', full]);
-    if (res.ok) return { ok: true, editor: 'VS Code', bin };
+    if (res.ok) return { ok: true, editor: 'editor', bin };
     lastError = res.error || '';
   }
+
+  // редактора нет — открываем системным приложением, чтобы кнопка не была пустой
+  try {
+    const { shell } = require('electron');
+    const err = await shell.openPath(full);
+    if (!err) return { ok: true, editor: 'system', bin: '' };
+    lastError = err;
+  } catch (e) {
+    lastError = e.message;
+  }
+
   return {
     ok: false,
-    error: 'VS Code не найден. Установи его или добавь команду code в PATH.'
-      + (lastError ? ' (' + lastError.slice(0, 120) + ')' : ''),
+    error: 'Не удалось открыть путь'
+      + (lastError ? ' (' + String(lastError).slice(0, 120) + ')' : ''),
   };
 }
 
-module.exports = { openInVSCode };
+module.exports = { openInEditor };

@@ -22,7 +22,7 @@
 #define APP_EXE "OmniPanel.exe"
 #define UPDATE_REPO "Shokydo/OmniPanel"
 #define UPDATE_BRANCH "main"
-#define APP_VERSION "1.15.0"
+#define APP_VERSION "1.16.0"
 
 /* ─────────────────────────── переносимое: полезная нагрузка ─────────────────────────── */
 
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
   printf("  Что будет сделано:\n");
   printf("    1. распакуется панель в папку пользователя (права админа не нужны)\n");
   printf("    2. на рабочем столе и в меню «Пуск» появятся ярлыки\n");
-  printf("    3. включится автообновление из GitHub (как в Discord, само)\n");
+  printf("    3. включится автообновление из GitHub — само, без вопросов\n");
   if (dir_exists(install)) {
     color(1);
     printf("\n  В папке уже есть панель: файлы обновятся, а настройки,\n");
