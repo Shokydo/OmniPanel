@@ -303,6 +303,14 @@ async function main() {
     console.log('\n2/3 релиз…');
     rel = await ensureRelease(token, repo, version, notes);
     console.log(`   ${rel.created ? 'создан' : 'уже был'} релиз ${rel.tag}`);
+    /* архив кода тоже кладём в релиз: он отдаётся хранилищем ассетов,
+       а не raw-кэшем GitHub, поэтому обновление сразу после релиза не ждёт пять минут */
+    try {
+      const codeAsset = await uploadAsset(token, repo, rel.release, codeLocal, 'OmniPanel-code.zip');
+      console.log(`   архив кода к релизу: ${codeAsset.name} (${(codeAsset.size / 1048576).toFixed(1)} МБ)`);
+    } catch (err) {
+      console.log('   архив кода к релизу не приложился: ' + err.message);
+    }
     if (setupFile) {
       console.log('\n3/4 установщик к релизу…');
       const setupName = `OmniPanel_setup-${version}.exe`;

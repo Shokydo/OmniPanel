@@ -1089,6 +1089,7 @@ function wireIpc() {
          скачивание, если CDN отдал предыдущую версию файла */
       const got = await updater.downloadChecked(last.code.url, file, {
         token: accountToken(),
+        accept: last.code.accept || '',
         sha256: last.code.sha256 || '',
         onProgress: (p) => updSend('upd:progress', { phase: 'download', ...p }),
       });

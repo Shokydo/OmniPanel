@@ -80,7 +80,7 @@ function request(url, opts = {}, redirects = 0) {
     const req = mod.get(u, {
       headers: {
         'User-Agent': 'OmniPanel-updater',
-        Accept: 'application/json, application/octet-stream, */*',
+        Accept: opts.accept || 'application/json, application/octet-stream, */*',
         ...safeToken(url, opts.token),
       },
       timeout: opts.timeout || 12000,
@@ -205,9 +205,35 @@ async function downloadChecked(url, dest, opts = {}) {
   throw new Error(lastError || 'файл не скачался');
 }
 
-/** update.json из ветки репозитория. */
+/**
+ * update.json из ветки репозитория.
+ *
+ * raw.githubusercontent.com кэширует файлы на пять минут и при этом игнорирует
+ * параметр-обходчик в адресе, поэтому сразу после релиза оттуда приходит прошлая
+ * версия. Сначала спрашиваем API (он отдаёт актуальное дерево), и только если
+ * API недоступен — идём на raw.
+ */
 async function fromManifest({ repo, branch = 'main', token }) {
   const base = `${rawBase()}/${repo}/${branch}`;
+
+  const viaApi = await fetchText(
+    `${apiBase()}/repos/${repo}/contents/update.json?ref=${encodeURIComponent(branch)}`,
+    { token, accept: 'application/vnd.github.raw' },
+  ).catch(() => null);
+  const apiJson = (() => {
+    if (!viaApi || !viaApi.ok || !viaApi.text) return null;
+    try { return JSON.parse(viaApi.text); } catch { return null; }
+  })();
+  const apiBaseUrl = `${apiBase()}/repos/${repo}/contents`;
+  const fromApi = apiJson && apiJson.version ? {
+    source: 'файл update.json',
+    version: String(apiJson.version),
+    notes: String(apiJson.notes || ''),
+    code: resolveApiAsset(apiJson.code, apiBaseUrl, branch),
+    full: resolveApiAsset(apiJson.full, apiBaseUrl, branch),
+  } : null;
+  if (fromApi) return fromApi;
+
   const r = await fetchJson(`${base}/update.json?_=${Date.now()}`, { token });
   if (!r.ok || !r.json) return null;
   const m = r.json;
@@ -218,6 +244,28 @@ async function fromManifest({ repo, branch = 'main', token }) {
     notes: String(m.notes || ''),
     code: resolveAsset(m.code, base),
     full: resolveAsset(m.full, base),
+  };
+}
+
+/**
+ * Ссылка на файл из update.json, но через API — там нет пятиминутного кэша.
+ * API отдаёт содержимое файла, если попросить Accept: application/vnd.github.raw.
+ */
+function resolveApiAsset(spec, apiContents, branch) {
+  if (!spec) return null;
+  const rel = typeof spec === 'string' ? spec : String(spec.file || '');
+  const size = typeof spec === 'string' ? 0 : Number(spec.size) || 0;
+  const sha256 = typeof spec === 'string' ? '' : String(spec.sha256 || '');
+  if (!rel) {
+    if (typeof spec === 'object' && spec.url) return resolveAsset(spec, '');
+    return null;
+  }
+  const clean = rel.replace(/^\/+/, '');
+  return {
+    url: `${apiContents}/${clean}?ref=${encodeURIComponent(branch)}`,
+    size,
+    sha256,
+    accept: 'application/vnd.github.raw',
   };
 }
 
@@ -262,7 +310,10 @@ async function check(opts = {}) {
 
   const latest = found.reduce((a, b) => (compareVersions(b.version, a.version) > 0 ? b : a));
   // недостающие ссылки добираем из второго источника
-  const code = latest.code || (found.find((f) => f.code) || {}).code || null;
+  /* архив кода лучше брать из релиза: там отдаёт не raw-кэш, а хранилище ассетов.
+     raw.githubusercontent отдаёт до пяти минут прошлую версию, поэтому он — последний. */
+  const codeList = [rel, man].filter(Boolean).map((f) => f.code).filter(Boolean);
+  const code = codeList.find((c) => !/raw\.githubusercontent\.com/i.test(c.url)) || codeList[0] || null;
   const full = latest.full || (found.find((f) => f.full) || {}).full || null;
   const setup = latest.setup || (found.find((f) => f.setup) || {}).setup || null;
 

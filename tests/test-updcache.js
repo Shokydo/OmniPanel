@@ -74,6 +74,46 @@ const server = http.createServer((req, res) => {
   const busted = updater.bust('https://raw.githubusercontent.com/o/r/main/dist/x.zip?ref=main');
   ok(/_=\d+/.test(busted) && /ref=main/.test(busted), 'старые параметры сохранены', busted.slice(-40));
 
+  console.log('\n=== update.json: API свежий, raw отдаёт прошлую версию ===');
+  const NEWVER = { version: '1.19.3', notes: 'новая', code: { file: 'dist/OmniPanel-code.zip', size: FRESH.length, sha256: sha(FRESH) }, full: null };
+  const OLDVER = { version: '1.19.2', notes: 'прошлая', code: { file: 'dist/OmniPanel-code.zip', size: STALE.length, sha256: sha(STALE) }, full: null };
+  const gh = http.createServer((req, res) => {
+    const json = (obj) => {
+      const body = JSON.stringify(obj);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+      res.end(body);
+    };
+    // API всегда отдаёт актуальное
+    if (req.url.startsWith('/api/repos/u/r/contents/update.json')) {
+      const body = JSON.stringify(NEWVER);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+      return res.end(body);
+    }
+    if (req.url.startsWith('/api/repos/u/r/releases/latest')) return json({ message: 'Not Found' });
+    // raw «закэширован»: отдаёт прошлую версию, параметр в адресе игнорирует
+    if (req.url.startsWith('/raw/u/r/main/update.json')) return json(OLDVER);
+    // API-ссылка на архив кода: отдаём файл только с правильным Accept
+    if (req.url.startsWith('/api/repos/u/r/contents/dist/OmniPanel-code.zip')) {
+      if (!/application\/vnd\.github\.raw/.test(String(req.headers.accept))) return json({ message: 'нужен Accept' });
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': FRESH.length });
+      return res.end(FRESH);
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise((r) => gh.listen(0, '127.0.0.1', r));
+  const port = gh.address().port;
+  process.env.OMNI_UPDATE_API = `http://127.0.0.1:${port}/api`;
+  process.env.OMNI_UPDATE_RAW = `http://127.0.0.1:${port}/raw`;
+
+  const info = await updater.check({ repo: 'u/r', current: '1.19.0' });
+  ok(info.ok && info.latest === '1.19.3', 'версия берётся из API, а не из кэша raw', info.latest);
+  ok(/\/api\//.test(info.code.url || ''), 'ссылка на архив ведёт в API, а не в raw-кэш', (info.code.url || '').slice(0, 60));
+  ok(!!info.code.accept, 'ссылке нужен заголовок Accept', info.code.accept);
+  const fresh = await updater.downloadChecked(info.code.url, dest, { sha256: info.code.sha256, accept: info.code.accept });
+  ok(fresh.attempts === 1 && fs.readFileSync(dest).equals(FRESH), 'архив скачался свежим с первой попытки');
+  gh.close();
+
   server.close();
   console.log(fails ? `\nПРОВАЛОВ: ${fails}` : '\nВСЕ ПРОВЕРКИ ПРОЙДЕНЫ');
   process.exit(fails ? 1 : 0);
