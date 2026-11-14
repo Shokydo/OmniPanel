@@ -97,6 +97,26 @@ const httpApi = {
   async filesEditor(id, rel) { return post('/api/files/editor', { id, rel }); },
   async serverEditor(id) { return post('/api/server/editor', { id }); },
   async openEditor(p) { return post('/api/server/editor', { path: p }); },
+  async filesUpload(id, relDir, name, data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    return post('/api/files/upload', { id, rel: relDir, name, data: btoa(bin) });
+  },
+  async portsCheck(id) { return (await fetch('/api/ports/check?id=' + encodeURIComponent(id))).json(); },
+  async portsFree(id, from) { return (await fetch('/api/ports/free?id=' + encodeURIComponent(id) + '&from=' + encodeURIComponent(from))).json(); },
+  async portsSet(id, key, port) { return post('/api/ports/set', { id, key, port }); },
+  async portsOwn() { return { ok: false, ports: [] }; },
+  async modrinthSearch(opts) {
+    const q = new URLSearchParams(opts || {}).toString();
+    return (await fetch('/api/modrinth/search?' + q)).json();
+  },
+  async modrinthDetect(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstalled(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstall(id, opts) { return post('/api/modrinth/install', { id, ...(opts || {}) }); },
+  async modrinthVersions() { return { ok: false, versions: [] }; },
+  async modrinthCategories() { return { ok: false, categories: [] }; },
+  async wallPalette() { return { ok: false, error: 'Подбор цвета работает только в exe-версии' }; },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },
   async iconToServer(cwd, dataUrl) { return post('/api/icon/to', { cwd, dataUrl }); },
@@ -182,7 +202,7 @@ const prefs = {
   theme: localStorage.getItem('lsp.theme') || 'dark',
   radius: localStorage.getItem('lsp.radius') || 'soft',
   startMode: localStorage.getItem('lsp.startMode') || 'window',
-  scale: Number(localStorage.getItem('lsp.scale') || 100),
+  scale: Number(localStorage.getItem('lsp.scale') || 0), // 0 — под размер окна
   notifSound: localStorage.getItem('lsp.notifSound') !== '0',
   notifMs: Number(localStorage.getItem('lsp.notifMs') || 4200),
   // фон панели: id встроенных обоев, 'custom' или 'none'
@@ -745,6 +765,14 @@ const S = {
   metrics: new Map(),  // id -> {cpu, rss, procs, history}
   backups: [],
   tab: 'console',
+  players: new Map(),   // id -> {names:Set, max, at}
+  issues: new Map(),    // id -> [{id, t, kind, line, stack}]
+  issuesNew: new Map(), // id -> сколько непрочитанных
+  addons: {               // вкладка плагинов
+    type: 'plugin', loader: '', version: '', category: '', sort: 'relevance',
+    query: '', hits: [], offset: 0, total: 0, loading: false,
+    info: null, installed: { plugins: [], mods: [] },
+  },
   scan: {
     running: false, results: [], seen: new Set(), byPath: new Map(),
     types: ['minecraft', 'script', 'exe', 'node', 'python'],
@@ -946,6 +974,7 @@ async function fmRenderDir(rel, host, depth, isRoot = false) {
     row.className = 'fm-row' + (it.path === FM.openPath ? ' active' : '');
     row.dataset.path = it.path;
     row.dataset.dir = it.isDir ? '1' : '';
+    if (it.isDir) row.dataset.dropRel = it.path;
     const pad = 7 + depth * 12;
     row.style.paddingLeft = pad + 'px';
     const open = FM.expanded.has(it.path);
@@ -1688,6 +1717,15 @@ function setTab(name) {
   if (name === 'tps') loadTpsTab();
   if (name === 'backups') loadBackups();
   if (name === 'files') fmLoadTree();
+  if (name === 'players') renderPlayers();
+  if (name === 'addons') {
+    addonsLoadInfo().then(() => { addonsCategories(); if (!S.addons.hits.length) addonsSearch(true); });
+  }
+  if (name === 'issues') {
+    const s = current();
+    if (s) { rescanIssues(s.id); markIssuesSeen(s.id); renderIssues(); }
+  }
+  hideCmdSuggest();
 }
 
 /* ═════════════════ вкладка производительности ═════════════════ */
@@ -2399,7 +2437,9 @@ function renderGrid() {
         ${STATE_LABEL[s.state] || s.state}
         ${s.state === 'running' && s.startedAt ? ` · ${fmtUptime(Date.now() - s.startedAt)} в работе` : ''}
       </div>
-      ${m && s.state === 'running' ? `<div class="sg-metrics"><span>CPU ${m.cpu != null ? m.cpu.toFixed(0) : '—'}%</span><span>RAM ${Math.round((m.rss || 0) / 1048576)} МБ</span></div>` : ''}
+      <div class="sg-metrics">${m && s.state === 'running'
+        ? `<span>CPU ${m.cpu != null ? m.cpu.toFixed(0) : '—'}%</span><span>RAM ${Math.round((m.rss || 0) / 1048576)} МБ</span>`
+        : '<span class="sg-metrics-off">CPU —</span><span class="sg-metrics-off">RAM —</span>'}</div>
       <div class="sg-actions">
         <button class="btn btn-mini sg-start" ${s.state !== 'stopped' ? 'disabled' : ''}>Старт</button>
         <button class="btn btn-mini sg-stop" ${s.state === 'stopped' ? 'disabled' : ''}>Стоп</button>
@@ -2541,7 +2581,79 @@ function hideContextMenu() {
 
 /* ═════════════════════ действия ═════════════════════ */
 
+/** Спрашивает, что делать с занятым портом. Возвращает {key, port} | 'force' | null. */
+function askPort(info) {
+  return new Promise((resolve) => {
+    const modal = $('portModal');
+    const input = $('portInput');
+    const list = $('portList');
+    const first = (info.conflicts[0] || info.busy[0] || {});
+    const lines = [];
+    for (const c of info.conflicts) {
+      lines.push(`<div class="port-row"><span class="port-num">${c.port}</span>`
+        + `<span class="port-what">${esc(c.label)} — уже занят сервером «${esc(c.serverName || '')}»</span></div>`);
+    }
+    for (const b of info.busy) {
+      lines.push(`<div class="port-row"><span class="port-num">${b.port}</span>`
+        + `<span class="port-what">${esc(b.label)} — занят другой программой</span></div>`);
+    }
+    list.innerHTML = lines.join('');
+    $('portText').textContent = info.conflicts.length
+      ? 'Этот сервер возьмёт тот же порт, что уже работает у другого сервера — вдвоём они не запустятся.'
+      : 'Порт уже занят другой программой на этом компьютере.';
+    input.value = String(first.port || 25565);
+
+    const close = (result) => {
+      modal.classList.add('hidden');
+      $('portApply').onclick = null;
+      $('portCancel').onclick = null;
+      $('portForce').onclick = null;
+      resolve(result);
+    };
+    modal.classList.remove('hidden');
+    Sound.play('nav');
+
+    API.portsFree(info.id, Number(first.port) || 25565).then((res) => {
+      if (res && res.ok && res.port) input.value = String(res.port);
+    }).catch(() => {});
+
+    $('portApply').onclick = () => {
+      const port = Number(input.value);
+      if (!Number.isFinite(port) || port < 1 || port > 65535) {
+        notify({ title: 'Порт не подходит', text: 'Нужно число от 1 до 65535', kind: 'err' });
+        return;
+      }
+      Sound.play('click');
+      close({ key: first.key, port });
+    };
+    $('portForce').onclick = () => { Sound.play('click'); close('force'); };
+    $('portCancel').onclick = () => { Sound.play('click'); close(null); };
+  });
+}
+
+/** Проверка портов перед стартом: если занято — предлагаем сменить порт. */
+async function startWithPortCheck(id) {
+  const s = (S.servers || []).find((x) => x.id === id);
+  if (!s || !API.portsCheck) return true;
+  const info = await API.portsCheck(id).catch(() => null);
+  if (!info || !info.ok || !s) return true;
+  const bad = (info.conflicts || []).length + (info.busy || []).length;
+  if (!bad) return true;
+  info.id = id;
+  const res = await askPort(info);
+  if (res == null) return false;
+  if (res === 'force') return true;
+  const set = await API.portsSet(id, res.key, res.port).catch(() => null);
+  if (!set || !set.ok) {
+    notify({ title: 'Порт не записался', text: (set && set.error) || 'нет доступа к server.properties', kind: 'err' });
+    return false;
+  }
+  notify({ title: 'Порт изменён', text: `${res.key} → ${res.port}`, kind: 'ok' });
+  return true;
+}
+
 async function doStart(id) {
+  if (!(await startWithPortCheck(id))) return;
   Sound.play('start');
   await API.start(id);
   setTimeout(refresh, 120);
@@ -2734,10 +2846,13 @@ function renderTps(s) {
 }
 
 function renderView() {
+  updateOnlineChip();
+  renderIssuesBadge();
   const s = current();
   if (!s) {
     el.empty.classList.remove('hidden');
     el.view.classList.add('hidden');
+    if (typeof fsbUpdate === 'function') fsbUpdate();
     return;
   }
   el.empty.classList.add('hidden');
@@ -2813,6 +2928,13 @@ async function loadLogs(id) {
   const seq = ++loadSeq;
   const logs = await API.logs(id);
   if (seq !== loadSeq) return;
+  LOG_CACHE.set(id, Array.isArray(logs) ? logs.slice(-2500) : []);
+  S.players.set(id, { names: new Set(), max: 0, at: 0 });
+  for (const e of LOG_CACHE.get(id)) playersOnLog(id, e.m || '');
+  S.issues.set(id, []);
+  S.issuesNew.set(id, 0);
+  rescanIssues(id);
+  if (id === S.currentId) { updateOnlineChip(); renderIssuesBadge(); renderPlayers(); }
   el.consoleEl.innerHTML = '';
   S.domLines = [];
   LOG_CACHE.set(id, logs.slice());
@@ -2831,6 +2953,11 @@ function selectServer(id) {
   renderSidebar();
   renderView();
   loadLogs(id);
+  updateOnlineChip();
+  renderIssuesBadge();
+  if (S.tab === 'players') renderPlayers();
+  if (S.tab === 'issues') renderIssues();
+  if (S.tab === 'addons') addonsLoadInfo().then(() => addonsSearch(true));
 }
 
 async function refresh() {
@@ -3172,6 +3299,8 @@ async function runScan(roots) {
 function bindSubscriptions() {
   API.onLog(({ id, entry }) => {
     pushLog(id, entry);
+    playersOnLog(id, entry.m || '');
+    issuesOnLog(id, entry);
     if (id !== S.currentId) return;
     if (el.consoleEl.querySelector('.placeholder')) el.consoleEl.innerHTML = '';
     appendLine(entry);
@@ -3180,6 +3309,16 @@ function bindSubscriptions() {
   API.onState(({ id, state, pid, startedAt }) => {
     const s = S.servers.find((x) => x.id === id);
     if (s) { s.state = state; s.pid = pid; s.startedAt = startedAt; }
+    if (state === 'running') {
+      const st = playersState(id);
+      st.names.clear();
+      st.at = Date.now();
+    }
+    if (state === 'stopped') {
+      playersState(id).names.clear();
+      playersState(id).at = 0;
+    }
+    updateOnlineChip();
     renderSidebar();
     if (id === S.currentId) renderView();
     if (!$('gridModal').classList.contains('hidden')) renderGrid();
@@ -3193,6 +3332,10 @@ function bindSubscriptions() {
 
   API.onLogsCleared(({ id }) => {
     LOG_CACHE.set(id, []);
+    S.issues.set(id, []);
+    S.issuesNew.set(id, 0);
+    renderIssuesBadge();
+    if (id === S.currentId) renderIssues();
     if (id === S.currentId) {
       el.consoleEl.innerHTML = '<div class="placeholder">Консоль очищена.</div>';
       S.domLines = [];
@@ -3304,7 +3447,7 @@ function applyPrefs() {
   for (const chip of document.querySelectorAll('#scaleGrid .chip')) {
     chip.classList.toggle('active', Number(chip.dataset.scale) === prefs.scale);
   }
-  document.documentElement.style.zoom = prefs.scale === 100 ? '' : String(prefs.scale / 100);
+  applyScale();
   const volEl = $('pVolVal');
   if (volEl) volEl.textContent = Math.round(prefs.volume * 100) + '%';
   $('pNotif').checked = !!prefs.notif;
@@ -3314,6 +3457,39 @@ function applyPrefs() {
     chip.classList.toggle('active', Number(chip.dataset.ms) === Number(prefs.notifMs));
   }
 }
+
+/** Масштаб интерфейса: «под размер окна» или выбранный вручную. */
+function autoScalePercent() {
+  const w = window.innerWidth || 1440;
+  const h = window.innerHeight || 900;
+  const byW = w / 1440;
+  const byH = h / 900;
+  const k = Math.min(byW, byH);
+  const pct = Math.round((Math.max(0.85, Math.min(1.3, k)) * 100) / 5) * 5;
+  return Math.max(85, Math.min(130, pct));
+}
+
+function currentScalePercent() {
+  return prefs.scale > 0 ? prefs.scale : autoScalePercent();
+}
+
+function applyScale() {
+  const pct = currentScalePercent();
+  const k = pct / 100;
+  document.documentElement.style.zoom = pct === 100 ? '' : String(k);
+  document.documentElement.style.setProperty('--ui-zoom', String(k));
+  document.documentElement.dataset.scale = String(pct);
+}
+
+let scaleResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (prefs.scale > 0) return;
+  clearTimeout(scaleResizeTimer);
+  scaleResizeTimer = setTimeout(() => {
+    applyScale();
+    if (typeof fsbUpdate === 'function') fsbUpdate();
+  }, 160);
+});
 
 /** Глубина сканирования: одна кнопка, четыре ступени. */
 const SCAN_DEPTHS = [4, 5, 7, 10];
@@ -3866,6 +4042,8 @@ function bindActions() {
   // свои кнопки окна: скрыть · уменьшить · развернуть · закрыть
   $('winHide').onclick = () => API.winClose();
   $('winMin').onclick = () => API.winMinimize();
+  const prefsBtn = $('tbPrefs');
+  if (prefsBtn) prefsBtn.onclick = () => openPrefs();
   $('winClose').onclick = doCloseApp;
   $('winMax').onclick = async () => {
     const st = await API.winToggleMax();
@@ -3876,7 +4054,7 @@ function bindActions() {
   const tb = document.querySelector('.titlebar');
   if (tb) {
     tb.addEventListener('dblclick', async (e) => {
-      if (e.target.closest('.win-ctrl') || e.target.closest('.tb-brand')) return;
+      if (e.target.closest('.win-ctrl') || e.target.closest('.tb-left')) return;
       setWinIcons(await API.winToggleMax());
     });
   }
@@ -4103,6 +4281,45 @@ function bindActions() {
     toast('Настройки оформления сброшены', 'ok');
   };
 
+  // вкладки плагинов, игроков и ошибок
+  bindAddons();
+  bindFileDrop();
+  bindCmdComplete();
+
+  const playersRefresh = $('playersRefresh');
+  if (playersRefresh) {
+    playersRefresh.onclick = async () => {
+      const s = current();
+      if (!s) return;
+      if (s.state !== 'running') { notify({ title: 'Сервер остановлен', kind: 'warn' }); return; }
+      await API.command(s.id, 'list');
+      Sound.play('click');
+    };
+  }
+  const issuesScan = $('issuesScan');
+  if (issuesScan) {
+    issuesScan.onclick = () => {
+      const s = current();
+      if (!s) return;
+      rescanIssues(s.id);
+      const found = (S.issues.get(s.id) || []).length;
+      notify({ title: found ? 'Ошибки найдены' : 'Ошибок нет', text: found ? 'всего: ' + found : '', kind: found ? 'err' : 'ok' });
+    };
+  }
+  const issuesClear = $('issuesClear');
+  if (issuesClear) {
+    issuesClear.onclick = () => {
+      const s = current();
+      if (!s) return;
+      S.issues.set(s.id, []);
+      S.issuesNew.set(s.id, 0);
+      renderIssues();
+      renderIssuesBadge();
+    };
+  }
+  const fromWall = $('themeFromWall');
+  if (fromWall) fromWall.onclick = () => themeFromWallpaper();
+
   // вкладка TPS
   $('tpsRange').onchange = () => renderTpsTab();
   $('tpsClearBtn').onclick = async () => {
@@ -4249,15 +4466,22 @@ function bindActions() {
 
 /** Слева — иконка, по центру — «Сервер — состояние», справа — три кнопки. */
 function fsbUpdate() {
-  const box = $('fsbText');
-  if (!box) return;
   const s = S.servers.find((x) => x.id === S.currentId);
-  if (!s) { box.textContent = 'OmniPanel — сервер не выбран'; return; }
-  const state = STATE_LABEL[s.state] || s.state || 'остановлен';
-  const up = s.state === 'running' && s.startedAt ? ` · ${fmtUptime(Date.now() - s.startedAt)}` : '';
-  box.textContent = `${s.name} — ${state}${up}`;
-  box.classList.toggle('live', s.state === 'running');
-  box.classList.toggle('warn', s.state === 'stopping');
+  const text = (() => {
+    if (!s) return 'OmniPanel — сервер не выбран';
+    const state = STATE_LABEL[s.state] || s.state || 'остановлен';
+    const up = s.state === 'running' && s.startedAt ? ` · ${fmtUptime(Date.now() - s.startedAt)}` : '';
+    return `${s.name} — ${state}${up}`;
+  })();
+  for (const id of ['fsbText', 'tbText']) {
+    const box = $(id);
+    if (!box) continue;
+    box.textContent = text;
+    if (s) {
+      box.classList.toggle('live', s.state === 'running');
+      box.classList.toggle('warn', s.state === 'stopping');
+    }
+  }
 }
 
 function bindFsBar() {
@@ -4588,19 +4812,11 @@ function gdStop(msg) {
 }
 
 async function gdStart() {
-  const clientId = await API.ghOauthClientId().catch(() => '');
-  if (!clientId) {
-    $('ghClientIdBox').classList.remove('hidden');
-    notify({ title: 'Нужен Client ID', text: 'Впиши Client ID своего OAuth App — панель покажет код для входа.', kind: 'warn' });
-    return;
-  }
-  $('ghClientIdBox').classList.add('hidden');
   const btn = $('ghDeviceBtn');
   btn.disabled = true;
   const res = await API.ghDeviceStart();
   btn.disabled = false;
   if (!res || !res.ok) {
-    if (res && res.needClientId) $('ghClientIdBox').classList.remove('hidden');
     notify({ title: 'Не удалось начать вход', text: (res && res.error) || 'ошибка GitHub', kind: 'err' });
     return;
   }
@@ -4648,22 +4864,8 @@ function bindGithubDevice() {
   };
   const stop = $('ghDeviceStop');
   if (stop) stop.onclick = () => { gdStop('вход отменён'); gdShow(false); };
-  const save = $('ghClientSave');
-  if (save) save.onclick = async () => {
-    const id = $('ghClientId').value.trim();
-    if (!id) { toast('Вставь Client ID', 'err'); return; }
-    await API.ghSetOauthClientId(id);
-    $('ghClientIdBox').classList.add('hidden');
-    notify({ title: 'Client ID сохранён', kind: 'ok' });
-  };
-  const make = $('ghClientMake');
-  if (make) make.onclick = () => API.ghOpenExternal('https://github.com/settings/applications/new');
   const toggle = $('ghTokenToggle');
   if (toggle) toggle.onclick = () => $('ghTokenRow').classList.toggle('hidden');
-  API.ghOauthClientId().then((id) => {
-    if (id) $('ghClientId').value = id;
-    else $('ghClientIdBox').classList.remove('hidden');
-  }).catch(() => {});
 }
 
 /* ═════════════════════ обновления из GitHub ═════════════════════ */
@@ -4901,6 +5103,791 @@ function bindUpdates() {
       updRenderState(info);
     });
   }
+}
+
+/* ═════════════════════ игроки онлайн ═════════════════════ */
+
+const PLAYER_RE = [
+  // Paper / Spigot / Vanilla
+  { re: /^([A-Za-z0-9_]{3,16})\s+joined the game/i, on: true },
+  { re: /^([A-Za-z0-9_]{3,16})\s+left the game/i, on: false },
+  // Forge / старые ядра
+  { re: /^([A-Za-z0-9_]{3,16}) ?\[\/[0-9.]+\] logged in with entity id/i, on: true },
+  { re: /^([A-Za-z0-9_]{3,16})\s+lost connection/i, on: false },
+  // ответ на list
+  { re: /There are (\d+) of a max(?:imum)? of (\d+) players online:?\s*(.*)$/i, list: true },
+  { re: /There are (\d+)\/(\d+) players online:?\s*(.*)$/i, list: true },
+];
+
+function playersState(id) {
+  if (!S.players.has(id)) S.players.set(id, { names: new Set(), max: 0, at: 0 });
+  return S.players.get(id);
+}
+
+function playersSet(id, names, max) {
+  const st = playersState(id);
+  st.names = new Set(names);
+  if (max) st.max = max;
+  st.at = Date.now();
+  if (id === S.currentId) { renderPlayers(); updateOnlineChip(); }
+}
+
+function playersOnLog(id, line) {
+  const text = stripLogPrefix(line);
+  for (const rule of PLAYER_RE) {
+    const m = text.match(rule.re);
+    if (!m) continue;
+    if (rule.list) {
+      const names = m[3].split(/,\s*/).map((x) => x.trim()).filter(Boolean);
+      playersSet(id, names, Number(m[2]) || names.length);
+      return;
+    }
+    const name = m[1];
+    const st = playersState(id);
+    if (rule.on) st.names.add(name);
+    else st.names.delete(name);
+    st.at = Date.now();
+    if (id === S.currentId) { renderPlayers(); updateOnlineChip(); }
+    return;
+  }
+}
+
+function updateOnlineChip() {
+  const chip = $('onlineChip');
+  if (!chip) return;
+  const s = current();
+  const st = s ? S.players.get(s.id) : null;
+  const count = st ? st.names.size : 0;
+  const show = !!s && (s.state === 'running' || count > 0);
+  chip.classList.toggle('hidden', !show);
+  const txt = $('onlineText');
+  if (txt) txt.textContent = st && st.max ? `${count} из ${st.max}` : String(count);
+}
+
+function headUrl(name, size = 40) {
+  return `https://mc-heads.net/avatar/${encodeURIComponent(name)}/${size}`;
+}
+
+function renderPlayers() {
+  const host = $('playerList');
+  if (!host) return;
+  const s = current();
+  if (!s) { host.innerHTML = ''; return; }
+  const st = playersState(s.id);
+  const names = [...st.names].sort((a, b) => a.localeCompare(b));
+  const sub = $('playersSub');
+  if (sub) {
+    sub.textContent = st.max
+      ? `онлайн ${names.length} из ${st.max}${st.at ? ' · обновлено ' + fmtTime(st.at) : ''}`
+      : `онлайн ${names.length}${st.at ? ' · обновлено ' + fmtTime(st.at) : ''}`;
+  }
+  if (!names.length) {
+    host.innerHTML = `<div class="empty-note">${s.state === 'running' ? 'игроков нет' : 'сервер не запущен'}</div>`;
+    return;
+  }
+  host.innerHTML = '';
+  for (const name of names) {
+    const card = document.createElement('div');
+    card.className = 'player-card';
+    card.innerHTML = `
+      <span class="pl-ava"><img src="${headUrl(name)}" alt="" loading="lazy" /></span>
+      <span class="pl-name">${esc(name)}</span>
+      <button class="btn btn-mini pl-kick">Кик</button>`;
+    const img = card.querySelector('img');
+    img.onerror = () => { card.querySelector('.pl-ava').textContent = name.slice(0, 1).toUpperCase(); };
+    card.querySelector('.pl-kick').onclick = async () => {
+      await API.command(s.id, `kick ${name}`);
+      notify({ title: 'Команда отправлена', text: `kick ${name}`, kind: 'info' });
+    };
+    host.appendChild(card);
+  }
+}
+
+/* ═════════════════════ ошибки при запуске ═════════════════════ */
+
+const ISSUE_RULES = [
+  { re: /\[(?:ERROR|SEVERE|FATAL)\]|\[(?:ERROR|SEVERE|FATAL)\]/i, kind: 'error' },
+  { re: /\b(?:java|javax|net|io|org|com|kotlin)\.[\w.$]+(?:Exception|Error)\b/, kind: 'error' },
+  { re: /\b(?:Caused by|Exception in thread)\b/, kind: 'error' },
+  { re: /\bOutOfMemoryError\b|\bOutOfMemory\b/, kind: 'crash' },
+  { re: /Address already in use|EADDRINUSE/i, kind: 'crash' },
+  { re: /UnsupportedClassVersionError|Unsupported class file major version/i, kind: 'crash' },
+  { re: /Failed to (?:start|load|bind|initialize|download|create)\b/i, kind: 'error' },
+  { re: /Could not (?:load|find|open|start|bind)\b/i, kind: 'error' },
+  { re: /(?:^|\s)(?:Error|ERROR):\s/, kind: 'error' },
+  { re: /(?:Traceback \(most recent call last\))/, kind: 'error' },
+  { re: /EROFS|ENOENT|EACCES|permission denied/i, kind: 'error' },
+  { re: /Процесс завершён \(код: [1-9]/ , kind: 'exit' },
+];
+
+const STACK_RE = /^\s*(?:at\s|\.\.\.\s*\d+\s*more|Caused by:|\tat\s|File\s")/;
+
+const ISSUE_LABEL = { error: 'ошибка', crash: 'падение', exit: 'выход с ошибкой', warn: 'предупреждение' };
+
+function stripLogPrefix(line) {
+  return String(line)
+    .replace(/^\[[^\]]*\]\s*/, '')
+    .replace(/^\[[^\]]*\/[A-Z]+\]:\s*/, '')
+    .replace(/^\[[^\]]+\]:\s*/, '')
+    .trim();
+}
+
+function issuesState(id) {
+  if (!S.issues.has(id)) S.issues.set(id, []);
+  return S.issues.get(id);
+}
+
+function issuesAdd(id, kind, line, extraStack = '') {
+  const list = issuesState(id);
+  const clean = stripLogPrefix(line).slice(0, 400);
+  const key = clean.toLowerCase();
+  const found = list.find((it) => it.key === key);
+  if (found) {
+    found.count += 1;
+    found.t = Date.now();
+    if (extraStack && !found.stack.length) found.stack = [extraStack];
+  } else {
+    list.push({ key, kind, line: clean, stack: extraStack ? [extraStack] : [], t: Date.now(), count: 1 });
+    if (list.length > 200) list.splice(0, list.length - 200);
+    bumpIssueCounter(id, clean);
+  }
+  if (id === S.currentId) {
+    renderIssues();
+    if (S.tab === 'issues') markIssuesSeen(id);
+  }
+}
+
+/** Счётчик непрочитанных: растёт плашкой на вкладке и в шапке. */
+function bumpIssueCounter(id, line) {
+  const srv = S.servers.find((x) => x.id === id);
+  const name = srv ? srv.name : 'сервер';
+  const has = (S.issuesNew.get(id) || 0);
+  if (!has) {
+    const card = notify({
+      title: `Ошибка: ${name}`,
+      text: line.slice(0, 150),
+      kind: 'err',
+      ms: 9000,
+      onClick: () => { if (id === S.currentId) setTab('issues'); },
+    });
+    if (card) {
+      card.classList.add('blink');
+      card.dataset.issueFor = id;
+    }
+  }
+  S.issuesNew.set(id, has + 1);
+  renderIssuesBadge();
+}
+
+function renderIssuesBadge() {
+  const badge = $('issuesBadge');
+  if (!badge) return;
+  const s = current();
+  const n = s ? (S.issuesNew.get(s.id) || 0) : 0;
+  badge.textContent = String(n);
+  badge.classList.toggle('hidden', n <= 0);
+  const tab = document.querySelector('.tab[data-tab="issues"]');
+  if (tab) tab.classList.toggle('has-alert', n > 0);
+}
+
+/** Открыли вкладку — счётчик обнуляется, мерцание прекращается. */
+function markIssuesSeen(id) {
+  S.issuesNew.set(id, 0);
+  renderIssuesBadge();
+  const srv = S.servers.find((x) => x.id === id);
+  for (const card of el.toasts.querySelectorAll('.notif.blink')) {
+    if (card.dataset.issueFor === id) {
+      card.classList.remove('blink');
+      card.classList.add('seen');
+      if (srv) {
+        const t = card.querySelector('.n-title');
+        if (t) t.textContent = `Прочитано: ${srv.name}`;
+      }
+    }
+  }
+}
+
+function issuesOnLog(id, entry) {
+  const line = entry.m || '';
+  const clean = stripLogPrefix(line);
+
+  // продолжение стека приклеиваем к последней ошибке
+  if (STACK_RE.test(line) || STACK_RE.test(clean)) {
+    const list = issuesState(id);
+    const last = list[list.length - 1];
+    if (last && Date.now() - last.t < 60000 && last.stack.length < 12) {
+      last.stack.push(clean.slice(0, 240));
+      if (id === S.currentId && S.tab === 'issues') renderIssues();
+      return;
+    }
+  }
+
+  for (const rule of ISSUE_RULES) {
+    if (rule.re.test(clean)) {
+      issuesAdd(id, rule.kind, line);
+      return;
+    }
+  }
+}
+
+function rescanIssues(id) {
+  const logs = LOG_CACHE.get(id) || [];
+  const keep = new Set((S.issues.get(id) || []).map((i) => i.key));
+  S.issues.set(id, (S.issues.get(id) || []).filter((i) => keep.has(i.key)));
+  let stack = [];
+  for (const e of logs) {
+    const clean = stripLogPrefix(e.m || '');
+    if (STACK_RE.test(clean)) { stack.push(clean.slice(0, 240)); continue; }
+    let hit = null;
+    for (const rule of ISSUE_RULES) if (rule.re.test(clean)) { hit = rule; break; }
+    if (hit) {
+      issuesAdd(id, hit.kind, e.m || '', stack.join('\n'));
+      stack = [];
+    } else if (clean) {
+      stack = [];
+    }
+  }
+  if (id === S.currentId) renderIssues();
+}
+
+function renderIssues() {
+  const host = $('issuesList');
+  if (!host) return;
+  const s = current();
+  if (!s) { host.innerHTML = ''; return; }
+  const list = (S.issues.get(s.id) || []).slice().reverse();
+  const sub = $('issuesSub');
+  if (sub) {
+    sub.textContent = list.length
+      ? `найдено ${list.length} разных ошибок · всего повторов: ${list.reduce((a, b) => a + b.count, 0)}`
+      : 'ошибок не найдено';
+  }
+  if (!list.length) {
+    host.innerHTML = '<div class="empty-note">в логах чисто</div>';
+    return;
+  }
+  host.innerHTML = '';
+  for (const it of list) {
+    const card = document.createElement('div');
+    card.className = 'issue-card kind-' + it.kind;
+    card.innerHTML = `
+      <div class="issue-head">
+        <span class="issue-kind">${esc(ISSUE_LABEL[it.kind] || 'ошибка')}</span>
+        <span class="issue-time">${fmtTime(it.t)}</span>
+        ${it.count > 1 ? `<span class="issue-count">×${it.count}</span>` : ''}
+      </div>
+      <div class="issue-line">${esc(it.line)}</div>
+      ${it.stack.length ? `<pre class="issue-stack">${esc(it.stack.slice(0, 12).join('\n'))}</pre>` : ''}
+      <div class="issue-actions">
+        <button class="btn btn-mini issue-copy">Скопировать</button>
+        <button class="btn btn-mini btn-ghost issue-hide">Скрыть</button>
+      </div>`;
+    card.querySelector('.issue-copy').onclick = () => {
+      const text = it.line + (it.stack.length ? '\n' + it.stack.join('\n') : '');
+      navigator.clipboard.writeText(text).then(
+        () => toast('Скопировано', 'ok'),
+        () => toast('Не удалось скопировать', 'err'),
+      );
+    };
+    card.querySelector('.issue-hide').onclick = () => {
+      S.issues.set(s.id, (S.issues.get(s.id) || []).filter((x) => x.key !== it.key));
+      renderIssues();
+    };
+    host.appendChild(card);
+  }
+}
+
+/* ═════════════════════ плагины и моды (Modrinth) ═════════════════════ */
+
+const ADDON_LOADERS = {
+  plugin: [
+    ['', 'любой загрузчик'], ['paper', 'Paper'], ['spigot', 'Spigot'], ['bukkit', 'Bukkit'],
+    ['purpur', 'Purpur'], ['folia', 'Folia'], ['velocity', 'Velocity'], ['bungeecord', 'BungeeCord'],
+    ['waterfall', 'Waterfall'],
+  ],
+  mod: [
+    ['', 'любой загрузчик'], ['fabric', 'Fabric'], ['forge', 'Forge'], ['neoforge', 'NeoForge'], ['quilt', 'Quilt'],
+  ],
+  datapack: [['', 'любой загрузчик']],
+};
+
+const MC_VERSIONS = (() => {
+  const out = [];
+  for (let major = 1; major <= 1; major += 1) { /* заглушка, список ниже */ }
+  const list = ['1.21.4', '1.21.3', '1.21.1', '1.21', '1.20.6', '1.20.4', '1.20.2', '1.20.1', '1.20',
+    '1.19.4', '1.19.2', '1.18.2', '1.17.1', '1.16.5', '1.15.2', '1.14.4', '1.12.2', '1.8.9'];
+  out.push(...list);
+  return out;
+})();
+
+function addonsState() {
+  return S.addons;
+}
+
+function fillAddonFilters() {
+  const st = addonsState();
+  const loaderSel = $('addonsLoader');
+  if (loaderSel) {
+    const list = ADDON_LOADERS[st.type] || ADDON_LOADERS.plugin;
+    loaderSel.innerHTML = list.map(([v, label]) => `<option value="${v}"${v === st.loader ? ' selected' : ''}>${esc(label)}</option>`).join('');
+  }
+  const verSel = $('addonsVersion');
+  if (verSel && !verSel.options.length) {
+    verSel.innerHTML = '<option value="">любая версия</option>'
+      + MC_VERSIONS.map((v) => `<option value="${v}">${v}</option>`).join('');
+  }
+}
+
+async function addonsCategories() {
+  const st = addonsState();
+  const sel = $('addonsCategory');
+  if (!sel) return;
+  const res = await API.modrinthCategories(st.type).catch(() => null);
+  const list = (res && res.categories) || [];
+  sel.innerHTML = '<option value="">все категории</option>'
+    + list.map((c) => `<option value="${c.name}">${esc(c.label)}</option>`).join('');
+  sel.value = st.category || '';
+}
+
+async function addonsLoadInfo() {
+  const s = current();
+  if (!s) return;
+  const st = addonsState();
+  const res = await API.modrinthDetect(s.id).catch(() => null);
+  st.info = res && res.ok ? res : null;
+  const inst = await API.modrinthInstalled(s.id).catch(() => null);
+  st.installed = inst && inst.ok ? inst : { plugins: [], mods: [] };
+
+  if (st.info) {
+    if (!st.loader) st.loader = st.info.loader || '';
+    if (!st.version) st.version = st.info.version || '';
+    if (!st.type) st.type = st.info.kind === 'mod' ? 'mod' : 'plugin';
+  }
+  const typeSel = $('addonsType');
+  if (typeSel) typeSel.value = st.type;
+  fillAddonFilters();
+  const verSel = $('addonsVersion');
+  if (verSel) verSel.value = st.version || '';
+  const loaderSel = $('addonsLoader');
+  if (loaderSel) loaderSel.value = st.loader || '';
+
+  const title = $('addonsTitle');
+  if (title) title.textContent = st.type === 'mod' ? 'Моды' : st.type === 'datapack' ? 'Датапаки' : 'Плагины';
+  const sub = $('addonsSub');
+  if (sub) {
+    const parts = [];
+    if (st.info && st.info.version) parts.push('Minecraft ' + st.info.version);
+    if (st.info && st.info.loader) parts.push(st.info.loader);
+    if (st.info) parts.push('папка ' + st.info.folder);
+    parts.push('стоит: ' + ((st.installed.plugins || []).length + (st.installed.mods || []).length));
+    sub.textContent = parts.join(' · ');
+  }
+}
+
+function addonVersionText(hit) {
+  const v = (hit.versions || []).filter(Boolean);
+  if (!v.length) return '';
+  const last = v[v.length - 1];
+  return last;
+}
+
+function renderAddons() {
+  const host = $('addonsList');
+  if (!host) return;
+  const st = addonsState();
+  if (st.loading && !st.hits.length) {
+    host.innerHTML = '<div class="empty-note">загрузка…</div>';
+    return;
+  }
+  if (!st.hits.length) {
+    host.innerHTML = '<div class="empty-note">ничего не найдено</div>';
+    return;
+  }
+  host.innerHTML = '';
+  for (const hit of st.hits) {
+    const card = document.createElement('div');
+    card.className = 'addon-card';
+    const dl = hit.downloads >= 1000000 ? (hit.downloads / 1000000).toFixed(1) + ' млн'
+      : hit.downloads >= 1000 ? Math.round(hit.downloads / 1000) + ' тыс' : String(hit.downloads || 0);
+    card.innerHTML = `
+      <div class="addon-ico">${hit.icon ? `<img src="${esc(hit.icon)}" alt="" loading="lazy" />` : esc((hit.title || '?').slice(0, 1))}</div>
+      <div class="addon-body">
+        <div class="addon-title">${esc(hit.title)}</div>
+        <div class="addon-author">${esc(hit.author || '')}${addonVersionText(hit) ? ' · ' + esc(addonVersionText(hit)) : ''}</div>
+        <div class="addon-desc">${esc(hit.description || '')}</div>
+        <div class="addon-meta">
+          ${(hit.categories || []).slice(0, 3).map((c) => `<span class="addon-tag">${esc(c)}</span>`).join('')}
+          <span class="addon-dl">${dl} загрузок</span>
+        </div>
+      </div>
+      <div class="addon-actions">
+        <button class="btn btn-mini addon-install">Установить</button>
+        <button class="btn btn-mini btn-ghost addon-open">На сайте</button>
+      </div>`;
+    const img = card.querySelector('img');
+    if (img) img.onerror = () => { img.remove(); card.querySelector('.addon-ico').textContent = (hit.title || '?').slice(0, 1).toUpperCase(); };
+    card.querySelector('.addon-install').onclick = async (e) => {
+      const btn = e.currentTarget;
+      const s = current();
+      if (!s) return;
+      btn.disabled = true;
+      btn.textContent = 'Ставлю…';
+      const res = await API.modrinthInstall(s.id, { id: hit.id, loader: st.loader, version: st.version });
+      btn.disabled = false;
+      if (!res || !res.ok) {
+        btn.textContent = 'Установить';
+        notify({ title: 'Не установилось', text: (res && res.error) || 'Неизвестная ошибка', kind: 'err' });
+        return;
+      }
+      btn.textContent = 'Готово';
+      notify({ title: 'Установлено', text: `${hit.title} → ${res.folder}/${res.file}`, kind: 'ok' });
+      Sound.play('ok');
+      addonsLoadInfo();
+      setTimeout(() => { btn.textContent = 'Установить'; }, 2500);
+    };
+    card.querySelector('.addon-open').onclick = () => {
+      API.ghOpenExternal(`https://modrinth.com/project/${hit.slug || hit.id}`);
+    };
+    host.appendChild(card);
+  }
+  const more = $('addonsMore');
+  if (more) more.classList.toggle('hidden', st.hits.length >= st.total);
+}
+
+async function addonsSearch(reset = false) {
+  const st = addonsState();
+  if (st.loading) return;
+  if (reset) { st.hits = []; st.offset = 0; }
+  st.loading = true;
+  renderAddons();
+  const res = await API.modrinthSearch({
+    query: st.query, type: st.type, loader: st.loader, version: st.version,
+    category: st.category, sort: st.sort, offset: st.offset, limit: 20,
+  }).catch(() => null);
+  st.loading = false;
+  if (!res || !res.ok) {
+    notify({ title: 'Modrinth не ответил', text: (res && res.error) || 'Проверь соединение', kind: 'err' });
+    renderAddons();
+    return;
+  }
+  st.hits = st.offset ? st.hits.concat(res.hits) : res.hits;
+  st.total = res.total || st.hits.length;
+  const sub = $('addonsSub');
+  if (sub && !st.info) sub.textContent = `найдено ${st.total}`;
+  renderAddons();
+}
+
+async function addonsShowInstalled() {
+  const s = current();
+  if (!s) return;
+  const st = addonsState();
+  const res = await API.modrinthInstalled(s.id).catch(() => null);
+  if (!res || !res.ok) return;
+  st.installed = res;
+  const list = (res.plugins || []).map((f) => ({ ...f, folder: 'plugins' }))
+    .concat((res.mods || []).map((f) => ({ ...f, folder: 'mods' })));
+  const host = $('addonsList');
+  if (!host) return;
+  if (!list.length) {
+    host.innerHTML = '<div class="empty-note">ничего не установлено</div>';
+    return;
+  }
+  host.innerHTML = '';
+  for (const f of list) {
+    const card = document.createElement('div');
+    card.className = 'addon-card installed';
+    card.innerHTML = `
+      <div class="addon-ico">${ico('puzzle', 18, 1.6)}</div>
+      <div class="addon-body">
+        <div class="addon-title">${esc(f.name)}</div>
+        <div class="addon-author">${esc(f.folder)} · ${(f.size / 1048576).toFixed(1)} МБ</div>
+      </div>`;
+    host.appendChild(card);
+  }
+}
+
+function bindAddons() {
+  const search = $('addonsSearch');
+  let timer = null;
+  if (search) {
+    search.oninput = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { addonsState().query = search.value.trim(); addonsSearch(true); }, 350);
+    };
+  }
+  const on = (id, key, after) => {
+    const node = $(id);
+    if (!node) return;
+    node.onchange = () => {
+      addonsState()[key] = node.value;
+      if (after) after();
+      addonsSearch(true);
+      Sound.play('click');
+    };
+  };
+  on('addonsSort', 'sort');
+  on('addonsCategory', 'category');
+  on('addonsLoader', 'loader');
+  on('addonsVersion', 'version');
+  const type = $('addonsType');
+  if (type) {
+    type.onchange = () => {
+      addonsState().type = type.value;
+      addonsState().category = '';
+      fillAddonFilters();
+      addonsCategories();
+      addonsSearch(true);
+    };
+  }
+  const refresh = $('addonsRefresh');
+  if (refresh) refresh.onclick = () => { addonsLoadInfo().then(() => addonsSearch(true)); };
+  const inst = $('addonsInstalledBtn');
+  if (inst) inst.onclick = () => addonsShowInstalled();
+  const more = $('addonsMoreBtn');
+  if (more) more.onclick = () => { addonsState().offset += 20; addonsSearch(false); };
+}
+
+/* ═════════════════════ перетаскивание файлов ═════════════════════ */
+
+let dropDepth = 0;
+
+function fmCurrentDir() {
+  return (typeof FM !== 'undefined' && FM.dir) ? FM.dir : '';
+}
+
+/** Кладёт перетащенные файлы в папку сервера. rel — путь внутри папки сервера. */
+async function dropFiles(s, files, rel) {
+  if (!s || !files.length) return;
+  let ok = 0;
+  for (const file of files) {
+    const buf = await file.arrayBuffer();
+    const res = await API.filesUpload(s.id, rel, file.name, new Uint8Array(buf)).catch(() => null);
+    if (res && res.ok) ok += 1;
+    else notify({ title: 'Файл не загрузился', text: (res && res.error) || file.name, kind: 'err' });
+  }
+  if (ok) {
+    notify({ title: 'Файлы загружены', text: `файлов: ${ok} → ${rel || '/'}`, kind: 'ok' });
+    Sound.play('ok');
+    if (S.tab === 'files') { fmLoadTree(); if (typeof fmSearchRefresh === 'function') fmSearchRefresh(); }
+  }
+}
+
+function bindFileDrop() {
+  const pane = $('tab-files');
+  const hasFiles = (e) => !!(e.dataTransfer && [...e.dataTransfer.types].includes('Files'));
+  const clear = () => {
+    dropDepth = 0;
+    if (pane) pane.classList.remove('drop-active');
+    document.body.classList.remove('drop-active');
+    for (const z of document.querySelectorAll('.drop-target')) z.classList.remove('drop-target');
+  };
+  const dropRelOf = (target) => {
+    const row = target instanceof Element ? target.closest('[data-drop-rel]') : null;
+    return row ? row.dataset.dropRel : null;
+  };
+
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+
+  // подсветка цели: папка в дереве — акцент, иначе подсвечиваем всю панель файлов
+  window.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    for (const z of document.querySelectorAll('.drop-target')) z.classList.remove('drop-target');
+    const row = e.target instanceof Element ? e.target.closest('[data-drop-rel]') : null;
+    if (row) row.classList.add('drop-target');
+    if (pane) pane.classList.toggle('drop-active', !row);
+    document.body.classList.toggle('drop-active', !pane || S.tab !== 'files');
+  });
+
+  if (pane) {
+    pane.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      dropDepth += 1;
+      pane.classList.add('drop-active');
+    });
+    pane.addEventListener('dragleave', () => {
+      dropDepth = Math.max(0, dropDepth - 1);
+      if (!dropDepth) clear();
+    });
+  }
+
+  window.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget || (e.clientX > 0 && e.clientY > 0)) return;
+    clear();
+  });
+
+  // файл бросаем в любое место программы — он всё равно попадёт в папку сервера
+  window.addEventListener('drop', async (e) => {
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    const files = [...e.dataTransfer.files];
+    const s = current();
+    const rel = dropRelOf(e.target) || (S.tab === 'files' ? fmCurrentDir() : '');
+    clear();
+    if (!s) { notify({ title: 'Некуда класть', text: 'Сначала выбери сервер', kind: 'err' }); return; }
+    await dropFiles(s, files, rel);
+  });
+}
+
+/* ═════════════════════ TAB: подсказки команд и ников ═════════════════════ */
+
+const CMD_BASE = [
+  'stop', 'restart', 'save-all', 'save-off', 'save-on', 'whitelist', 'ban', 'pardon', 'kick',
+  'op', 'deop', 'list', 'tps', 'timings', 'plugins', 'version', 'seed', 'reload', 'say', 'tell',
+  'me', 'msg', 'tp', 'tphere', 'gamemode', 'difficulty', 'time', 'weather', 'give', 'clear',
+  'effect', 'enchant', 'xp', 'spawn', 'setworldspawn', 'teleport', 'kill', 'heal', 'gamerule',
+  'summon', 'execute', 'fill', 'clone', 'setblock', 'particle', 'playsound', 'title', 'scoreboard',
+  'team', 'advancement', 'recipe', 'datapack', 'function', 'forceload', 'jfr', 'spark', 'worldborder',
+];
+
+let cmdSuggestIdx = -1;
+let cmdSuggestItems = [];
+
+function hideCmdSuggest() {
+  const box = $('cmdSuggest');
+  if (!box) return;
+  box.classList.add('hidden');
+  box.innerHTML = '';
+  cmdSuggestIdx = -1;
+  cmdSuggestItems = [];
+}
+
+function showCmdSuggest(items) {
+  const box = $('cmdSuggest');
+  if (!box) return;
+  if (!items.length) { hideCmdSuggest(); return; }
+  cmdSuggestItems = items.slice(0, 8);
+  cmdSuggestIdx = 0;
+  renderCmdSuggest();
+}
+
+function renderCmdSuggest() {
+  const box = $('cmdSuggest');
+  if (!box) return;
+  box.innerHTML = cmdSuggestItems.map((it, i) => `
+    <button class="cs-item${i === cmdSuggestIdx ? ' sel' : ''}" data-i="${i}">
+      <span class="cs-name">${esc(it.label)}</span>
+      <span class="cs-kind">${esc(it.kind)}</span>
+    </button>`).join('');
+  box.classList.remove('hidden');
+  for (const b of box.querySelectorAll('.cs-item')) {
+    b.onmousedown = (e) => { e.preventDefault(); applyCmdSuggest(Number(b.dataset.i)); };
+  }
+}
+
+function applyCmdSuggest(i) {
+  const input = $('cmdInput');
+  const item = cmdSuggestItems[i];
+  if (!input || !item) return;
+  input.value = item.value;
+  hideCmdSuggest();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+/** Собирает варианты: ник игрока, если он онлайн, иначе команда. */
+function cmdCandidates() {
+  const input = $('cmdInput');
+  const s = current();
+  if (!input || !s) return [];
+  const raw = input.value;
+  const at = input.selectionStart ?? raw.length;
+  const left = raw.slice(0, at);
+  const token = (left.match(/([^\s]*)$/) || ['', ''])[1];
+  const before = left.slice(0, left.length - token.length);
+  const isCommandStart = /^\/?[^\s]*$/.test(left) && !before.trim();
+
+  const players = [...playersState(s.id).names];
+  const out = [];
+
+  const push = (value, kind, label) => out.push({ value, kind, label: label || value });
+
+  if (isCommandStart) {
+    for (const c of CMD_BASE) if (c.startsWith(token.toLowerCase())) push('/' + c, 'команда', '/' + c);
+  } else {
+    for (const p of players) {
+      if (p.toLowerCase().startsWith(token.toLowerCase())) push(before + p, 'игрок', p);
+    }
+    // аргумент-команда (gamemode creative и т.п.)
+    const common = ['creative', 'survival', 'adventure', 'spectator', 'true', 'false', 'day', 'night', 'clear'];
+    for (const c of common) if (c.startsWith(token.toLowerCase())) push(before + c, 'значение', c);
+  }
+  const exact = out.find((o) => o.value === raw);
+  return exact ? [] : out;
+}
+
+function bindCmdComplete() {
+  const input = $('cmdInput');
+  if (!input) return;
+
+  input.addEventListener('input', () => {
+    const items = cmdCandidates();
+    if (!items.length || !items[0].label) { hideCmdSuggest(); return; }
+    // показываем только когда есть что подставлять
+    showCmdSuggest(items);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const box = $('cmdSuggest');
+    const open = box && !box.classList.contains('hidden');
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (!open) {
+        const items = cmdCandidates();
+        if (!items.length) return;
+        showCmdSuggest(items);
+        applyCmdSuggest(0);
+        return;
+      }
+      applyCmdSuggest(cmdSuggestIdx >= 0 ? cmdSuggestIdx : 0);
+      return;
+    }
+    if (!open) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      cmdSuggestIdx = (cmdSuggestIdx + 1) % cmdSuggestItems.length;
+      renderCmdSuggest();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      cmdSuggestIdx = (cmdSuggestIdx - 1 + cmdSuggestItems.length) % cmdSuggestItems.length;
+      renderCmdSuggest();
+    } else if (e.key === 'Enter' && cmdSuggestItems.length) {
+      e.preventDefault();
+      applyCmdSuggest(cmdSuggestIdx >= 0 ? cmdSuggestIdx : 0);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      hideCmdSuggest();
+    }
+  });
+
+  input.addEventListener('blur', () => setTimeout(hideCmdSuggest, 120));
+}
+
+/* ═════════════════════ цвета из фона ═════════════════════ */
+
+async function themeFromWallpaper() {
+  let source = null;
+  if (prefs.wall === 'custom' && prefs.wallName) source = { kind: 'custom', name: prefs.wallName };
+  else {
+    const w = WALLPAPERS.find((x) => x.id === prefs.wall);
+    if (w && w.src) source = { kind: 'builtin', src: w.src };
+  }
+  if (!source) {
+    notify({ title: 'Сначала выбери фон', text: 'Оформление → Фон', kind: 'warn' });
+    return;
+  }
+  const res = await API.wallPalette(source).catch(() => null);
+  if (!res || !res.ok) {
+    notify({ title: 'Не получилось подобрать', text: (res && res.error) || 'Фон не читается', kind: 'err' });
+    return;
+  }
+  prefs.custom = { ...prefs.custom, ...res.colors };
+  prefs.theme = 'custom';
+  prefs.save();
+  applyPrefs();
+  syncCustomColors();
+  Sound.play('ok');
+  notify({ title: 'Цвета взяты из фона', text: res.colors.bg + ' · ' + res.colors.accent, kind: 'ok' });
 }
 
 /* ═════════════════════ старт ═════════════════════ */

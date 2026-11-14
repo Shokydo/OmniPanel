@@ -22,7 +22,7 @@
 #define APP_EXE "OmniPanel.exe"
 #define UPDATE_REPO "Shokydo/OmniPanel"
 #define UPDATE_BRANCH "main"
-#define APP_VERSION "1.16.0"
+#define APP_VERSION "1.17.1"
 
 /* ─────────────────────────── переносимое: полезная нагрузка ─────────────────────────── */
 

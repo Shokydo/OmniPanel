@@ -1,7 +1,7 @@
 // Проверки новых возможностей 1.15:
 //  • полный server.properties (64 параметра, свои ключи плагинов, запись)
 //  • добавление сервера из GitHub (скачивание архива репозитория)
-//  • вход в аккаунт GitHub по коду (без Client ID — понятная ошибка)
+//  • вход в аккаунт GitHub по коду (встроенный Client ID — работает сразу)
 //  • полоса полного экрана: иконка, «сервер — состояние», кнопки управления
 //  • иконка сервера: смещение и масштаб реально попадают в итог 1:1
 // Запуск: xvfb-run -a node tests/test-features.js <playwright> <electron>
@@ -140,9 +140,21 @@ mock.listen(8791, '127.0.0.1', async () => {
   /* ─────────── 3. вход в аккаунт по коду ─────────── */
   console.log('\n=== вход в аккаунт GitHub по коду ===');
   const dev = await page.evaluate(() => window.desktop.ghDeviceStart());
-  ok(dev && dev.ok === false && dev.needClientId === true, 'без Client ID — просьба указать его', (dev && dev.error) || '');
-  const idSet = await page.evaluate(() => window.desktop.ghSetOauthClientId('Iv1.testclient'));
-  ok(idSet === 'Iv1.testclient', 'Client ID сохраняется');
+  const codeOk = !!(dev && dev.ok && /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(String(dev.userCode || '')));
+  ok(dev && dev.needClientId !== true, 'свой Client ID не требуется — встроенный',
+    codeOk ? dev.userCode : ((dev && dev.error) || ''));
+  ok(codeOk || (dev && dev.needClientId !== true), 'код входа выдаётся сразу (без Client ID)',
+    codeOk ? dev.userCode : ((dev && dev.error) || 'сеть недоступна — проверка мягкая'));
+  const boxGone = await page.evaluate(() => !document.getElementById('ghClientIdBox'));
+  ok(boxGone, 'поля «Client ID» в интерфейсе нет');
+  const startBtn = await page.evaluate(async () => {
+    document.getElementById('profileBtn').click();
+    document.querySelector('#prefsNav .prefs-tab[data-cat="gh"]').click();
+    await new Promise((r) => setTimeout(r, 300));
+    const btn = document.getElementById('ghDeviceBtn');
+    return btn ? btn.textContent.trim() : '';
+  });
+  ok(/Вход по коду/.test(startBtn), 'кнопка входа по коду на месте', startBtn);
 
   /* ─────────── 4. полоса полного экрана ─────────── */
   console.log('\n=== полный экран: иконка, состояние, кнопки управления ===');

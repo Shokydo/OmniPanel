@@ -12,32 +12,34 @@
 
   <!-- ───────────── своя шапка окна ───────────── -->
   <header class="titlebar">
-    <div class="tb-brand">
+    <div class="tb-left">
       <img class="brand-logo" src="../assets/icon.png" alt="" width="18" height="18" />
-      <span class="brand-title">OmniPanel</span>
+      <button id="tbAccount" class="tb-acc">
+        <span class="tb-acc-ava" id="tbAccAva">?</span>
+        <span class="tb-acc-name" id="tbAccName">гость</span>
+      </button>
+      <button id="updPill" class="upd-pill hidden">
+        <i class="upd-pill-dot"></i>
+        <span id="updPillText">обновление</span>
+      </button>
     </div>
-    <button id="tbAccount" class="tb-acc">
-      <span class="tb-acc-ava" id="tbAccAva">?</span>
-      <span class="tb-acc-name" id="tbAccName">гость</span>
-    </button>
-    <button id="updPill" class="upd-pill hidden">
-      <i class="upd-pill-dot"></i>
-      <span id="updPillText">обновление</span>
-    </button>
-    <div class="tb-drag"></div>
+    <div class="tb-center"><span id="tbText">OmniPanel</span></div>
     <div class="win-ctrl">
+      <button id="tbPrefs" class="wc" aria-label="Настройки панели">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+      </button>
       <button id="winHide" class="wc" aria-label="Скрыть в трей">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.6 6 8.4l4-3.8"/><path d="M2 9.6h8"/></svg>
+        <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.6 6 8.4l4-3.8"/><path d="M2 9.6h8"/></svg>
       </button>
       <button id="winMin" class="wc" aria-label="Уменьшить окно">
-        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <svg width="13" height="13" viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
       </button>
       <button id="winMax" class="wc" aria-label="Развернуть окно">
-        <svg class="ic-max" width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.2" stroke="currentColor" stroke-width="1.2"/></svg>
-        <svg class="ic-restore hidden" width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="2" y="4" width="6" height="6" rx="1.2" stroke="currentColor" stroke-width="1.2"/><path d="M4 3.4V2.6a.6.6 0 0 1 .6-.6h4.8a.6.6 0 0 1 .6.6v4.8a.6.6 0 0 1-.6.6h-.8" stroke="currentColor" stroke-width="1.2"/></svg>
+        <svg class="ic-max" width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 1.6H1.6v3M7.4 10.4h3v-3M1.9 1.9l3 3M10.1 10.1l-3-3"/></svg>
+        <svg class="ic-restore hidden" width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.4 1.9v3h-3M4.6 10.1v-3h3M1.9 4.9l3-3M10.1 7.1l-3 3"/></svg>
       </button>
       <button id="winClose" class="wc wc-close" aria-label="Закрыть панель">
-        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.4 2.4l7.2 7.2M9.6 2.4 2.4 9.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <svg width="13" height="13" viewBox="0 0 12 12"><path d="M2.4 2.4l7.2 7.2M9.6 2.4 2.4 9.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
       </button>
     </div>
   </header>
@@ -145,6 +147,11 @@
               </span>
               <span class="sep">•</span>
               <span id="pidText">—</span>
+              <span class="sep">•</span>
+              <span id="onlineChip" class="up-chip hidden">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="9" cy="8" r="3.4"/><path d="M3 20c0-3.2 2.7-5.4 6-5.4s6 2.2 6 5.4"/><path d="M16.5 11.2a3 3 0 1 0-1.6-5.5"/><path d="M17 20c0-2.2-.8-3.9-2-5"/></svg>
+                <span id="onlineText">0</span>
+              </span>
               <span id="tpsBadge" class="tps hidden">
                 <span class="lbl">TPS</span>
                 <span id="tpsVal" class="val">—</span>
@@ -192,6 +199,9 @@
         <button class="tab" data-tab="perf">Производительность</button>
         <button class="tab" data-tab="tps">TPS-история</button>
         <button class="tab" data-tab="backups">Бэкапы</button>
+        <button class="tab" data-tab="addons">Плагины</button>
+        <button class="tab" data-tab="players">Игроки</button>
+        <button class="tab tab-alert" data-tab="issues">Ошибки<span id="issuesBadge" class="tab-badge hidden">0</span></button>
       </nav>
 
       <section id="tab-console" class="console-wrap tab-pane">
@@ -212,7 +222,10 @@
         <div id="console" class="console"></div>
         <div class="cmd-row">
           <span class="prompt">&gt;</span>
-          <input id="cmdInput" class="cmd" type="text" placeholder="команда" spellcheck="false" autocomplete="off" />
+          <div class="cmd-wrap">
+            <input id="cmdInput" class="cmd" type="text" placeholder="команда" spellcheck="false" autocomplete="off" />
+            <div id="cmdSuggest" class="cmd-suggest hidden"></div>
+          </div>
           <button id="cmdSend" class="btn btn-mini">Отправить</button>
         </div>
       </section>
@@ -327,6 +340,75 @@
         </div>
         <div id="backupList" class="backup-list"></div>
       </section>
+
+      <!-- плагины и моды (Modrinth) -->
+      <section id="tab-addons" class="pane tab-pane hidden addons-pane">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title" id="addonsTitle">Плагины</div>
+            <div class="ph-sub" id="addonsSub">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="addonsInstalledBtn" class="btn btn-mini">Установлено</button>
+            <button id="addonsRefresh" class="btn btn-mini">Обновить список</button>
+          </div>
+        </div>
+
+        <div class="addons-bar">
+          <input id="addonsSearch" class="filter" type="search" placeholder="поиск проекта" spellcheck="false" />
+          <select id="addonsType" class="mini-select">
+            <option value="plugin">Плагины</option>
+            <option value="mod">Моды</option>
+            <option value="datapack">Датапаки</option>
+          </select>
+          <select id="addonsLoader" class="mini-select"></select>
+          <select id="addonsVersion" class="mini-select"></select>
+          <select id="addonsCategory" class="mini-select">
+            <option value="">все категории</option>
+          </select>
+          <select id="addonsSort" class="mini-select">
+            <option value="relevance">по совпадению</option>
+            <option value="downloads">по загрузкам</option>
+            <option value="follows">по подпискам</option>
+            <option value="newest">новые</option>
+            <option value="updated">обновлённые</option>
+          </select>
+        </div>
+
+        <div id="addonsList" class="addons-list"></div>
+        <div id="addonsMore" class="addons-more hidden">
+          <button id="addonsMoreBtn" class="btn btn-mini">Показать ещё</button>
+        </div>
+      </section>
+
+      <!-- игроки онлайн -->
+      <section id="tab-players" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Игроки онлайн</div>
+            <div class="ph-sub" id="playersSub">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="playersRefresh" class="btn btn-mini">Запросить список</button>
+          </div>
+        </div>
+        <div id="playerList" class="player-list"></div>
+      </section>
+
+      <!-- ошибки при запуске -->
+      <section id="tab-issues" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Ошибки при запуске</div>
+            <div class="ph-sub" id="issuesSub">—</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="issuesScan" class="btn btn-mini">Пересканировать логи</button>
+            <button id="issuesClear" class="btn btn-mini btn-ghost">Очистить</button>
+          </div>
+        </div>
+        <div id="issuesList" class="issues-list"></div>
+      </section>
     </div>
   </main>
 
@@ -356,7 +438,7 @@
 
 <!-- ───────────── настройки сервера ───────────── -->
 <div id="modal" class="modal hidden">
-  <div class="modal-box">
+  <div class="modal-box tall">
     <header class="modal-head">
       <h2 id="modalTitle">Новый сервер</h2>
       <button id="modalClose" class="btn btn-icon"><svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -677,6 +759,29 @@
   </div>
 </div>
 
+<!-- ───────────── порт занят: смена порта перед запуском ───────────── -->
+<div id="portModal" class="modal hidden">
+  <div class="modal-box small">
+    <header class="modal-head">
+      <h2>Порт занят</h2>
+    </header>
+    <div class="modal-body">
+      <p id="portText">—</p>
+      <label class="field">
+        <span class="lbl">Новый порт</span>
+        <input id="portInput" type="number" min="1" max="65535" step="1" />
+      </label>
+      <div id="portList" class="port-list"></div>
+    </div>
+    <footer class="modal-foot foot-wrap">
+      <button id="portForce" class="btn btn-ghost">Всё равно</button>
+      <div class="spacer"></div>
+      <button id="portCancel" class="btn btn-ghost">Отмена</button>
+      <button id="portApply" class="btn btn-primary">Сменить и запустить</button>
+    </footer>
+  </div>
+</div>
+
 <!-- ───────────── мастер создания сервера ───────────── -->
 <div id="wizModal" class="modal hidden">
   <div class="modal-box wide">
@@ -905,6 +1010,7 @@
             <div class="row" style="gap:8px;margin-top:4px;flex-wrap:wrap">
               <input id="themeName" type="text" class="mini-input" placeholder="название темы" spellcheck="false" />
               <button id="themeSave" class="btn btn-mini">Сохранить тему</button>
+              <button id="themeFromWall" class="btn btn-mini btn-ghost">Цвета из фона</button>
               <button id="themeResetCustom" class="btn btn-mini btn-ghost">Сбросить цвета</button>
             </div>
             <div id="themePresets" class="theme-presets"></div>
@@ -1012,6 +1118,7 @@
           <div class="field">
             <span class="lbl">Масштаб интерфейса</span>
             <div id="scaleGrid" class="chip-grid">
+              <button class="chip" data-scale="0">Под окно</button>
               <button class="chip" data-scale="85">Мельче</button>
               <button class="chip" data-scale="100">Обычный</button>
               <button class="chip" data-scale="115">Крупнее</button>
@@ -1065,15 +1172,6 @@
                   <button id="ghDeviceStop" class="btn btn-mini btn-ghost">Отмена</button>
                 </div>
                 <div id="ghDeviceState" class="wall-name">ждём подтверждения на GitHub…</div>
-              </div>
-
-              <div id="ghClientIdBox" class="gh-client">
-                <div class="lbl-mini">Client ID</div>
-                <div class="row" style="gap:6px">
-                  <input id="ghClientId" type="text" class="mini-input" placeholder="Client ID твоего OAuth App" spellcheck="false" autocomplete="off" />
-                  <button id="ghClientSave" class="btn btn-mini">Сохранить</button>
-                  <button id="ghClientMake" class="btn btn-mini btn-ghost">Создать OAuth App</button>
-                </div>
               </div>
 
               <button id="ghTokenToggle" class="btn btn-mini btn-ghost">Вход по токену</button>

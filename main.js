@@ -11,6 +11,8 @@ const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
 const kernels = require('./core/kernels');
 const files = require('./core/files');
+const modrinth = require('./core/modrinth');
+const ports = require('./core/ports');
 const opener = require('./core/opener');
 const github = require('./core/github');
 const zip = require('./core/zip');
@@ -24,7 +26,9 @@ const APP_NAME = 'OmniPanel';
    Пусто — панель попросит вписать свой (Настройки → GitHub).
    Свой OAuth App: GitHub → Settings → Developer settings → OAuth Apps → New,
    включить «Enable Device Flow», скопировать Client ID. */
-const GITHUB_OAUTH_CLIENT_ID = '';
+// Публичный Client ID с включённым Device Flow — вход по коду работает без настройки.
+// Свой можно указать в настройках: он важнее этого.
+const GITHUB_OAUTH_CLIENT_ID = '178c6fc778ccc68e1d6a';
 app.setName(APP_NAME);
 if (process.platform === 'win32') app.setAppUserModelId('OmniPanel');
 
@@ -642,6 +646,95 @@ function wallpapersDir() {
 
 const WALL_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'mp4', 'webm'];
 
+/**
+ * Подбор палитры под фон: превью уменьшается до 64×64, пиксели собираются
+ * в корзины, из них берутся фон, панель, текст и акцент.
+ */
+function paletteOf(source) {
+  const src = source || {};
+  let file = '';
+  if (src.kind === 'builtin' && src.src) {
+    file = path.join(__dirname, 'assets', 'wallpapers', path.basename(String(src.src)));
+  } else if (src.kind === 'custom' && src.name) {
+    file = path.join(wallpapersDir(), path.basename(String(src.name)));
+  } else if (src.kind === 'file' && src.path) {
+    file = String(src.path);
+  } else if (typeof source === 'string') {
+    file = source;
+  }
+  if (!file || !fs.existsSync(file)) return { ok: false, error: 'Файл фона не найден' };
+
+  const img = nativeImage.createFromPath(file);
+  if (img.isEmpty()) return { ok: false, error: 'Не удалось прочитать картинку' };
+
+  const size = img.getSize();
+  const small = img.resize({ width: 64, height: 64, quality: 'good' });
+  const bmp = small.toBitmap(); // BGRA
+  const buckets = new Map();
+  let sumR = 0, sumG = 0, sumB = 0, count = 0;
+
+  for (let i = 0; i + 3 < bmp.length; i += 4) {
+    const b = bmp[i], g = bmp[i + 1], r = bmp[i + 2], a = bmp[i + 3];
+    if (a < 40) continue;
+    sumR += r; sumG += g; sumB += b; count += 1;
+    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+    const cur = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0 };
+    cur.n += 1; cur.r += r; cur.g += g; cur.b += b;
+    buckets.set(key, cur);
+  }
+  if (!count) return { ok: false, error: 'Картинка пустая' };
+
+  const hex = (r, g, b) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+  const luma = (r, g, b) => (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  const sat = (r, g, b) => {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    return mx === 0 ? 0 : (mx - mn) / mx;
+  };
+  const mixc = (c, t, k) => [c[0] + (t[0] - c[0]) * k, c[1] + (t[1] - c[1]) * k, c[2] + (t[2] - c[2]) * k];
+
+  const avg = [sumR / count, sumG / count, sumB / count];
+  const dark = luma(avg[0], avg[1], avg[2]) < 0.55;
+
+  // акцент — самая насыщенная и достаточно частая корзина
+  let accent = null;
+  let best = 0;
+  for (const b of buckets.values()) {
+    const r = b.r / b.n, g = b.g / b.n, bl = b.b / b.n;
+    const s = sat(r, g, bl);
+    const weight = s * Math.log2(1 + b.n);
+    if (s > 0.22 && weight > best) { best = weight; accent = [r, g, bl]; }
+  }
+  if (!accent) accent = mixc(avg, dark ? [255, 255, 255] : [0, 0, 0], 0.55);
+
+  const base = dark ? [8, 8, 10] : [250, 250, 251];
+  const bg = mixc(avg, base, 0.82);
+  const panel = mixc(avg, dark ? [255, 255, 255] : [0, 0, 0], dark ? 0.08 : 0.04);
+  const line = mixc(bg, dark ? [255, 255, 255] : [0, 0, 0], 0.16);
+  const text = dark ? [236, 236, 238] : [22, 22, 26];
+  const dim = mixc(text, bg, 0.42);
+
+  // акцент должен читаться на фоне — при нужде светлим/темним
+  let acc = mixc(accent, dark ? [255, 255, 255] : [0, 0, 0], dark ? 0.12 : 0.1);
+  if (Math.abs(luma(acc[0], acc[1], acc[2]) - luma(bg[0], bg[1], bg[2])) < 0.18) {
+    acc = mixc(acc, dark ? [255, 255, 255] : [0, 0, 0], 0.3);
+  }
+
+  return {
+    ok: true,
+    dark,
+    colors: {
+      bg: hex(...bg),
+      panel: hex(...panel),
+      line: hex(...line),
+      text: hex(...text),
+      dim: hex(...dim),
+      accent: hex(...acc),
+      btn: hex(...acc),
+      btnText: luma(...acc) > 0.6 ? '#0b0b0d' : '#f7f7f9',
+    },
+  };
+}
+
 /* ------------------------------ IPC -------------------------------- */
 
 function wireIpc() {
@@ -1193,6 +1286,109 @@ function wireIpc() {
   ipcMain.handle('files:remove', fsWrap(async (id, rel) => files.remove(rootOf(id), rel)));
   ipcMain.handle('files:rename', fsWrap(async (id, rel, name) => files.rename(rootOf(id), rel, name)));
   ipcMain.handle('files:search', fsWrap(async (id, q) => ({ results: await files.search(rootOf(id), q) })));
+  /** Перетаскивание файлов в окно: кладём байты в папку сервера. */
+  ipcMain.handle('files:upload', async (_e, id, relDir, name, data) => {
+    try {
+      const root = rootOf(id);
+      const dir = files.resolveSafe(root, relDir || '');
+      fs.mkdirSync(dir, { recursive: true });
+      const safeName = path.basename(String(name || 'file')).replace(/[\\/:*?"<>|]+/g, '_');
+      if (!safeName) return { ok: false, error: 'Пустое имя файла' };
+      const dest = path.join(dir, safeName);
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      fs.writeFileSync(dest, buf);
+      return { ok: true, name: safeName, rel: path.relative(root, dest).split(path.sep).join('/'), size: buf.length };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  /* ── Modrinth: плагины и моды ── */
+  ipcMain.handle('modrinth:search', async (_e, opts) => {
+    try { return await modrinth.search(opts || {}); } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('modrinth:versions', async (_e, projectId, opts) => {
+    try { return await modrinth.versions(projectId, opts || {}); } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('modrinth:categories', async (_e, type) => {
+    try { return await modrinth.categories(type || 'plugin'); } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('modrinth:detect', (_e, id) => {
+    try { return { ok: true, ...modrinth.detect(rootOf(id)) }; } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('modrinth:installed', (_e, id) => {
+    try { return { ok: true, ...modrinth.installed(rootOf(id)) }; } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('modrinth:install', async (_e, id, opts) => {
+    try {
+      const res = await modrinth.install(rootOf(id), opts || {});
+      return res;
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  /** Палитра из картинки: превью 64×64 → основные цвета. */
+  ipcMain.handle('wall:palette', async (_e, source) => {
+    try {
+      return paletteOf(source);
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  /* ── порты: проверка перед запуском ── */
+  const portsOf = (id) => ports.own(rootOf(id));
+  ipcMain.handle('ports:check', async (_e, id) => {
+    try {
+      const me = manager.get(id);
+      if (!me) return { ok: false, error: 'Сервер не найден' };
+      const busyList = [];
+      for (const other of manager.list()) {
+        if (other.id === id) continue;
+        if (other.state === 'stopped') continue;
+        if (!other.cwd) continue;
+        try {
+          busyList.push({ id: other.id, name: other.name, ports: await ports.own(other.cwd) });
+        } catch { /* папка недоступна — пропускаем */ }
+      }
+      const res = await ports.check(rootOf(id), busyList);
+      return res;
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('ports:free', async (_e, id, from) => {
+    try {
+      const me = manager.get(id);
+      const taken = [];
+      for (const other of manager.list()) {
+        if (other.id === id || other.state === 'stopped' || !other.cwd) continue;
+        try {
+          for (const p of await ports.own(other.cwd)) taken.push(p.port);
+        } catch { /* ignore */ }
+      }
+      const port = await ports.freePort(from, taken);
+      return { ok: !!port, port, error: port ? '' : 'Свободный порт не нашёлся' };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('ports:set', async (_e, id, key, port) => {
+    try {
+      return await ports.set(rootOf(id), key, port);
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('ports:own', async (_e, id) => {
+    try {
+      return { ok: true, ports: await portsOf(id) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('props:read', fsWrap(async (id) => files.readServerProperties(rootOf(id))));
   ipcMain.handle('props:write', fsWrap(async (id, patch) => files.writeServerProperties(rootOf(id), patch)));
   ipcMain.handle('server:editor', async (_e, id) => {

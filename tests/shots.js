@@ -124,6 +124,79 @@ fs.writeFileSync(path.join(DATA, 'servers.json'), JSON.stringify([
   await shot('github-device-login');
   await page.click('#prefsDone');
 
+  // новые вкладки 1.17: плагины с Modrinth, игроки, ошибки, карточки серверов
+  await page.evaluate(() => {
+    const s = S.servers[0];
+    playersSet(s.id, ['Steve', 'Alex', 'Notch'], 20);
+    updateOnlineChip();
+    S.addons.hits = [
+      { id: '1', slug: 'worldguard', title: 'WorldGuard', author: 'EngineHub', description: 'Защита регионов: приватные территории, флаги и права.', downloads: 41234567, categories: ['management', 'utility'], icon: '', versions: ['7.0.9'] },
+      { id: '2', slug: 'essentialsx', title: 'EssentialsX', author: 'EssentialsX', description: 'Дома, телепорты, киты и права — базовый набор для сервера.', downloads: 38100000, categories: ['utility'], icon: '', versions: ['2.20.1'] },
+      { id: '3', slug: 'luckperms', title: 'LuckPerms', author: 'Luck', description: 'Гибкая система прав и групп с веб-редактором.', downloads: 29500000, categories: ['management'], icon: '', versions: ['5.4.1'] },
+    ];
+    S.addons.total = 3;
+    renderAddons();
+    issuesAdd(s.id, 'exception', 'java.lang.NullPointerException: Cannot invoke World.getName() because world is null',
+      'at ru.example.Plugin.onEnable(Plugin.java:41)');
+    issuesAdd(s.id, 'exception', "Could not load plugins/Old.jar in folder plugins", '');
+    issuesAdd(s.id, 'warn', 'Can not keep up! Is the server overloaded? Running 2451ms or 49 ticks behind', '');
+    issuesAdd(s.id, 'exception', "Could not load plugins/Old.jar in folder plugins", '');
+    S.issuesNew.set(s.id, 4);
+    renderIssuesBadge();
+  });
+  await page.evaluate(() => { setTab('players'); renderPlayers(); updateOnlineChip(); });
+  await page.waitForTimeout(500);
+  await shot('tab-players');
+  await page.evaluate(() => { setTab('issues'); renderIssues(); });
+  await page.waitForTimeout(400);
+  await shot('tab-issues');
+  await page.evaluate(() => { setTab('addons'); renderAddons(); });
+  await page.waitForTimeout(600);
+  await shot('tab-addons');
+  await page.evaluate(() => {
+    setTab('console');
+    showCmdSuggest([
+      { value: '/give', kind: 'команда', label: '/give' },
+      { value: '/gamemode', kind: 'команда', label: '/gamemode' },
+      { value: '/gamerule', kind: 'команда', label: '/gamerule' },
+      { value: 'Steve', kind: 'игрок', label: 'Steve' },
+    ]);
+  });
+  await page.waitForTimeout(350);
+  await shot('cmd-suggest');
+  await page.evaluate(() => {
+    hideCmdSuggest();
+    const s0 = S.servers[0];
+    s0.state = 'running';
+    s0.startedAt = Date.now() - 5400000;
+    S.metrics.set(s0.id, { cpu: 12, rss: 860 * 1048576 });
+    document.getElementById('gridModal').classList.remove('hidden');
+    renderGrid();
+  });
+  await page.waitForTimeout(450);
+  await shot('server-cards');
+  await page.evaluate(() => {
+    document.getElementById('gridModal').classList.add('hidden');
+    S.servers[0].state = 'stopped';
+    S.servers[0].startedAt = 0;
+    renderGrid();
+    setTab('console');
+  });
+
+  // 1.17: окно «порт занят» и широкие настройки
+  await page.evaluate(() => {
+    document.getElementById('prefsModal').classList.add('hidden');
+    askPort({ id: S.servers[0].id, conflicts: [{ key: 'server-port', label: 'Порт сервера', port: 25565, serverName: 'Скайблок' }], busy: [] });
+  });
+  await page.waitForTimeout(600);
+  await shot('port-busy');
+  await page.evaluate(() => document.getElementById('portModal').classList.add('hidden'));
+
+  await page.evaluate(() => { prefs.scale = 0; prefs.save(); applyPrefs(); openPrefs(); });
+  await page.waitForTimeout(700);
+  await shot('prefs-wide');
+  await page.evaluate(() => document.getElementById('prefsModal').classList.add('hidden'));
+
   await page.evaluate(() => { setUpdPill({ hasUpdate: false }); });
   await app.close();
   console.log('скриншоты готовы: ' + outDir);

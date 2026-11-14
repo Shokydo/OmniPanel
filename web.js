@@ -14,6 +14,8 @@ const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
 const kernels = require('./core/kernels');
 const files = require('./core/files');
+const modrinth = require('./core/modrinth');
+const ports = require('./core/ports');
 const opener = require('./core/opener');
 const pkgVersion = () => { try { return require('./package.json').version; } catch { return '0.0.0'; } };
 const { readJson, writeJson } = require('./core/store');
@@ -142,6 +144,100 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
+  /* ── Modrinth ── */
+  if (p === '/api/modrinth/search') {
+    try {
+      const q = url.searchParams;
+      const hits = await modrinth.search({
+        query: q.get('query') || '',
+        type: q.get('type') || 'plugin',
+        loader: q.get('loader') || '',
+        version: q.get('version') || '',
+        category: q.get('category') || '',
+        sort: q.get('sort') || 'relevance',
+        offset: Number(q.get('offset') || 0),
+        limit: Number(q.get('limit') || 20),
+      });
+      return sendJson(res, 200, hits);
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/modrinth/info') {
+    const srv = manager.get(url.searchParams.get('id'));
+    if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+    return sendJson(res, 200, { ok: true, ...modrinth.detect(srv.cwd), ...modrinth.installed(srv.cwd) });
+  }
+  if (p === '/api/modrinth/install' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const srv = manager.get(body.id);
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      const r = await modrinth.install(srv.cwd, body);
+      return sendJson(res, 200, r);
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/ports/check') {
+    try {
+      const srv = manager.get(url.searchParams.get('id'));
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      const busyList = [];
+      for (const other of manager.list()) {
+        if (other.id === srv.id || other.state === 'stopped' || !other.cwd) continue;
+        try { busyList.push({ id: other.id, name: other.name, ports: await ports.own(other.cwd) }); } catch { /* ignore */ }
+      }
+      return sendJson(res, 200, await ports.check(srv.cwd, busyList));
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/ports/free') {
+    try {
+      const srv = manager.get(url.searchParams.get('id'));
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      const taken = [];
+      for (const other of manager.list()) {
+        if (other.id === srv.id || other.state === 'stopped' || !other.cwd) continue;
+        try { for (const x of await ports.own(other.cwd)) taken.push(x.port); } catch { /* ignore */ }
+      }
+      const port = await ports.freePort(Number(url.searchParams.get('from') || 0), taken);
+      return sendJson(res, 200, { ok: !!port, port });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/ports/set' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const srv = manager.get(body.id);
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      return sendJson(res, 200, await ports.set(srv.cwd, body.key, body.port));
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/files/upload' && req.method === 'POST') {
+    try {
+      const body = await readBody(req);
+      const srv = manager.get(body.id);
+      if (!srv || !srv.cwd) return sendJson(res, 200, { ok: false, error: 'Сервер не найден' });
+      const dir = files.resolveSafe(srv.cwd, body.rel || '');
+      fs.mkdirSync(dir, { recursive: true });
+      const name = path.basename(String(body.name || 'file')).replace(/[\\/:*?"<>|]+/g, '_');
+      const dest = path.join(dir, name);
+      const buf = Buffer.from(String(body.data || ''), 'base64');
+      fs.writeFileSync(dest, buf);
+      return sendJson(res, 200, { ok: true, name, size: buf.length });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: e.message });
+    }
+  }
+  if (p === '/api/wall/palette') {
+    return sendJson(res, 200, { ok: false, error: 'Подбор цвета работает только в exe-версии' });
+  }
+
   if (p === '/api/server/editor' && req.method === 'POST') {
     try {
       const body = await readBody(req);
