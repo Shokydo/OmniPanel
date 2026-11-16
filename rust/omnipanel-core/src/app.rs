@@ -639,7 +639,32 @@ impl App {
             "open" => {
                 let name = rel.to_lowercase();
                 if name.ends_with(".7z") {
-                    return Err("7z панель пока не распаковывает сама — открой архив архиватором".to_string());
+                    /* .7z читает 7-Zip, который панель возит для бэкапов */
+                    let file = files.resolve(&rel).map_err(file_err)?;
+                    if !crate::backup::available() {
+                        return Err("Для .7z нужен 7-Zip рядом с панелью или в PATH".to_string());
+                    }
+                    let entries = crate::backup::list_7z(&file)?;
+                    let raw: u64 = entries.iter().map(|e| e.size).sum();
+                    let list: Vec<Value> = entries
+                        .iter()
+                        .map(|e| {
+                            Value::obj(vec![
+                                ("name", Value::str(&e.name)),
+                                ("size", Value::from(e.size)),
+                                ("packed", Value::from(e.packed)),
+                            ])
+                        })
+                        .collect();
+                    let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+                    return Ok(Value::obj(vec![
+                        ("path", Value::str(&rel)),
+                        ("size", Value::from(size)),
+                        ("total", Value::from(entries.len() as u64)),
+                        ("raw", Value::from(raw)),
+                        ("entries", Value::Arr(list)),
+                        ("format", Value::str("7z")),
+                    ]));
                 }
                 if !(name.ends_with(".zip")
                     || name.ends_with(".jar")
@@ -673,6 +698,11 @@ impl App {
             }
             "read" => {
                 let entry = text(args, 2);
+                if rel.to_lowercase().ends_with(".7z") {
+                    let file = files.resolve(&rel).map_err(file_err)?;
+                    let content = crate::backup::read_7z(&file, &entry)?;
+                    return describe_entry(&entry, &content);
+                }
                 let data = self.archive_bytes(&files, &rel)?;
                 let content = crate::zip::read_by_name(&data, &entry)?;
                 describe_entry(&entry, &content)
@@ -680,6 +710,19 @@ impl App {
             "extract" => {
                 let dest_rel = text(args, 2);
                 let only = text(args, 3);
+                if rel.to_lowercase().ends_with(".7z") {
+                    let file = files.resolve(&rel).map_err(file_err)?;
+                    let dest = files.resolve(&dest_rel).map_err(file_err)?;
+                    std::fs::create_dir_all(&dest)
+                        .map_err(|e| format!("не удалось создать папку: {}", e))?;
+                    let (count, bytes) = crate::backup::extract_7z(&file, &dest, &only)?;
+                    return Ok(Value::obj(vec![
+                        ("files", Value::from(count)),
+                        ("bytes", Value::from(bytes)),
+                        ("list", Value::Arr(Vec::new())),
+                        ("dest", Value::str(if dest_rel.is_empty() { "/" } else { &dest_rel })),
+                    ]));
+                }
                 let data = self.archive_bytes(&files, &rel)?;
                 let dest = files.resolve(&dest_rel).map_err(file_err)?;
                 std::fs::create_dir_all(&dest).map_err(|e| format!("не удалось создать папку: {}", e))?;
@@ -2433,9 +2476,9 @@ fn icon_data_url(path: &Path) -> Option<String> {
         return None;
     }
     let data = std::fs::read(path).ok()?;
-    if data.starts_with(b"\x89PNG") {
-        /* PNG уменьшаем сами: в списке серверов иконка мелкая */
-        if let Ok(picture) = image::decode_png(&data) {
+    /* PNG и JPEG уменьшаем сами: в списке серверов иконка мелкая */
+    if data.starts_with(b"\x89PNG") || data.starts_with(&[0xFF, 0xD8]) {
+        if let Ok(picture) = image::decode_any(&data) {
             return Some(image::to_data_url(&picture.resize(128, 128)));
         }
     }

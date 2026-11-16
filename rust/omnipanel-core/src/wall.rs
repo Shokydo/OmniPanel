@@ -198,9 +198,9 @@ pub fn palette(data_dir: &Path, app_dir: &Path, source: &Value) -> Value {
         Ok(data) => data,
         Err(err) => return error(format!("Не удалось прочитать файл: {}", err)),
     };
-    let picture = match image::decode_png(&data) {
+    let picture = match image::decode_any(&data) {
         Ok(picture) => picture,
-        Err(_) => return error("Цвета подбираются для PNG — выбери картинку в PNG"),
+        Err(_) => return error("Цвета подбираются для PNG и JPEG — выбери такую картинку"),
     };
     let small = picture.resize(64, 64);
     let mut buckets: std::collections::HashMap<u16, (u64, f64, f64, f64)> = std::collections::HashMap::new();

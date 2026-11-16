@@ -128,6 +128,145 @@ pub fn binary() -> Option<PathBuf> {
     None
 }
 
+/* ─────────────────────── чтение чужих .7z архивов ─────────────────────── */
+
+/// Один файл внутри `.7z`.
+#[derive(Debug, Clone)]
+pub struct SevenEntry {
+    pub name: String,
+    pub size: u64,
+    pub packed: u64,
+}
+
+/// Список файлов внутри `.7z` — через 7-Zip, который возит панель.
+pub fn list_7z(file: &Path) -> Result<Vec<SevenEntry>, String> {
+    let output = run(&[
+        "l".to_string(),
+        "-slt".to_string(),
+        "-ba".to_string(),
+        file.to_string_lossy().to_string(),
+    ])?;
+    let mut list: Vec<SevenEntry> = Vec::new();
+    let mut name = String::new();
+    let mut size = 0u64;
+    let mut packed = 0u64;
+    let mut folder = false;
+    let flush = |list: &mut Vec<SevenEntry>, name: &mut String, size: u64, packed: u64, folder: bool| {
+        if !name.is_empty() && !folder {
+            list.push(SevenEntry {
+                name: std::mem::take(name),
+                size,
+                packed,
+            });
+        } else {
+            name.clear();
+        }
+    };
+    for line in output.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            flush(&mut list, &mut name, size, packed, folder);
+            size = 0;
+            packed = 0;
+            folder = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Path = ") {
+            name = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("Size = ") {
+            size = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("Packed Size = ") {
+            packed = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("Folder = ") {
+            folder = rest.trim() == "+";
+        } else if let Some(rest) = line.strip_prefix("Attributes = ") {
+            if rest.trim().starts_with('D') {
+                folder = true;
+            }
+        }
+    }
+    flush(&mut list, &mut name, size, packed, folder);
+    Ok(list)
+}
+
+/// Файл из `.7z` целиком — 7-Zip отдаёт его в поток.
+pub fn read_7z(file: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let Some(binary) = binary() else {
+        return Err("Для .7z нужен 7-Zip рядом с панелью или в PATH".to_string());
+    };
+    let mut command = Command::new(binary);
+    command.args([
+        "x".to_string(),
+        "-so".to_string(),
+        "-bd".to_string(),
+        "-y".to_string(),
+        file.to_string_lossy().to_string(),
+        name.to_string(),
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command
+        .output()
+        .map_err(|err| format!("7-Zip не запустился: {}", err))?;
+    if !output.status.success() {
+        return Err("Не удалось прочитать файл из .7z".to_string());
+    }
+    Ok(output.stdout)
+}
+
+/// Распаковка `.7z` в папку: сколько файлов и байт получилось.
+pub fn extract_7z(file: &Path, dest: &Path, only: &str) -> Result<(u64, u64), String> {
+    if !file.is_file() {
+        return Err("Архив не найден".to_string());
+    }
+    let mut args = vec![
+        "x".to_string(),
+        "-y".to_string(),
+        "-bd".to_string(),
+        format!("-o{}", dest.display()),
+        file.to_string_lossy().to_string(),
+    ];
+    if !only.is_empty() {
+        args.push(format!("-i!{}", only));
+    }
+    run(&args)?;
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for entry in walk(dest) {
+        if let Ok(meta) = std::fs::metadata(&entry) {
+            if meta.is_file() {
+                count += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    Ok((count, bytes))
+}
+
+/// Все файлы внутри папки — для подсчёта распакованного.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 /// Есть ли 7-Zip. От этого зависит, будет архив плотным или zip.
 pub fn available() -> bool {
     binary().is_some()
