@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex};
 /// Сколько строк лога держим в памяти на один сервер.
 pub const LOG_LIMIT: usize = 1500;
 
+/// Сколько точек TPS держим для мини-графика в шапке.
+pub const TPS_HISTORY: usize = 60;
+
 /// Пауза перед автоперезапуском (мс) — как в панели.
 pub const RESTART_DELAY: u64 = 3000;
 
@@ -256,6 +259,9 @@ struct Runtime {
     /// Ждём ответа на команду остановки.
     stopping: bool,
     encoding: Option<String>,
+    /// Последнее значение TPS и история для графика.
+    tps: Option<f32>,
+    tps_history: Vec<crate::players::TpsPoint>,
 }
 
 impl Default for Runtime {
@@ -271,6 +277,8 @@ impl Default for Runtime {
             manual_stop: false,
             stopping: false,
             encoding: None,
+            tps: None,
+            tps_history: Vec::new(),
         }
     }
 }
@@ -457,8 +465,17 @@ impl Manager {
                 "encoding",
                 r.and_then(|x| x.encoding.clone()).map(Value::str).unwrap_or(Value::Null),
             ),
-            ("tps", Value::Null),
-            ("tpsHistory", Value::Arr(Vec::new())),
+            (
+                "tps",
+                r.and_then(|x| x.tps).map(|t| Value::Num(t as f64)).unwrap_or(Value::Null),
+            ),
+            (
+                "tpsHistory",
+                Value::Arr(
+                    r.map(|x| x.tps_history.iter().map(|p| p.to_json()).collect())
+                        .unwrap_or_default(),
+                ),
+            ),
             ("metrics", Value::Null),
         ])
     }
@@ -518,6 +535,8 @@ impl Manager {
             r.stopping = false;
             r.exit_code = None;
             r.encoding = None;
+            r.tps = None;
+            r.tps_history.clear();
         }
 
         let (program, args) = cfg.shell_command();
@@ -591,6 +610,8 @@ impl Manager {
             });
         }
 
+        self.start_tps_loop(&id_owned, cfg.tps_command.clone(), cfg.tps_interval);
+
         /* сторож: ждём выхода процесса и только потом меняем состояние.
          * `try_wait` под замком ненадолго — так `kill` не ждёт окончания ожидания. */
         let watchdog = self.clone();
@@ -622,6 +643,61 @@ impl Manager {
     /// Обработка одной строки вывода сервера.
     fn on_output(&self, id: &str, kind: &str, text: &str) {
         self.log(id, kind, text);
+        if let Some(value) = crate::players::parse_tps(text) {
+            let point = crate::players::TpsPoint { at: (self.inner.clock)(), value };
+            let mut rt = self.inner.runtimes.lock().unwrap();
+            if let Some(r) = rt.get_mut(id) {
+                r.tps = Some(value);
+                r.tps_history.push(point);
+                if r.tps_history.len() > TPS_HISTORY {
+                    let extra = r.tps_history.len() - TPS_HISTORY;
+                    r.tps_history.drain(0..extra);
+                }
+            }
+            drop(rt);
+            self.emit(id, EventKind::State, format!("tps {}", value));
+        }
+    }
+
+    /// История TPS для мини-графика.
+    pub fn tps_history(&self, id: &str) -> Vec<crate::players::TpsPoint> {
+        self.inner
+            .runtimes
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|r| r.tps_history.clone())
+            .unwrap_or_default()
+    }
+
+    /// Очистить историю TPS (кнопка в интерфейсе).
+    pub fn clear_tps(&self, id: &str) {
+        if let Some(r) = self.inner.runtimes.lock().unwrap().get_mut(id) {
+            r.tps = None;
+            r.tps_history.clear();
+        }
+    }
+
+    /// Опрос TPS: раз в `tps_interval` секунд панель спрашивает сервер.
+    ///
+    /// Команда берётся из настроек сервера (`tpsCommand`); если она пустая,
+    /// панель TPS не спрашивает — как и раньше.
+    fn start_tps_loop(&self, id: &str, command: String, interval_secs: u32) {
+        if command.trim().is_empty() {
+            return;
+        }
+        let manager = self.clone();
+        let target = id.to_string();
+        std::thread::spawn(move || {
+            let step = std::time::Duration::from_secs(interval_secs.max(1) as u64);
+            loop {
+                std::thread::sleep(step);
+                if manager.state(&target) != ServerState::Running {
+                    return;
+                }
+                let _ = manager.command(&target, &command);
+            }
+        });
     }
 
     /// Отправить команду в консоль сервера.

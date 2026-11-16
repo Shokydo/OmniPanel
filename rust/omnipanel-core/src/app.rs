@@ -111,6 +111,11 @@ pub const READY_CHANNELS: &[&str] = &[
     "shell:openPath",
     "server:editor",
     "server:autoFolder",
+    "bans:list",
+    "bans:unban",
+    "bans:ban",
+    "tps:history",
+    "tps:clear",
 ];
 
 impl App {
@@ -165,6 +170,8 @@ impl App {
              * `fsWrap` отдаёт `{ ok: false, error }`, и интерфейс смотрит именно
              * на `ok`. Здесь так же — иначе кнопки молча перестанут работать. */
             "files" => Ok(wrap_files(self.files(action, args))),
+            "bans" => Ok(wrap_files(self.bans(action, args))),
+            "tps" => self.tps(action, args),
             "archive" => Ok(wrap_files(self.archive(action, args))),
             "ports" => Ok(wrap_files(self.ports(action, args))),
             "props" => Ok(wrap_files(self.props(action, args))),
@@ -483,6 +490,96 @@ impl App {
                 ]))
             }
             other => Err(not_migrated("archive", other)),
+        }
+    }
+
+    /* ───────────── bans:* и tps:* ───────────── */
+
+    fn bans(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        let files = self.files_of(&id)?;
+        let dir = files.root().to_path_buf();
+        let running = self.manager.state(&id) == ServerState::Running;
+        match action {
+            "list" => {
+                let bans = crate::players::list(&dir);
+                let entry = |b: &crate::players::BanEntry| {
+                    Value::obj(vec![
+                        ("kind", Value::str(&b.kind)),
+                        ("name", Value::str(&b.name)),
+                        ("uuid", Value::str(&b.uuid)),
+                        ("ip", Value::str(&b.ip)),
+                        ("reason", Value::str(&b.reason)),
+                        ("source", Value::str(&b.source)),
+                        ("created", Value::str(&b.created)),
+                        ("expires", Value::str(&b.expires)),
+                        ("until", Value::str(crate::players::until_human(b))),
+                    ])
+                };
+                Ok(Value::obj(vec![
+                    ("players", Value::Arr(bans.players.iter().map(entry).collect())),
+                    ("ips", Value::Arr(bans.ips.iter().map(entry).collect())),
+                ]))
+            }
+            "unban" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Obj(Vec::new()));
+                let name = target.get("name").map(|v| v.text()).unwrap_or_default();
+                let ip = target.get("ip").map(|v| v.text()).unwrap_or_default();
+                if running {
+                    /* на запущенном сервере команду выполняет ядро — оно и файл перепишет */
+                    let command = if ip.is_empty() {
+                        format!("unban {}", name)
+                    } else {
+                        format!("pardon-ip {}", ip)
+                    };
+                    self.manager.command(&id, &command)?;
+                    return Ok(Value::obj(vec![("ok", Value::Bool(true)), ("byCommand", Value::str(command))]));
+                }
+                let removed = crate::players::unban(&dir, &name, &ip)?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true)), ("removed", Value::from(removed))]))
+            }
+            "ban" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Obj(Vec::new()));
+                let name = target.get("name").map(|v| v.text()).unwrap_or_default();
+                let ip = target.get("ip").map(|v| v.text()).unwrap_or_default();
+                let reason = target.get("reason").map(|v| v.text()).unwrap_or_default();
+                if name.trim().is_empty() && ip.trim().is_empty() {
+                    return Err("Не выбран игрок для блокировки".to_string());
+                }
+                if running {
+                    let command = if ip.is_empty() {
+                        if reason.is_empty() {
+                            format!("ban {}", name)
+                        } else {
+                            format!("ban {} {}", name, reason)
+                        }
+                    } else if reason.is_empty() {
+                        format!("ban-ip {}", ip)
+                    } else {
+                        format!("ban-ip {} {}", ip, reason)
+                    };
+                    self.manager.command(&id, &command)?;
+                    return Ok(Value::obj(vec![("ok", Value::Bool(true)), ("byCommand", Value::str(command))]));
+                }
+                crate::players::add(&dir, &name, &ip, &reason)?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true))]))
+            }
+            other => Err(not_migrated("bans", other)),
+        }
+    }
+
+    fn tps(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        match action {
+            "history" => {
+                let points = self.manager.tps_history(&id);
+                Ok(Value::Arr(points.iter().map(|p| p.to_json()).collect()))
+            }
+            "clear" => {
+                self.manager.clear_tps(&id);
+                Ok(Value::Bool(true))
+            }
+            other => Err(not_migrated("tps", other)),
         }
     }
 

@@ -8,10 +8,12 @@ pub mod app;
 pub mod b64;
 pub mod files;
 pub mod json;
+pub mod players;
 pub mod ports;
 pub mod props;
 pub mod props_schema;
 pub mod servers;
+pub mod http;
 pub mod zip;
 
 pub use files::{Entry, FileError, Files};
