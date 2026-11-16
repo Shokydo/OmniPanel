@@ -70,8 +70,10 @@ fn request(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
         body
     );
     stream.write_all(text.as_bytes()).unwrap();
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
+    /* читаем байтами: ответ бывает картинкой, а не текстом */
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let response = String::from_utf8_lossy(&raw).to_string();
     let status = response
         .split_whitespace()
         .nth(1)
@@ -295,4 +297,88 @@ fn поиск_серверов_по_http() {
     assert!(body == "true" || body == "false", "состояние автозапуска: {body}");
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn обои_отдаются_браузеру() {
+    use omnipanel_core::image::{self, Image};
+    let panel = start_panel();
+    let folder = panel.dir.join("wallpapers");
+    fs::create_dir_all(&folder).unwrap();
+
+    let mut picture = Image::new(8, 8);
+    for pixel in picture.pixels.chunks_mut(4) {
+        pixel[0] = 30;
+        pixel[1] = 60;
+        pixel[2] = 200;
+        pixel[3] = 255;
+    }
+    fs::write(folder.join("синий.png"), image::encode_png(&picture)).unwrap();
+
+    /* фон отдаётся как файл, а не как JSON — иначе браузер его не покажет */
+    let (status, body) = request(panel.port, "GET", "/api/wall/%D1%81%D0%B8%D0%BD%D0%B8%D0%B9.png", "");
+    assert_eq!(status, 200, "фон не отдался");
+    assert!(body.contains("PNG") || body.len() > 50, "фон пришёл пустым");
+
+    /* выйти из папки панели нельзя */
+    let (status, _) = request(panel.port, "GET", "/api/wall/..%2Fservers.json", "");
+    assert_ne!(status, 200, "панель отдала файл из чужой папки");
+
+    /* палитра по своим обоям считается */
+    let (status, body) = request(
+        panel.port,
+        "POST",
+        "/api/wall/palette",
+        r#"{"kind":"custom","name":"синий.png"}"#,
+    );
+    assert_eq!(status, 200);
+    assert!(body.contains("\"ok\":true"), "палитра: {body}");
+    assert!(body.contains("accent"), "в палитре нет акцента: {body}");
+}
+
+#[test]
+fn бэкапы_по_http() {
+    let panel = start_panel();
+    let server_dir = panel.dir.join("мой сервер");
+    fs::create_dir_all(server_dir.join("world")).unwrap();
+    fs::write(server_dir.join("server.properties"), "level-name=world\n").unwrap();
+    fs::write(server_dir.join("world").join("level.dat"), "уровень").unwrap();
+
+    let body = format!(
+        r#"{{"name":"Мир","command":"java -jar server.jar nogui","cwd":"{}"}}"#,
+        server_dir.display().to_string().replace('\\', "\\\\")
+    );
+    let (status, created) = request(panel.port, "POST", "/api/servers", &body);
+    assert_eq!(status, 200, "{created}");
+    let id = omnipanel_core::json::parse(&created)
+        .ok()
+        .and_then(|v| v.get("id").map(|i| i.text()))
+        .unwrap_or_default();
+    assert!(!id.is_empty(), "сервер не добавился: {created}");
+
+    /* создание бэкапа */
+    let (_, made) = request(
+        panel.port,
+        "POST",
+        &format!("/api/servers/{}/backups/create", id),
+        r#"{"lean":true}"#,
+    );
+    assert!(made.contains("\"ok\":true"), "бэкап не создался: {made}");
+    let file = omnipanel_core::json::parse(&made)
+        .ok()
+        .and_then(|v| v.get("file").map(|f| f.text()))
+        .unwrap_or_default();
+    assert!(std::path::Path::new(&file).is_file(), "файла архива нет: {made}");
+
+    /* список и размер */
+    let (_, list) = request(panel.port, "GET", &format!("/api/servers/{}/backups", id), "");
+    assert!(list.contains("createdAt"), "список архивов: {list}");
+    let (_, size) = request(panel.port, "GET", &format!("/api/servers/{}/backups/size", id), "");
+    assert!(size.contains("bytes"), "размер папки: {size}");
+
+    /* удаление по адресу без id — так зовёт интерфейс */
+    let payload = format!(r#"{{"file":"{}"}}"#, file.replace('\\', "\\\\"));
+    let (_, removed) = request(panel.port, "POST", "/api/backup/delete", &payload);
+    assert!(removed.contains("true"), "не удалилось: {removed}");
+    assert!(!std::path::Path::new(&file).exists());
 }

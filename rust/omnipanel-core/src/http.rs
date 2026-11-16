@@ -167,6 +167,24 @@ impl PanelServer {
         };
         let arg = |key: &str| params.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).unwrap_or_default();
 
+        /* ── файл обоев: отдаём как есть, чтобы фон работал и в браузере ── */
+        if method == "GET" {
+            if let Some(name) = path.strip_prefix("/api/wall/") {
+                if name != "list" {
+                    /* имя в адресе закодировано — кириллица и пробелы */
+                    let name = percent_decode(name);
+                    let Some(safe) = crate::wall::safe_name(&name) else {
+                        return Response::not_found();
+                    };
+                    let file = crate::wall::dir(&self.app.info().data_dir).join(&safe);
+                    return match std::fs::read(&file) {
+                        Ok(bytes) => Response::binary(200, crate::wall::mime(&safe), bytes),
+                        Err(_) => Response::not_found(),
+                    };
+                }
+            }
+        }
+
         /* ── всё, что уже умеет Rust, отвечает по своим каналам ── */
         let (channel, args): (&str, Vec<Value>) = match (method, path) {
             ("GET", "/api/servers") => ("servers:list", vec![]),
@@ -220,6 +238,27 @@ impl PanelServer {
                 "server:editor",
                 vec![Value::Str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
             ),
+            /* ── свои обои, окна вопросов, уведомления ── */
+            ("POST", "/api/backup/delete") => (
+                "backup:delete",
+                vec![
+                    Value::str(""),
+                    Value::str(body_json.get("file").map(|v| v.text()).unwrap_or_default()),
+                ],
+            ),
+            ("GET", "/api/wall/list") => ("wall:list", vec![]),
+            ("POST", "/api/wall/pick") => ("wall:pick", vec![]),
+            ("POST", "/api/wall/remove") => ("wall:remove", vec![Value::str(arg("name"))]),
+            ("POST", "/api/wall/palette") => ("wall:palette", vec![body_json.clone()]),
+            ("POST", "/api/ui/ready") => ("ui:ready", vec![]),
+            ("POST", "/api/ui/answer") => (
+                "ui:answer",
+                vec![
+                    body_json.get("rid").cloned().unwrap_or(Value::Num(0.0)),
+                    Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_default()),
+                ],
+            ),
+            ("POST", "/api/notify/desktop") => ("notify:desktop", vec![body_json.clone()]),
             /* ── поиск серверов, диалоги, иконки, автозапуск ── */
             ("GET", "/api/scan/roots") => ("scan:roots", vec![]),
             ("POST", "/api/scan/start") => ("scan:start", vec![body_json.clone()]),
@@ -321,6 +360,25 @@ impl PanelServer {
                         ("POST", "bans/unban") => ("bans:unban", vec![Value::str(id), body_json.clone()]),
                         ("POST", "bans/ban") => ("bans:ban", vec![Value::str(id), body_json.clone()]),
                         ("GET", "tps") => ("tps:history", vec![Value::str(id)]),
+                        ("GET", "backups") => ("backup:list", vec![Value::str(id)]),
+                        ("POST", "backups/create") => ("backup:create", vec![Value::str(id), body_json.clone()]),
+                        ("POST", "backups/restore") => (
+                            "backup:restore",
+                            vec![
+                                Value::str(id),
+                                Value::str(body_json.get("file").map(|v| v.text()).unwrap_or_default()),
+                                body_json.clone(),
+                            ],
+                        ),
+                        ("POST", "backups/delete") => (
+                            "backup:delete",
+                            vec![
+                                Value::str(id),
+                                Value::str(body_json.get("file").map(|v| v.text()).unwrap_or_default()),
+                            ],
+                        ),
+                        ("GET", "backups/size") => ("backup:size", vec![Value::str(id)]),
+                        ("POST", "backups/reveal") => ("backup:reveal", vec![Value::str(id)]),
                         _ => {
                             return Response::json(
                                 200,

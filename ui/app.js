@@ -66,8 +66,8 @@ const httpApi = {
     return (r && (r.startMode || r.result)) || 'window';
   },
   async winSetStartMode(m) { await post('/api/win/startMode', { mode: m }); return m; },
-  async notifyDesktop() { return false; },
-  async wallPick() { return null; },
+  async notifyDesktop(payload) { return post('/api/notify/desktop', payload || {}); },
+  async wallPick() { return post('/api/wall/pick'); },
   /* обновления: в Rust-сборке они работают и в браузерном режиме */
   async updConfig() { return (await fetch('/api/upd/config')).json(); },
   async updSave(patch) { return post('/api/upd/save', patch || {}); },
@@ -103,14 +103,14 @@ const httpApi = {
   async serverAutoFolder() { return ''; },
   async serverMoveToApp(id, opts) { return post(`/api/server/moveToApp?id=${encodeURIComponent(id)}`, opts || {}); },
 
-  async wallRemove() { return { ok: true }; },
+  async wallRemove(name) { return post('/api/wall/remove?name=' + encodeURIComponent(name || '')); },
   onWinState() { /* в браузере нет своего окна */ },
   async backupList(id) { return (await fetch(`/api/servers/${id}/backups`)).json(); },
   async backupCreate(id, opts) { return post(`/api/servers/${id}/backups/create`, opts); },
   async backupRestore(id, file, opts) { return post(`/api/servers/${id}/backups/restore`, { file, ...(opts || {}) }); },
-  async backupDelete(file) { return post(`/api/servers/${id}/backups/delete`, { file }); },
-  async backupReveal() { return { ok: false, error: 'Только в exe-версии' }; },
-  async backupSize() { return { bytes: 0, files: 0 }; },
+  async backupDelete(file) { return post('/api/backup/delete', { file }); },
+  async backupReveal(id) { return post(`/api/servers/${id}/backups/reveal`); },
+  async backupSize(id) { return (await fetch(`/api/servers/${id}/backups/size`)).json(); },
   async glAccount() { return (await fetch('/api/gl/account')).json(); },
   async glSave(token) { return post('/api/gl/save', { token }); },
   async glCheck(cfg) { return post('/api/gl/check', cfg || {}); },
@@ -155,7 +155,7 @@ const httpApi = {
   async modrinthInstall(id, opts) { return post('/api/modrinth/install', { id, ...(opts || {}) }); },
   async modrinthVersions() { return { ok: false, versions: [] }; },
   async modrinthCategories() { return { ok: false, categories: [] }; },
-  async wallPalette() { return { ok: false, error: 'Подбор цвета работает только в exe-версии' }; },
+  async wallPalette(source) { return post('/api/wall/palette', source || {}); },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },
   async iconPick() { return (await fetch('/api/icon/pick', { method: 'POST' })).json(); },
@@ -184,6 +184,10 @@ const httpApi = {
       return d || null;
     } catch { return null; }
   },
+  /* свои окна вопросов в браузере — тоже свои, без системных */
+  onAsk(cb) { (this.subs['ui:ask'] ||= []).push(cb); },
+  answerAsk(rid, id) { return post('/api/ui/answer', { rid, id }); },
+  askReady() { return post('/api/ui/ready'); },
   subs: {},
   onLog(cb) { (this.subs.log ||= []).push(cb); },
   onState(cb) { (this.subs.state ||= []).push(cb); },
@@ -204,7 +208,7 @@ const httpApi = {
     const es = new EventSource('/api/events');
     for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress',
       'load:change', 'load:log', 'load:done', 'gh:stage', 'move-progress', 'toast',
-      'upd:state', 'upd:available', 'upd:progress', 'upd:ready']) {
+      'upd:state', 'upd:available', 'upd:progress', 'upd:ready', 'ui:ask']) {
       es.addEventListener(name, (e) => {
         const data = JSON.parse(e.data);
         for (const cb of this.subs[name] || []) cb(data);
@@ -3573,12 +3577,12 @@ function askFromMain(payload) {
 
 /** Окно-вопрос от ядра: подписка на канал main → интерфейс. */
 function bindAskChannel() {
-  if (!window.desktop || !window.desktop.onAsk) return;
+  if (!API.onAsk) return;
   /* сообщаем ядру: свои окна можно показывать, интерфейс готов */
-  if (window.desktop.askReady) window.desktop.askReady();
-  window.desktop.onAsk(async (payload) => {
+  if (API.askReady) API.askReady();
+  API.onAsk(async (payload) => {
     const id = await askFromMain(payload || {});
-    if (window.desktop.answerAsk) window.desktop.answerAsk(payload.rid, id);
+    if (API.answerAsk) API.answerAsk(payload.rid, id);
   });
 }
 

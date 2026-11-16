@@ -8,7 +8,11 @@
 //! Пока канал не перенесён, он отвечает понятной ошибкой по-русски —
 //! панель не падает и не показывает пустоту.
 
+use crate::ask::Ask;
 use crate::autostart;
+use crate::backup;
+use crate::notify;
+use crate::wall;
 use crate::b64;
 use crate::dialog;
 use crate::image;
@@ -78,6 +82,8 @@ pub struct App {
     scanner: Scanner,
     /// Куда панель отправляет события: окно, поток событий в браузере.
     event_sinks: Mutex<Vec<Box<dyn Fn(&str, &str) + Send + std::marker::Sync>>>,
+    /// Свои окна вопросов вместо системных.
+    ask: Ask,
 }
 
 /// Какие каналы уже живут в Rust. Список нужен и тестам, и генератору моста:
@@ -180,6 +186,18 @@ pub const READY_CHANNELS: &[&str] = &[
     "autostart:set",
     "shell:editor",
     "server:moveToApp",
+    "backup:list",
+    "backup:create",
+    "backup:restore",
+    "backup:delete",
+    "backup:reveal",
+    "backup:size",
+    "wall:pick",
+    "wall:remove",
+    "wall:palette",
+    "ui:ready",
+    "ui:answer",
+    "notify:desktop",
 ];
 
 impl App {
@@ -192,6 +210,7 @@ impl App {
             window: Mutex::new(WindowBridge::new()),
             scanner: Scanner::new(),
             event_sinks: Mutex::new(Vec::new()),
+            ask: Ask::new(),
         }
     }
 
@@ -287,6 +306,10 @@ impl App {
             "dialog" => self.dialog(action),
             "icon" => self.icon(action, args),
             "autostart" => self.autostart(action, args),
+            "backup" => self.backup(action, args),
+            "wall" => self.wall(action, args),
+            "ui" => self.ui(action, args),
+            "notify" => self.notify(action, args),
             _ => Err(format!(
                 "команда «{}» ещё не перенесена в Rust — она появится в следующем шаге",
                 channel
@@ -1438,6 +1461,122 @@ impl App {
         }
     }
 
+    /* ───────────── backup:* — архивы папки сервера ───────────── */
+
+    /// Куда панель складывает бэкапы сервера.
+    fn backups_dir(&self, id: &str) -> PathBuf {
+        self.info.data_dir.join("backups").join(id)
+    }
+
+    /// Рабочая папка сервера (пусто, если сервера нет).
+    fn server_cwd(&self, id: &str) -> Option<PathBuf> {
+        let server = self.manager.find(id)?;
+        let cwd = server.work_dir();
+        if cwd.trim().is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(cwd))
+    }
+
+    fn backup(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        match action {
+            "list" => Ok(Value::Arr(
+                backup::list(&self.backups_dir(&id))
+                    .iter()
+                    .map(|b| b.to_json())
+                    .collect(),
+            )),
+            "create" => Ok(backup_create(self, &id, args.get(1))),
+            "restore" => Ok(backup_restore(self, &id, args)),
+            "delete" => Ok(Value::Bool(backup::delete(&PathBuf::from(text(args, 1))))),
+            "reveal" => {
+                let dir = self.backups_dir(&id);
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = open_in_system(&dir.to_string_lossy());
+                Ok(Value::Bool(true))
+            }
+            "size" => {
+                let size = self
+                    .server_cwd(&id)
+                    .map(|dir| backup::dir_size(&dir))
+                    .unwrap_or_default();
+                Ok(Value::obj(vec![
+                    ("bytes", Value::from(size.bytes)),
+                    ("files", Value::from(size.files)),
+                ]))
+            }
+            other => Err(not_migrated("backup", other)),
+        }
+    }
+
+    /* ───────────── wall:* — свои обои и палитра под них ───────────── */
+
+    fn wall(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "list" => Ok(wall::list(&self.info.data_dir)),
+            "pick" => {
+                /* выбор файла — системным диалогом, дальше копия в папку панели */
+                let chosen = crate::dialog::pick(crate::dialog::Pick::File, "Фон панели");
+                let Some(path) = chosen.first() else {
+                    return Ok(Value::obj(vec![("ok", Value::Bool(false)), ("cancelled", Value::Bool(true))]));
+                };
+                Ok(wall::pick(&self.info.data_dir, path))
+            }
+            "remove" => Ok(wall::remove(&self.info.data_dir, &text(args, 0))),
+            "palette" => {
+                let source = args.first().cloned().unwrap_or(Value::Null);
+                Ok(wall::palette(&self.info.data_dir, &self.info.app_dir, &source))
+            }
+            other => Err(not_migrated("wall", other)),
+        }
+    }
+
+    /* ───────────── ui:* — свои окна вопросов ───────────── */
+
+    fn ui(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "ready" => {
+                self.ask.ready();
+                Ok(Value::Bool(true))
+            }
+            "answer" => {
+                let rid = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+                let id = text(args, 1);
+                Ok(Value::Bool(self.ask.answer(rid, &id)))
+            }
+            other => Err(not_migrated("ui", other)),
+        }
+    }
+
+    /// Спросить человека своим окном. В окне Tauri вопрос уходит событием,
+    /// в браузере — в поток событий; ответ возвращается сюда.
+    pub fn ask_ui(&self, title: &str, text: &str, buttons: &[crate::ask::Button], kind: &str) -> Option<String> {
+        self.ask
+            .ask(title, text, buttons, kind, |payload| self.publish("ui:ask", payload))
+    }
+
+    /* ───────────── notify:* — уведомления системы ───────────── */
+
+    fn notify(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "desktop" => {
+                let title = args
+                    .first()
+                    .and_then(|v| v.get("title"))
+                    .map(|v| v.text())
+                    .unwrap_or_else(|| notify::APP_NAME.to_string());
+                let body = args
+                    .first()
+                    .and_then(|v| v.get("text"))
+                    .map(|v| v.text())
+                    .unwrap_or_default();
+                Ok(Value::Bool(notify::show(&title, &body)))
+            }
+            other => Err(not_migrated("notify", other)),
+        }
+    }
+
     /* ───────────── app:* и path:* ───────────── */
 
     fn app(&self, action: &str, _args: &[Value]) -> Result<Value, String> {
@@ -1827,4 +1966,103 @@ fn editor_candidates() -> Vec<String> {
         out.push(name.to_string());
     }
     out
+}
+
+/* ───────────────────── бэкапы: создание и восстановление ───────────────────── */
+
+/// Собирает архив папки сервера. Опции: `lean`, `format`, `volumeMb`, `name`.
+fn backup_create(app: &App, id: &str, opts: Option<&Value>) -> Value {
+    let Some(server) = app.manager().find(id) else {
+        return backup_error("Сервер не найден");
+    };
+    let Some(src) = app.server_cwd(id) else {
+        return backup_error("У сервера не задана рабочая папка");
+    };
+    let opts = opts.cloned().unwrap_or(Value::Null);
+    let lean = opts.get("lean").map(|v| v.as_bool()).unwrap_or(true);
+    let format = opts
+        .get("format")
+        .map(|v| v.text())
+        .filter(|f| !f.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+    let volume_mb = opts.get("volumeMb").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+    let label = opts
+        .get("name")
+        .map(|v| v.text())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| server.name.clone());
+
+    match backup::create(&src, &app.backups_dir(id), &label, lean, &format, volume_mb) {
+        Ok(info) => {
+            app.publish(
+                "toast",
+                &Value::obj(vec![
+                    ("kind", Value::str("ok")),
+                    ("text", Value::str(format!("Бэкап создан: {}", info.name))),
+                ]),
+            );
+            info.to_json()
+        }
+        Err(err) => backup_error(&err),
+    }
+}
+
+/// Восстанавливает архив: останавливает сервер, делает страховочную копию,
+/// распаковывает и при нужде запускает сервер снова.
+fn backup_restore(app: &App, id: &str, args: &[Value]) -> Value {
+    let Some(server) = app.manager().find(id) else {
+        return backup_error("Сервер не найден");
+    };
+    let Some(dest) = app.server_cwd(id) else {
+        return backup_error("У сервера не задана рабочая папка");
+    };
+    let file = PathBuf::from(text(args, 1));
+    let opts = args.get(2).cloned().unwrap_or(Value::Null);
+    let safety = opts.get("safety").map(|v| v.as_bool()).unwrap_or(true);
+    let start_after = opts.get("startAfter").map(|v| v.as_bool()).unwrap_or(false);
+
+    /* 1. сервер не должен писать в папку, пока её распаковывают */
+    let was_running = app.manager().state(id) != crate::servers::ServerState::Stopped;
+    if was_running {
+        app.manager().stop(id);
+        let waited = std::time::Instant::now();
+        while app.manager().state(id) != crate::servers::ServerState::Stopped
+            && waited.elapsed().as_secs() < 30
+        {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        if app.manager().state(id) != crate::servers::ServerState::Stopped {
+            app.manager().kill(id);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+
+    /* 2. страховочная копия текущего состояния — восстановление необратимо */
+    let mut safety_info = Value::Null;
+    if safety {
+        let label = format!("{}_before_restore", server.name);
+        if let Ok(info) = backup::create(&dest, &app.backups_dir(id), &label, true, "auto", 0) {
+            safety_info = info.to_json();
+        }
+    }
+
+    /* 3. распаковка */
+    match backup::restore(&file, &dest) {
+        Ok(_) => {
+            let started = start_after && was_running && app.manager().start(id).is_ok();
+            Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("safety", safety_info),
+                ("started", Value::Bool(started)),
+            ])
+        }
+        Err(err) => backup_error(&err),
+    }
+}
+
+fn backup_error(message: &str) -> Value {
+    Value::obj(vec![
+        ("ok", Value::Bool(false)),
+        ("error", Value::str(message)),
+    ])
 }

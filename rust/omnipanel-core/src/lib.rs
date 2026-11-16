@@ -5,6 +5,8 @@
 //! никаких внешних зависимостей, поэтому собирается быстро и без сети.
 
 pub mod app;
+pub mod backup;
+pub mod ask;
 pub mod autostart;
 pub mod b64;
 pub mod dialog;
@@ -12,6 +14,7 @@ pub mod deflate;
 pub mod files;
 pub mod json;
 pub mod net;
+pub mod notify;
 pub mod players;
 pub mod ports;
 pub mod props;
@@ -24,6 +27,7 @@ pub mod sha256;
 pub mod http;
 pub mod sync;
 pub mod update;
+pub mod wall;
 pub mod window;
 pub mod zip;
 
