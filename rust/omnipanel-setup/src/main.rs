@@ -278,9 +278,32 @@ fn forget_install() {
     }
 }
 
+/// Закрывает уже запущенную панель: иначе Windows не даст перезаписать её файлы
+/// («файл занят другим процессом») и обновление срывалось бы.
+fn stop_running_panel() {
+    #[cfg(windows)]
+    {
+        for name in ["OmniPanel.exe", "omnipanel-core.exe", "omnipanel.exe"] {
+            let mut command = std::process::Command::new("taskkill");
+            command.args(["/IM", name, "/F", "/T"]);
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+            let _ = command.output();
+            /* даём Windows отпустить файлы */
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }
+}
+
 /// Установка в выбранную папку — этим пользуется мастер установки.
 pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    /* панель может быть запущена — закрываем её перед распаковкой */
+    if app_exe(dir).exists() {
+        println!("панель уже стоит в {} — обновляю", dir.display());
+        stop_running_panel();
+    }
     let count = unpack(&exe, dir)?;
     shortcuts(dir, desktop)?;
     remember_install(dir);
@@ -348,17 +371,19 @@ fn app_exe(dir: &Path) -> PathBuf {
 
 fn install_and_run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = default_dir();
 
-    /* панель внутри есть и она ещё не стоит — показываем мастер с выбором папки */
-    if payload_offset(&exe).is_ok() && !app_exe(&dir).exists() {
+    /* Внутри есть панель — всегда показываем мастер: человек сам говорит,
+       куда ставить. Раньше при уже установленной панели установщик молча
+       запускал старую версию и ничего не обновлял. */
+    if payload_offset(&exe).is_ok() {
         return wizard();
     }
 
-    /* уже установлено — просто запускаем */
+    /* это не установщик, а сама панель (или её ярлык) — запускаем её */
+    let dir = default_dir();
     let installed = app_exe(&dir);
     if !installed.exists() {
-        install_into(&dir, true, false)?;
+        return Err("панель не установлена — запустите установщик OmniPanel".to_string());
     }
     launch(&installed, &dir)
 }

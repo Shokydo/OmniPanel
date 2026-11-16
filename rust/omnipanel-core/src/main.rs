@@ -44,24 +44,32 @@ fn main() {
     let app = Arc::new(App::with_store(info, store));
     /* картинки лежат в папке assets рядом с интерфейсом или с программой */
     let mut panel = PanelServer::new(Arc::clone(&app), ui_dir.clone());
-    for candidate in [
-        ui_dir.parent().map(|p| p.join("assets")),
-        std::env::current_dir().ok().map(|p| p.join("assets")),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if candidate.is_dir() {
-            panel = panel.with_assets(candidate);
-            break;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = ui_dir.parent() {
+        candidates.push(parent.join("assets"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("assets"));
         }
     }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("assets"));
+    }
+    for candidate in candidates {
+        panel = panel.with_assets(candidate);
+    }
+    let assets_found = panel.assets_found().cloned();
     let server = Arc::new(panel);
 
     println!("OmniPanel на Rust {} — интерфейс: {}", env!("CARGO_PKG_VERSION"), ui_dir.display());
     println!("  данные: {}", data_dir.display());
     println!("  адрес:  http://127.0.0.1:{}/", port);
     println!("  серверов в списке: {}", app.manager().servers().len());
+    match assets_found {
+        Some(dir) => println!("  картинки: {}", dir.display()),
+        None => println!("  картинки: папка assets не найдена"),
+    }
 
     if let Err(err) = server.serve(port) {
         eprintln!("не удалось занять порт {}: {}", port, err);

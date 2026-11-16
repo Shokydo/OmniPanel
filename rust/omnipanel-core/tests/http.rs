@@ -477,3 +477,37 @@ fn без_папки_картинок_панель_жива() {
     let (status, _) = request(panel.port, "GET", "/", "");
     assert_eq!(status, 200, "интерфейс при этом работает");
 }
+
+#[test]
+fn картинки_ищутся_и_в_соседней_папке() {
+    /* так выглядит установленная панель: ui и assets рядом с exe, а сервер
+       получает путь к интерфейсу — картинки всё равно должны находиться */
+    let panel = start_panel();
+    let assets = panel.dir.join("assets");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("icon.png"), "PNG-иконка".as_bytes()).unwrap();
+
+    let mut info = AppInfo::default();
+    info.data_dir = panel.dir.clone();
+    info.config_path = panel.dir.join("servers.json");
+    let app = Arc::new(App::new(info));
+    let server = Arc::new(
+        PanelServer::new(app, panel.dir.join("ui"))
+            .with_assets(panel.dir.join("нет-такой-папки"))
+            .with_assets(assets),
+    );
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_listener(listener);
+    });
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (status, body) = request(port, "GET", "/assets/icon.png", "");
+    assert_eq!(status, 200, "берём вторую папку из списка");
+    assert!(body.contains("PNG-иконка"));
+}

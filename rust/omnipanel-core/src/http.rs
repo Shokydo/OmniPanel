@@ -22,10 +22,12 @@ type Listeners = Arc<Mutex<Vec<TcpStream>>>;
 pub struct PanelServer {
     app: Arc<App>,
     ui_dir: PathBuf,
-    /// Папка `assets` рядом с программой: иконки, обои, встроенные аддоны.
-    /// Интерфейс ссылается на них как `../assets/…`, то есть просит `/assets/…`
-    /// у этого сервера — раньше он отвечал 404, и картинки в окне не грузились.
-    assets_dir: Option<PathBuf>,
+    /// Где искать папку `assets`: иконки, обои, встроенные аддоны. Интерфейс
+    /// ссылается на них как `../assets/…`, то есть просит `/assets/…` у этого
+    /// сервера — раньше он отвечал 404, и картинки в окне не грузились.
+    /// Путей несколько: рядом с exe, на уровень выше, в ресурсах — смотря как
+    /// собрана и установлена панель.
+    assets_dirs: Vec<PathBuf>,
     listeners: Listeners,
     stop: Arc<AtomicBool>,
 }
@@ -33,8 +35,16 @@ pub struct PanelServer {
 impl PanelServer {
     /// Где лежат картинки панели: папка `assets` рядом с программой.
     pub fn with_assets(mut self, dir: impl Into<PathBuf>) -> PanelServer {
-        self.assets_dir = Some(dir.into());
+        let dir = dir.into();
+        if !self.assets_dirs.contains(&dir) {
+            self.assets_dirs.push(dir);
+        }
         self
+    }
+
+    /// Первая существующая папка с картинками (для лога и проверок).
+    pub fn assets_found(&self) -> Option<&PathBuf> {
+        self.assets_dirs.iter().find(|dir| dir.is_dir())
     }
 
     pub fn new(app: Arc<App>, ui_dir: impl Into<PathBuf>) -> PanelServer {
@@ -69,7 +79,7 @@ impl PanelServer {
         PanelServer {
             app,
             ui_dir: ui_dir.into(),
-            assets_dir: None,
+            assets_dirs: Vec::new(),
             listeners,
             stop: Arc::new(AtomicBool::new(false)),
         }
@@ -558,10 +568,12 @@ impl PanelServer {
            интерфейс просит `../assets/…`, то есть `/assets/…` — отдаём их
            отсюда, иначе в окне остаются пустые места вместо иконок и обоев */
         if !file.exists() {
-            if let Some(assets) = &self.assets_dir {
-                let outside = assets.join(rel.strip_prefix("assets/").unwrap_or(rel));
+            let inner = rel.strip_prefix("assets/").unwrap_or(rel);
+            for assets in &self.assets_dirs {
+                let outside = assets.join(inner);
                 if outside.exists() {
                     file = outside;
+                    break;
                 }
             }
         }

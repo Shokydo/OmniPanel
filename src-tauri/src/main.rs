@@ -77,16 +77,34 @@ fn main() {
                 .unwrap_or_else(|| PathBuf::from("."));
             info.platform = std::env::consts::OS.to_string();
 
-            /* картинки (иконки, обои, встроенные аддоны) лежат рядом с программой
-               в папке assets — сервер панели отдаёт их по адресу /assets/… */
-            let assets = info.app_dir.join("assets");
+            /* картинки (иконки, обои, встроенные аддоны) ищем в нескольких
+               местах: рядом с exe, на уровень выше, в ресурсах сборки — панель
+               может быть установлена, распакована из архива или собрана на месте */
+            let mut asset_dirs: Vec<PathBuf> = Vec::new();
+            asset_dirs.push(info.app_dir.join("assets"));
+            if let Some(parent) = info.app_dir.parent() {
+                asset_dirs.push(parent.join("assets"));
+            }
+            if let Ok(resources) = tauri_app.path().resource_dir() {
+                asset_dirs.push(resources.join("assets"));
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                asset_dirs.push(cwd.join("assets"));
+            }
             let store = Store::new(info.config_path.clone());
             let app = App::with_store(info, store);
             app.attach_window(bridge.clone());
             let app_state = Arc::new(app);
-            let panel = Arc::new(
-                PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app)).with_assets(assets),
-            );
+            let mut panel_server = PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app));
+            for dir in asset_dirs {
+                panel_server = panel_server.with_assets(dir);
+            }
+            /* в журнал запуска: видно, откуда панель берёт картинки */
+            match panel_server.assets_found() {
+                Some(dir) => eprintln!("картинки панели: {}", dir.display()),
+                None => eprintln!("папка assets не найдена — иконки и обои будут пустыми"),
+            }
+            let panel = Arc::new(panel_server);
 
             /* панель отвечает на запросы интерфейса в своём потоке */
             let serving = Arc::clone(&panel);

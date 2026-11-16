@@ -133,7 +133,12 @@ $log.BackColor = $C.panel
 $log.ForeColor = $C.muted
 $log.BorderStyle = 'FixedSingle'
 $log.Font = $fontTiny
-$log.Text = "Готов к установке.`r`nНажмите «Установить» — панель распакуется в выбранную папку."
+$already = Test-Path (Join-Path $DefaultDir 'OmniPanel.exe')
+if ($already) {
+  $log.Text = "Здесь уже стоит панель — при установке она обновится до $Version.`r`nЗапущенную панель мастер закроет сам."
+} else {
+  $log.Text = "Готов к установке.`r`nНажмите «Установить» — панель распакуется в выбранную папку."
+}
 $form.Controls.Add($log)
 
 # кнопки
