@@ -104,18 +104,21 @@ if ($windowed) {
   # иначе cargo отдаёт готовый файл со старой версией
   cargo clean --release -p omnipanel 2>$null
   cargo build --release
+  if ($LASTEXITCODE -ne 0) { Pop-Location; throw "окно не собралось (см. ошибки cargo выше)" }
   Pop-Location
 } else {
   Write-Step "собираю панель (окно на Tauri ещё не перенесено)"
   Push-Location (Join-Path $Rust "omnipanel-core")
   cargo clean --release -p omnipanel-core 2>$null
   cargo build --release
+  if ($LASTEXITCODE -ne 0) { Pop-Location; throw "панель не собралась (см. ошибки cargo выше)" }
   Pop-Location
 }
 
 Write-Step "собираю установщик"
 Push-Location (Join-Path $Rust "omnipanel-setup")
 cargo build --release
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "установщик не собрался (см. ошибки cargo выше)" }
 Pop-Location
 
 if ($windowed) {

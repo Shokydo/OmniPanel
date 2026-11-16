@@ -77,13 +77,13 @@ fn main() {
                 .unwrap_or_else(|| PathBuf::from("."));
             info.platform = std::env::consts::OS.to_string();
 
-            let store = Store::new(info.config_path.clone());
-            let mut app = App::with_store(info, store);
-            app.attach_window(bridge.clone());
-            let app_state = Arc::new(app);
             /* картинки (иконки, обои, встроенные аддоны) лежат рядом с программой
                в папке assets — сервер панели отдаёт их по адресу /assets/… */
             let assets = info.app_dir.join("assets");
+            let store = Store::new(info.config_path.clone());
+            let app = App::with_store(info, store);
+            app.attach_window(bridge.clone());
+            let app_state = Arc::new(app);
             let panel = Arc::new(
                 PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app)).with_assets(assets),
             );
