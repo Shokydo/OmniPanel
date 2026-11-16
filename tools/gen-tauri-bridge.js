@@ -117,6 +117,37 @@ ${lines.join('\n')}
 `;
 
 fs.writeFileSync(OUT, bridge, 'utf8');
+
+/* ── насколько переезд продвинулся: сверяем мост с тем, что умеет Rust ── */
+const rustSrc = path.join(ROOT, 'rust', 'omnipanel-core', 'src', 'app.rs');
+let ready = new Set();
+if (fs.existsSync(rustSrc)) {
+  const rust = fs.readFileSync(rustSrc, 'utf8');
+  const block = rust.match(/READY_CHANNELS: &\[&str\] = &\[([\s\S]*?)\];/);
+  if (block) {
+    for (const m of block[1].matchAll(/"([^"]+)"/g)) ready.add(m[1]);
+  }
+}
+const channels = [...new Set(methods.map((m) => m.channel))];
+const done = channels.filter((c) => ready.has(c));
+const left = channels.filter((c) => !ready.has(c));
+const byModule = {};
+for (const c of left) {
+  const mod = c.split(':')[0];
+  byModule[mod] = (byModule[mod] || 0) + 1;
+}
+console.log(`перенесено в Rust: ${done.length} из ${channels.length} каналов`);
+if (left.length) {
+  const list = Object.entries(byModule)
+    .sort((a, b) => b[1] - a[1])
+    .map(([m, n]) => `${m}:${n}`)
+    .join(', ');
+  console.log(`  ещё не перенесено (${left.length}): ${list}`);
+}
+const unknown = [...ready].filter((c) => !channels.includes(c));
+if (unknown.length) {
+  console.log(`  внимание: Rust умеет каналы, которых нет в preload.js: ${unknown.join(', ')}`);
+}
 const counts = methods.reduce((acc, m) => { acc[m.kind] = (acc[m.kind] || 0) + 1; return acc; }, {});
 console.log(`мост собран: ${path.relative(ROOT, OUT)}`);
 console.log(`  всего методов: ${methods.length} (команды ${counts.invoke || 0}, события ${counts.event || 0}, отправка ${counts.send || 0})`);

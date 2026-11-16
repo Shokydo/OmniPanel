@@ -186,6 +186,12 @@ impl ServerConfig {
         }
     }
 
+    /// Папка сервера для файлов — это `cwd` (как `rootOf` в панели).
+    /// Пустая строка означает «папка не задана»: панель об этом скажет.
+    pub fn root_dir(&self) -> String {
+        self.cwd.trim().to_string()
+    }
+
     /// Рабочая папка: пустая настройка означает «папка панели».
     pub fn work_dir(&self) -> String {
         if self.cwd.trim().is_empty() {
@@ -629,6 +635,30 @@ impl Manager {
         writeln!(stdin, "{}", text).map_err(|e| format!("не удалось отправить команду: {}", e))?;
         stdin.flush().map_err(|e| format!("не удалось отправить команду: {}", e))?;
         Ok(())
+    }
+
+    /// Перезапуск: мягко останавливаем и поднимаем заново.
+    ///
+    /// Ждём остановки не дольше таймаута из настроек: интерфейс после перезапуска
+    /// сразу спрашивает статус, и «останавливается» в ответ выглядело бы поломкой.
+    pub fn restart(&self, id: &str) -> Result<bool, String> {
+        if self.find(id).is_none() {
+            return Err("сервер не найден".to_string());
+        }
+        let state = self.state(id);
+        if state != ServerState::Stopped {
+            self.stop(id);
+            let timeout = self.find(id).map(|c| c.stop_timeout).unwrap_or(0);
+            let wait = if timeout > 0 { timeout } else { DEFAULT_STOP_TIMEOUT };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait.min(15000));
+            while self.state(id) != ServerState::Stopped && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if self.state(id) != ServerState::Stopped {
+                self.kill(id);
+            }
+        }
+        self.start(id)
     }
 
     /// Мягкая остановка: команда в консоль, при отсутствии — жёсткая.

@@ -56,8 +56,17 @@ pub struct Entry {
     pub modified: u64,
 }
 
-/// Предел на файл, который панель открывает в редакторе (4 МБ, как и раньше).
-pub const MAX_TEXT: u64 = 4 * 1024 * 1024;
+/// Предел на файл, который панель открывает в редакторе (16 МБ, как в панели).
+pub const READ_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Предел на запись файла из редактора (32 МБ).
+pub const WRITE_LIMIT: u64 = 32 * 1024 * 1024;
+
+/// Старое имя предела чтения — оставлено, чтобы не ломать прежние вызовы.
+pub const MAX_TEXT: u64 = READ_LIMIT;
+
+/// Картинки показываем до 12 МБ, как в панели.
+pub const IMAGE_LIMIT: u64 = 12 * 1024 * 1024;
 
 /// Работа с папкой одного сервера.
 #[derive(Debug, Clone)]
@@ -148,18 +157,31 @@ impl Files {
         Ok(out)
     }
 
-    /// Читает текстовый файл (не больше [`MAX_TEXT`]).
+    /// Читает текстовый файл (не больше [`READ_LIMIT`]).
     pub fn read_text(&self, rel: &str) -> Result<String, FileError> {
         let path = self.resolve(rel)?;
         let meta = fs::metadata(&path)?;
         if meta.is_dir() {
             return Err(FileError::WrongType(rel.to_string()));
         }
-        if meta.len() > MAX_TEXT {
+        if meta.len() > READ_LIMIT {
             return Err(FileError::TooLarge(meta.len()));
         }
         let bytes = fs::read(&path)?;
-        Ok(decode_text(&bytes))
+        Ok(decode_bytes(&bytes))
+    }
+
+    /// Размер и время изменения файла (мс от 1970 года).
+    pub fn meta(&self, rel: &str) -> Result<(u64, u64), FileError> {
+        let path = self.resolve(rel)?;
+        let meta = fs::metadata(&path)?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Ok((meta.len(), modified))
     }
 
     /// Читает файл как байты (картинки, архивы).
@@ -329,7 +351,7 @@ fn relative_to(root: &Path, path: &Path) -> String {
 }
 
 /// Текст в UTF-8; если файл в другой кодировке — читаем как Windows-1251.
-fn decode_text(bytes: &[u8]) -> String {
+pub fn decode_bytes(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.strip_prefix('\u{feff}').unwrap_or(text).to_string();
     }
@@ -352,8 +374,29 @@ fn cp1251(byte: u8) -> char {
     TABLE[(byte - 0x80) as usize]
 }
 
+/// Вид файла по расширению — чтобы в дереве были те же значки, что раньше.
+pub fn kind_of(name: &str) -> &'static str {
+    let ext = match name.rsplit_once('.') {
+        Some((_, e)) if !name.starts_with('.') => e.to_lowercase(),
+        _ => return "text",
+    };
+    let ext = ext.as_str();
+    match ext {
+        "yml" | "yaml" => "yaml",
+        "json" | "json5" => "json",
+        "properties" | "env" | "conf" | "ini" | "cfg" | "toml" => "properties",
+        "txt" | "log" | "md" | "mcfunction" | "sh" | "bat" => "text",
+        "js" | "mjs" | "ts" => "js",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" => "image",
+        "zip" | "jar" | "mcpack" | "whl" | "epub" => "archive",
+        "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" => "archive-other",
+        "dat" | "mca" | "lock" => "binary",
+        _ => "text",
+    }
+}
+
 /// Копирование папки целиком (для переноса между дисками).
-fn copy_tree(from: &Path, to: &Path) -> Result<(), FileError> {
+pub fn copy_tree(from: &Path, to: &Path) -> Result<(), FileError> {
     if from.is_file() {
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent)?;
