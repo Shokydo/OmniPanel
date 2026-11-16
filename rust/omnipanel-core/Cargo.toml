@@ -1,0 +1,14 @@
+[package]
+name = "omnipanel-core"
+version = "0.1.0"
+edition = "2021"
+description = "Ядро OmniPanel на Rust: серверы, файлы, настройки, порты"
+
+[lib]
+name = "omnipanel_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Единственная внешняя зависимость: HTTPS-клиент для GitHub, GitLab и обновлений.
+# Своими руками TLS-рукопожатие не пишут — это способ сломать загрузку обновлений.
+ureq = { version = "3", features = ["rustls"] }

@@ -22,72 +22,99 @@ const httpApi = {
   },
   async openPath(p) { return post('/api/open', { path: p }); },
   async pickIcon() { return null; },        // в браузере картинку выбираем через <input type=file>
-  async pickFolder() { return null; },
-  async pickFile() { return null; },
-  async pickFolders() { return []; },
+  async pickFolder() { return (await fetch('/api/dialog/pickFolder', { method: 'POST' })).json(); },
+  async pickFile() { return (await fetch('/api/dialog/pickFile', { method: 'POST' })).json(); },
+  async pickFolders() { return (await fetch('/api/dialog/pickFolders', { method: 'POST' })).json(); },
   async scanRoots() { return (await fetch('/api/scan/roots')).json(); },
   async scanStart(opts) { return post('/api/scan/start', opts); },
   async scanCancel() { return post('/api/scan/cancel'); },
-  async autostartGet() { return null; },
-  async autostartSet() { return null; },
+  async autostartGet() { return (await fetch('/api/autostart/get')).json(); },
+  async autostartSet(v) { return post('/api/autostart/set', { value: !!v }); },
   async startAll() { await Promise.all(S.servers.map((s) => this.start(s.id))); return true; },
   async stopAll() { await Promise.all(S.servers.map((s) => this.stop(s.id))); return true; },
   async restartAll() { for (const s of S.servers) await this.restart(s.id); return true; },
-  async winMinimize() { return false; },
-  async winClose() { return false; },
-  async winQuit() { return false; },
+  /* В обычном браузере окна нет — команды уходят в Rust-панель, если она
+   * запущена (httpApi работает и внутри окна на Tauri: оно показывает эту же
+   * страницу). Если окна нет совсем, остаётся полноэкранный режим браузера. */
+  async winMinimize() { const r = await post('/api/win/minimize'); return r && r.ok !== false; },
+  async winClose() { const r = await post('/api/win/close'); return r && r.ok !== false; },
+  async winQuit() { const r = await post('/api/win/quit'); return r && r.ok !== false; },
   async winToggleMax() {
+    const r = await post('/api/win/toggleMax');
+    if (r && r.ok !== false && r.state) return { maximized: !!r.state.maximized, fullscreen: !!r.state.fullscreen };
     if (!document.fullscreenElement) { await document.documentElement.requestFullscreen().catch(() => {}); return { fullscreen: true, maximized: false }; }
     await document.exitFullscreen().catch(() => {});
     return { fullscreen: false, maximized: false };
   },
-  async winToggleFull() { return this.winToggleMax(); },
-  async winIsVisible() { return !document.hidden; },
-  async winState() { return { maximized: false, fullscreen: !!document.fullscreenElement }; },
-  async winGetStartMode() { return 'window'; },
-  async winSetStartMode(m) { return m; },
-  async notifyDesktop() { return false; },
-  async wallPick() { return null; },
-  async updConfig() { return { repo: '', branch: 'main', auto: false, current: '0.0.0', packaged: false }; },
-  async updSave() { return this.updConfig(); },
-  async updCheck() { return { ok: false, error: 'Обновления работают только в exe-версии' }; },
-  async updApply() { return { ok: false, error: 'Обновления работают только в exe-версии' }; },
-  async updDownloadFull() { return { ok: false, error: 'Обновления работают только в exe-версии' }; },
-  async updRevealBackups() { return { ok: false }; },
-  onUpdState() { /* в браузере нет */ },
-  onUpdAvailable() { /* в браузере нет */ },
-  onUpdProgress() { /* в браузере нет */ },
-  async ghVerify() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghAccount() { return { hasToken: false }; },
-  async ghLogin() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghLogout() { return { ok: true }; },
-  async ghRepos() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghOauthClientId() { return ''; },
-  async ghSetOauthClientId() { return ''; },
-  async ghDeviceStart() { return { ok: false, error: 'Вход через GitHub — только в exe-версии' }; },
-  async ghDevicePoll() { return { ok: false, error: 'Вход через GitHub — только в exe-версии' }; },
+  async winToggleFull() {
+    const r = await post('/api/win/toggleFull');
+    if (r && r.ok !== false && r.state) return { maximized: !!r.state.maximized, fullscreen: !!r.state.fullscreen };
+    return this.winToggleMax();
+  },
+  async winIsVisible() {
+    const r = await fetch('/api/win/visible').then((x) => x.json()).catch(() => null);
+    if (r && r.ok !== false && typeof r.result === 'boolean') return r.result;
+    return !document.hidden;
+  },
+  async winState() {
+    const r = await fetch('/api/win/state').then((x) => x.json()).catch(() => null);
+    if (r && r.ok !== false && (r.maximized !== undefined || r.result)) return r.state || r;
+    return { maximized: false, fullscreen: !!document.fullscreenElement };
+  },
+  async winGetStartMode() {
+    const r = await fetch('/api/win/startMode').then((x) => x.json()).catch(() => null);
+    return (r && (r.startMode || r.result)) || 'window';
+  },
+  async winSetStartMode(m) { await post('/api/win/startMode', { mode: m }); return m; },
+  async notifyDesktop(payload) { return post('/api/notify/desktop', payload || {}); },
+  async wallPick() { return post('/api/wall/pick'); },
+  /* обновления: в Rust-сборке они работают и в браузерном режиме */
+  async updConfig() { return (await fetch('/api/upd/config')).json(); },
+  async updSave(patch) { return post('/api/upd/save', patch || {}); },
+  async updCheck() { return post('/api/upd/check'); },
+  async updApply() { return post('/api/upd/apply'); },
+  async updDownloadFull() { return post('/api/upd/downloadFull'); },
+  async updRevealBackups() { return post('/api/upd/revealBackups'); },
+
+  /* GitHub: те же адреса, что у Rust-ядра */
+  async ghVerify(cfg) { return post('/api/gh/verify', cfg || {}); },
+  async ghAccount() { return (await fetch('/api/gh/account')).json(); },
+  async ghLogin(token) { return post('/api/gh/login', { token }); },
+  async ghLogout() { return post('/api/gh/logout'); },
+  async ghRepos(q) { return (await fetch(`/api/gh/repos?q=${encodeURIComponent(q || '')}`)).json(); },
+  async ghOauthClientId() { const r = await (await fetch('/api/gh/oauthClientId')).json(); return r.result || r || ''; },
+  async ghSetOauthClientId(id) { const r = await post('/api/gh/setOauthClientId', { id }); return r.result || r || ''; },
+  async ghDeviceStart() {
+    const res = await post('/api/gh/deviceStart');
+    if (res && res.ok && res.verificationUri) {
+      try { window.open(res.verificationUri, '_blank'); } catch { /* браузер сам */ }
+    }
+    return res;
+  },
+  async ghDevicePoll(code) { return post('/api/gh/devicePoll', { deviceCode: code }); },
   async ghOpenExternal(url) { try { window.open(url, '_blank'); } catch { /* браузер сам */ } return true; },
-  async ghDownload() { return { ok: false, error: 'Скачивание из GitHub — только в exe-версии' }; },
-  async ghCreateRepo() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghCheck() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghPull() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghPush() { return { ok: false, error: 'Только в exe-версии' }; },
-  async ghStatus() { return { commit: null, at: null, files: 0 }; },
-  async ghForget() { return { ok: true }; },
+  async ghDownload(cfg) { return post('/api/gh/download', cfg || {}); },
+  async ghCreateRepo(name, isPrivate) { return post('/api/gh/createRepo', { name, private: isPrivate !== false }); },
+  async ghCheck(id) { return post(`/api/gh/check?id=${encodeURIComponent(id)}`); },
+  async ghPull(id) { return post(`/api/gh/pull?id=${encodeURIComponent(id)}`); },
+  async ghPush(id) { return post(`/api/gh/push?id=${encodeURIComponent(id)}`); },
+  async ghStatus(id) { return (await fetch(`/api/gh/status?id=${encodeURIComponent(id)}`)).json(); },
+  async ghForget(id) { return post(`/api/gh/forget?id=${encodeURIComponent(id)}`); },
   async serverAutoFolder() { return ''; },
-  async serverMoveToApp() { return { ok: false, error: 'Только в exe-версии' }; },
-  onMoveProgress() { /* в браузере нет */ },
-  async wallRemove() { return { ok: true }; },
+  async serverMoveToApp(id, opts) { return post(`/api/server/moveToApp?id=${encodeURIComponent(id)}`, opts || {}); },
+
+  async wallRemove(name) { return post('/api/wall/remove?name=' + encodeURIComponent(name || '')); },
   onWinState() { /* в браузере нет своего окна */ },
   async backupList(id) { return (await fetch(`/api/servers/${id}/backups`)).json(); },
   async backupCreate(id, opts) { return post(`/api/servers/${id}/backups/create`, opts); },
   async backupRestore(id, file, opts) { return post(`/api/servers/${id}/backups/restore`, { file, ...(opts || {}) }); },
-  async backupDelete(file) { return post(`/api/servers/${id}/backups/delete`, { file }); },
-  async backupReveal() { return { ok: false, error: 'Только в exe-версии' }; },
-  async backupSize() { return { bytes: 0, files: 0 }; },
-  async glAccount() { return { hasToken: false }; },
-  async glCheck() { return { ok: false, error: 'Только в exe-версии' }; },
-  async glProjects() { return { ok: false, error: 'Только в exe-версии' }; },
+  async backupDelete(file) { return post('/api/backup/delete', { file }); },
+  async backupReveal(id) { return post(`/api/servers/${id}/backups/reveal`); },
+  async backupSize(id) { return (await fetch(`/api/servers/${id}/backups/size`)).json(); },
+  async glAccount() { return (await fetch('/api/gl/account')).json(); },
+  async glSave(token) { return post('/api/gl/save', { token }); },
+  async glCheck(cfg) { return post('/api/gl/check', cfg || {}); },
+  async glProjects(q) { return (await fetch(`/api/gl/projects?q=${encodeURIComponent(q || '')}`)).json(); },
   async bansList(id) { return (await fetch(`/api/servers/${id}/bans`)).json(); },
   async bansUnban(id, target) { return post(`/api/servers/${id}/bans/unban`, target); },
   async bansBan(id, target) { return post(`/api/servers/${id}/bans/ban`, target); },
@@ -112,8 +139,8 @@ const httpApi = {
   async addonsList() { return (await fetch('/api/addons/list')).json(); },
   async addonsSetEnabled(id, on) { return post('/api/addons/toggle', { id, on }); },
   async addonsPanel(id) { return (await fetch('/api/addons/panel?id=' + encodeURIComponent(id))).json(); },
-  async addonsDirs() { return { user: '', builtin: '' }; },
-  async addonsReveal(id) { return { ok: false }; },
+  async addonsDirs() { return (await fetch('/api/addons/dirs')).json(); },
+  async addonsReveal(id) { return post('/api/addons/reveal', { id }); },
   async addonsCall(id, method, args, serverId) { return post('/api/addons/call', { id, method, args, serverId }); },
   async portsCheck(id) { return (await fetch('/api/ports/check?id=' + encodeURIComponent(id))).json(); },
   async portsFree(id, from) { return (await fetch('/api/ports/free?id=' + encodeURIComponent(id) + '&from=' + encodeURIComponent(from))).json(); },
@@ -123,21 +150,30 @@ const httpApi = {
     const q = new URLSearchParams(opts || {}).toString();
     return (await fetch('/api/modrinth/search?' + q)).json();
   },
-  async modrinthDetect(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
-  async modrinthInstalled(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
-  async modrinthInstall(id, opts) { return post('/api/modrinth/install', { id, ...(opts || {}) }); },
-  async modrinthVersions() { return { ok: false, versions: [] }; },
-  async modrinthCategories() { return { ok: false, categories: [] }; },
-  async wallPalette() { return { ok: false, error: 'Подбор цвета работает только в exe-версии' }; },
+  async modrinthDetect(id) { return (await fetch('/api/modrinth/detect?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstalled(id) { return (await fetch('/api/modrinth/installed?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstall(id, opts) { return post('/api/modrinth/install', { serverId: id, ...(opts || {}) }); },
+  async modrinthVersions(id, opts) {
+    const q = new URLSearchParams({ id, ...(opts || {}) }).toString();
+    return (await fetch('/api/modrinth/versions?' + q)).json();
+  },
+  async modrinthCategories(type) {
+    return (await fetch('/api/modrinth/categories?type=' + encodeURIComponent(type || 'plugin'))).json();
+  },
+  async wallPalette(source) { return post('/api/wall/palette', source || {}); },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },
-  async iconToServer(cwd, dataUrl) { return post('/api/icon/to', { cwd, dataUrl }); },
+  async iconPick() { return (await fetch('/api/icon/pick', { method: 'POST' })).json(); },
+  async iconToServer(cwd, dataUrl) { return post('/api/icon/toServer?cwd=' + encodeURIComponent(cwd || ''), { dataUrl }); },
   async wizardCatalog() { return (await fetch('/api/wizard/catalog')).json(); },
   async wizardVersions(id) { return (await fetch('/api/wizard/versions?id=' + encodeURIComponent(id))).json(); },
   async wizardJava() { return (await fetch('/api/wizard/java')).json(); },
   async wizardOpenJava() { window.open('https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk', '_blank'); return true; },
-  async wizardPickParent() { return null; },
-  async wizardSuggestDir(parent, name) { return (parent ? parent.replace(/[\\/]+$/, '') + '/' + name : name); },
+  async wizardPickParent() { return (await fetch('/api/wizard/pickParent', { method: 'POST' })).json(); },
+  async wizardSuggestDir(parent, name) {
+    const q = new URLSearchParams({ parent: parent || '', name: name || '' }).toString();
+    return (await fetch('/api/wizard/suggestDir?' + q)).json();
+  },
   async wizardCreate(opts) { return post('/api/wizard/create', opts); },
   onWizardProgress(cb) { (this.subs['wizard-progress'] ||= []).push(cb); },
   async tpsClear(id) { return post(`/api/servers/${id}/tps/clear`); },
@@ -152,12 +188,14 @@ const httpApi = {
   async iconFromServer(cwd) {
     if (!cwd) return null;
     try {
-      const r = await fetch('/api/icon?cwd=' + encodeURIComponent(cwd));
-      if (!r.ok) return null;
-      const d = await r.json();
-      return d.dataUrl || null;
+      const d = await (await fetch('/api/icon/fromServer?cwd=' + encodeURIComponent(cwd))).json();
+      return d || null;
     } catch { return null; }
   },
+  /* свои окна вопросов в браузере — тоже свои, без системных */
+  onAsk(cb) { (this.subs['ui:ask'] ||= []).push(cb); },
+  answerAsk(rid, id) { return post('/api/ui/answer', { rid, id }); },
+  askReady() { return post('/api/ui/ready'); },
   subs: {},
   onLog(cb) { (this.subs.log ||= []).push(cb); },
   onState(cb) { (this.subs.state ||= []).push(cb); },
@@ -165,13 +203,20 @@ const httpApi = {
   onLogsCleared(cb) { (this.subs['logs-cleared'] ||= []).push(cb); },
   onTps(cb) { (this.subs.tps ||= []).push(cb); },
   onMetrics(cb) { (this.subs.metrics ||= []).push(cb); },
-  onToast() { /* в браузере тостов от процесса нет */ },
+  onToast(cb) { (this.subs['toast'] ||= []).push(cb); },
+  onGhStage(cb) { (this.subs['gh:stage'] ||= []).push(cb); },
+  onMoveProgress(cb) { (this.subs['move-progress'] ||= []).push(cb); },
+  onUpdState(cb) { (this.subs['upd:state'] ||= []).push(cb); },
+  onUpdAvailable(cb) { (this.subs['upd:available'] ||= []).push(cb); },
+  onUpdProgress(cb) { (this.subs['upd:progress'] ||= []).push(cb); },
+  onUpdReady(cb) { (this.subs['upd:ready'] ||= []).push(cb); },
   onScanFound(cb) { (this.subs['scan-found'] ||= []).push(cb); },
   onScanProgress(cb) { (this.subs['scan-progress'] ||= []).push(cb); },
   connect() {
     const es = new EventSource('/api/events');
     for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress',
-      'load:change', 'load:log', 'load:done']) {
+      'load:change', 'load:log', 'load:done', 'gh:stage', 'move-progress', 'toast',
+      'upd:state', 'upd:available', 'upd:progress', 'upd:ready', 'ui:ask']) {
       es.addEventListener(name, (e) => {
         const data = JSON.parse(e.data);
         for (const cb of this.subs[name] || []) cb(data);
@@ -190,7 +235,9 @@ async function post(url, body) {
 }
 
 const API = window.desktop || httpApi;
-const IS_DESKTOP = API.mode === 'desktop';
+/* Окно Tauri показывает ту же страницу через свой сервер панели, поэтому
+   «настольный» режим узнаём по ответу ядра: mode = desktop. */
+let IS_DESKTOP = API.mode === 'desktop';
 
 /* ═════════════════════ настройки интерфейса ═════════════════════ */
 
@@ -3540,12 +3587,12 @@ function askFromMain(payload) {
 
 /** Окно-вопрос от ядра: подписка на канал main → интерфейс. */
 function bindAskChannel() {
-  if (!window.desktop || !window.desktop.onAsk) return;
+  if (!API.onAsk) return;
   /* сообщаем ядру: свои окна можно показывать, интерфейс готов */
-  if (window.desktop.askReady) window.desktop.askReady();
-  window.desktop.onAsk(async (payload) => {
+  if (API.askReady) API.askReady();
+  API.onAsk(async (payload) => {
     const id = await askFromMain(payload || {});
-    if (window.desktop.answerAsk) window.desktop.answerAsk(payload.rid, id);
+    if (API.answerAsk) API.answerAsk(payload.rid, id);
   });
 }
 
@@ -7751,6 +7798,9 @@ function bindAddonsPage() {
   if (API.connect) API.connect();
 
   try { S.info = await API.info(); } catch { S.info = null; }
+  /* ядро на Rust живёт рядом с человеком: диалоги, автозапуск и обои доступны,
+     даже если страница открыта браузером на этом же компьютере */
+  if (S.info && S.info.mode === 'desktop') IS_DESKTOP = true;
 
   wizBind();
   fmBind();
