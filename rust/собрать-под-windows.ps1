@@ -100,11 +100,15 @@ $windowed = Test-Path (Join-Path $tauri "Cargo.toml")
 if ($windowed) {
   Write-Step "собираю окно на Tauri"
   Push-Location $tauri
+  # номер версии зашивается в exe при сборке, поэтому окно собираем заново:
+  # иначе cargo отдаёт готовый файл со старой версией
+  cargo clean --release -p omnipanel 2>$null
   cargo build --release
   Pop-Location
 } else {
   Write-Step "собираю панель (окно на Tauri ещё не перенесено)"
   Push-Location (Join-Path $Rust "omnipanel-core")
+  cargo clean --release -p omnipanel-core 2>$null
   cargo build --release
   Pop-Location
 }
@@ -122,6 +126,12 @@ if ($windowed) {
 $setupExe = Join-Path $Rust "omnipanel-setup\target\release\omnipanel-setup.exe"
 foreach ($file in @($panelExe, $setupExe)) {
   if (-not (Test-Path $file)) { throw "не собралось: $file" }
+}
+
+# проверка, что окно собралось именно этой версией
+$panelText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($panelExe))
+if ($panelText -notmatch [regex]::Escape("OmniPanel/$Version")) {
+  throw "панель собралась со старым номером версии — нужен $Version. Удалите target и запустите снова."
 }
 
 # ── 3. Портативная сборка ──────────────────────────────────────────────────
