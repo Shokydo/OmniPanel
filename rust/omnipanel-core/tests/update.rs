@@ -335,3 +335,44 @@ fn служебные_пути_защищены() {
     /* base64 нужен сборке обновлений — проверяем, что модуль под рукой */
     assert_eq!(b64::encode(b"ok"), "b2s=");
 }
+
+#[test]
+fn без_установщика_в_релизе_понятная_ошибка() {
+    /* в релизе только архив кода: обновляться установщиком нечем — говорим прямо,
+       а не молчим, как раньше молчала кнопка «Обновить и перезапустить» */
+    let release = r#"{"tag_name":"v1.28.0","body":"","assets":[
+        {"name":"OmniPanel-code.zip","browser_download_url":"http://example/code.zip","size":100}
+    ]}"#.as_bytes().to_vec();
+    let files = vec![("api/repos/Shokydo/OmniPanel/releases/latest", release)];
+    let fake = Fake::start(files);
+    let updater = Updater::with_bases(&temp_dir("upd-nosetup"), &app_dir("upd-nosetup-app"), "1.27.0", &fake.raw(), &fake.api());
+    let result = updater.apply_setup();
+    assert!(!ok(&result), "должна быть ошибка: {}", result.to_json());
+    assert!(text(&result, "error").contains("установщик"), "{}", result.to_json());
+}
+
+#[test]
+fn когда_версия_свежая_установка_не_начинается() {
+    let release = r#"{"tag_name":"v1.27.0","body":"","assets":[
+        {"name":"OmniPanel-Setup-1.27.0.exe","browser_download_url":"http://example/s.exe","size":100}
+    ]}"#.as_bytes().to_vec();
+    let files = vec![("api/repos/Shokydo/OmniPanel/releases/latest", release)];
+    let fake = Fake::start(files);
+    let updater = Updater::with_bases(&temp_dir("upd-fresh"), &app_dir("upd-fresh-app"), "1.27.0", &fake.raw(), &fake.api());
+    let result = updater.apply_setup();
+    assert!(!ok(&result), "{}", result.to_json());
+    assert!(text(&result, "error").contains("самая свежая"), "{}", result.to_json());
+}
+
+#[test]
+fn установщик_не_скачался_и_это_видно() {
+    let release = r#"{"tag_name":"v1.28.0","body":"","assets":[
+        {"name":"OmniPanel-Setup-1.28.0.exe","browser_download_url":"http://127.0.0.1:1/нет.exe","size":100}
+    ]}"#.as_bytes().to_vec();
+    let files = vec![("api/repos/Shokydo/OmniPanel/releases/latest", release)];
+    let fake = Fake::start(files);
+    let updater = Updater::with_bases(&temp_dir("upd-badurl"), &app_dir("upd-badurl-app"), "1.27.0", &fake.raw(), &fake.api());
+    let result = updater.apply_setup();
+    assert!(!ok(&result), "обновление не должно «получиться»: {}", result.to_json());
+    assert!(!text(&result, "error").is_empty());
+}

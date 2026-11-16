@@ -202,7 +202,20 @@ fn тест_идёт_и_присылает_события() {
     /* боты действительно вошли на сервер */
     assert!(fake.joined() >= 1, "на сервер не вошёл ни один бот: {}", fake.joined());
 
-    /* события дошли до интерфейса */
+    /* события дошли до интерфейса: последнее (о конце теста) приходит отдельным
+       потоком, поэтому пару секунд ждём именно его, а не «сколько успело» */
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(channel, _)| channel == "load:done")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let list = events.lock().unwrap().clone();
     let channels: Vec<String> = list.iter().map(|(channel, _)| channel.clone()).collect();
     assert!(channels.iter().any(|c| c == "load:log"), "нет событий журнала");

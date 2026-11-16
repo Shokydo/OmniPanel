@@ -6326,7 +6326,8 @@ function updRenderState(res, extra = '') {
   }
   notes.textContent = res.notes ? res.notes : '';
   if (res.ok && res.hasUpdate) {
-    $('updApplyBtn').disabled = !res.code;
+    /* в сборке на Rust обновляемся установщиком: кода в релизе нет */
+    $('updApplyBtn').disabled = !res.code && !res.setup;
     $('updFullBtn').disabled = !(res.setup || res.full);
   } else {
     $('updApplyBtn').disabled = true;
@@ -6384,17 +6385,46 @@ async function updCheckFlow() {
 
 async function updApplyFlow() {
   if (UPD.busy) return;
-  const res = await API.updApply();
-  if (!res.ok) { notify({ title: 'Обновление не встало', text: res.error, kind: 'err' }); return; }
-  $('updState').textContent = `обновлено до ${res.version}, перезапускаюсь…`;
-  const kept = (res.kept || []).length;
-  const extra = kept ? ' Настройки и серверы на месте.' : '';
-  notify({
-    title: 'Обновлено до ' + res.version,
-    text: `Файлов: ${res.files}.${extra} Панель перезапустится сама.`,
-    kind: 'ok',
-    ms: 7000,
-  });
+  UPD.busy = true;
+  const btn = $('updApplyBtn');
+  if (btn) btn.disabled = true;
+  $('updState').textContent = 'скачиваю обновление…';
+  try {
+    const res = await API.updApply();
+    if (!res.ok) {
+      $('updState').textContent = res.error || 'обновление не встало';
+      $('updState').classList.add('err');
+      notify({ title: 'Обновление не встало', text: res.error, kind: 'err', ms: 9000 });
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (res.setup) {
+      /* новая версия ставится установщиком: он подменит файлы и поднимет панель */
+      $('updState').textContent = `ставлю ${res.version} и перезапускаюсь…`;
+      notify({
+        title: 'Ставлю ' + res.version,
+        text: 'Установщик заменит файлы панели и запустит её сам. Настройки и серверы на месте.',
+        kind: 'ok',
+        ms: 12000,
+      });
+      return;
+    }
+    $('updState').textContent = `обновлено до ${res.version}, перезапускаюсь…`;
+    const kept = (res.kept || []).length;
+    const extra = kept ? ' Настройки и серверы на месте.' : '';
+    notify({
+      title: 'Обновлено до ' + res.version,
+      text: `Файлов: ${res.files}.${extra} Панель перезапустится сама.`,
+      kind: 'ok',
+      ms: 7000,
+    });
+  } catch (err) {
+    $('updState').textContent = 'обновление не удалось';
+    notify({ title: 'Обновление не встало', text: String(err && err.message ? err.message : err), kind: 'err' });
+    if (btn) btn.disabled = false;
+  } finally {
+    UPD.busy = false;
+  }
 }
 
 async function updFullFlow() {

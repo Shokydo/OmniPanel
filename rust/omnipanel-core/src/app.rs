@@ -1401,7 +1401,47 @@ impl App {
             "config" => Ok(updater.config()),
             "save" => Ok(updater.save(args.first().unwrap_or(&Value::Null))),
             "check" => Ok(updater.check()),
-            "apply" => Ok(updater.apply()),
+            /* «Обновить и перезапустить»: в сборке с установщиком ставим новую
+               версию установщиком, в остальных случаях — архивом кода */
+            "apply" => {
+                /* обновление заменяет файлы панели — с работающими серверами не начинаем */
+                let running: Vec<String> = self
+                    .manager
+                    .servers()
+                    .iter()
+                    .filter(|server| {
+                        matches!(
+                            self.manager.state(&server.id),
+                            ServerState::Running | ServerState::Stopping
+                        )
+                    })
+                    .map(|server| server.name.clone())
+                    .collect();
+                if !running.is_empty() {
+                    return Ok(sync::error_json(format!(
+                        "Сначала останови серверы ({}) — обновление заменяет файлы панели",
+                        running.join(", ")
+                    )));
+                }
+                /* 1. архив кода — так обновляется панель на Electron */
+                let via_code = updater.apply();
+                if via_code.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+                    return Ok(via_code);
+                }
+                /* 2. сборка с установщиком: скачиваем его и ставим поверх себя,
+                      затем просим окно закрыться — установщик поднимет новую версию */
+                let via_setup = updater.apply_setup();
+                if via_setup.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+                    let window = self.window();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        window.request(WindowCommand::Quit);
+                    });
+                    return Ok(via_setup);
+                }
+                Ok(via_setup)
+            }
+            "runSetup" => Ok(updater.run_setup()),
             "auto" => {
                 /* пока серверы работают, обновление ждёт: иначе мир оборвётся */
                 let running = self

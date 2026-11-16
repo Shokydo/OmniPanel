@@ -68,7 +68,9 @@ fn main() {
             let dir = args.get(2).map(PathBuf::from).unwrap_or_else(default_dir);
             let run = !args.iter().any(|a| a == "--no-run");
             let desktop = !args.iter().any(|a| a == "--no-desktop");
-            match install_into(&dir, desktop, run) {
+            /* --no-kill: панель закрывает себя сама (автообновление) */
+            let kill = !args.iter().any(|a| a == "--no-kill");
+            match install_into(&dir, desktop, run, kill) {
                 Ok(()) => println!("OmniPanel установлен в {}", dir.display()),
                 Err(err) => fail(&err),
             }
@@ -296,13 +298,35 @@ fn stop_running_panel() {
     }
 }
 
+/// Одна попытка распаковки: при занятом файле возвращает ошибку, и мы пробуем ещё.
+fn try_unpack(exe: &Path, dir: &Path) -> Result<usize, String> {
+    unpack(exe, dir)
+}
+
 /// Установка в выбранную папку — этим пользуется мастер установки.
-pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> {
+pub fn install_into(dir: &Path, desktop: bool, run: bool, kill: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     /* панель может быть запущена — закрываем её перед распаковкой */
     if app_exe(dir).exists() {
         println!("панель уже стоит в {} — обновляю", dir.display());
-        stop_running_panel();
+        if kill {
+            stop_running_panel();
+        } else {
+            /* при автообновлении панель закрывается сама: ждём, пока Windows
+               отпустит exe, иначе распаковка упадёт на «файл занят» */
+            for _ in 0..40 {
+                if try_unpack(&exe, dir).is_ok() {
+                    shortcuts(dir, desktop)?;
+                    remember_install(dir);
+                    if run {
+                        launch(&app_exe(dir), dir)?;
+                    }
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            return Err("панель не закрылась — обновление отменено".to_string());
+        }
     }
     let count = unpack(&exe, dir)?;
     shortcuts(dir, desktop)?;
@@ -345,11 +369,11 @@ fn wizard() -> Result<(), String> {
         return match status {
             Ok(_) => Ok(()),
             /* PowerShell почему-то нет — ставим без окна, в папку по умолчанию */
-            Err(_) => install_into(&default_dir(), true, true),
+            Err(_) => install_into(&default_dir(), true, true, true),
         };
     }
     #[cfg(not(windows))]
-    install_into(&default_dir(), true, true)
+    install_into(&default_dir(), true, true, true)
 }
 
 /// Имя запускаемого файла панели.
