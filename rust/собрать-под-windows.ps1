@@ -1,4 +1,4 @@
-# Сборка OmniPanel на Rust под Windows
+﻿# Сборка OmniPanel на Rust под Windows
 #
 #   powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1
 #

@@ -79,7 +79,9 @@ jobs:
         run: |
           $version = "${{ inputs.version }}"
           if (-not $version) { $version = "1.27.0" }
-          powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z
+          # PowerShell 7 читает UTF-8 без вопросов; у скрипта к тому же есть BOM,
+          # чтобы он работал и в Windows PowerShell 5.1 на вашей машине
+          pwsh -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z
 
       - name: Что получилось
         shell: pwsh
