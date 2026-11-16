@@ -11,6 +11,10 @@
 
 name: Сборка под Windows
 
+# без этого gh release create отвечает 403 «Resource not accessible by integration»
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
