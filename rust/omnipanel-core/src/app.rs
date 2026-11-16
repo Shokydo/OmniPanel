@@ -11,6 +11,7 @@
 use crate::ask::Ask;
 use crate::autostart;
 use crate::backup;
+use crate::modrinth;
 use crate::notify;
 use crate::wall;
 use crate::b64;
@@ -186,6 +187,12 @@ pub const READY_CHANNELS: &[&str] = &[
     "autostart:set",
     "shell:editor",
     "server:moveToApp",
+    "modrinth:search",
+    "modrinth:versions",
+    "modrinth:categories",
+    "modrinth:detect",
+    "modrinth:installed",
+    "modrinth:install",
     "backup:list",
     "backup:create",
     "backup:restore",
@@ -307,6 +314,7 @@ impl App {
             "icon" => self.icon(action, args),
             "autostart" => self.autostart(action, args),
             "backup" => self.backup(action, args),
+            "modrinth" => self.modrinth(action, args),
             "wall" => self.wall(action, args),
             "ui" => self.ui(action, args),
             "notify" => self.notify(action, args),
@@ -1458,6 +1466,51 @@ impl App {
                 Ok(Value::Bool(autostart::set(&autostart::Entry::current(), enabled)))
             }
             other => Err(not_migrated("autostart", other)),
+        }
+    }
+
+    /* ───────────── modrinth:* — каталог плагинов и модов ───────────── */
+
+    fn modrinth(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "search" => Ok(modrinth::search(args.first().unwrap_or(&Value::Null))),
+            "versions" => Ok(modrinth::versions(
+                &text(args, 0),
+                args.get(1).unwrap_or(&Value::Null),
+            )),
+            "categories" => Ok(modrinth::categories(&text(args, 0))),
+            "detect" => {
+                let dir = self.server_cwd(&text(args, 0)).unwrap_or_default();
+                let info = modrinth::detect(&dir);
+                let mut fields: Vec<(String, Value)> = match info.to_json() {
+                    Value::Obj(fields) => {
+                        fields.into_iter().map(|(key, value)| (key.to_string(), value)).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                fields.push(("ok".to_string(), Value::Bool(true)));
+                let value = Value::obj(
+                    fields
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.clone()))
+                        .collect::<Vec<(&str, Value)>>(),
+                );
+                Ok(value)
+            }
+            "installed" => {
+                let dir = self.server_cwd(&text(args, 0)).unwrap_or_default();
+                Ok(modrinth::installed(&dir))
+            }
+            "install" => {
+                let Some(dir) = self.server_cwd(&text(args, 0)) else {
+                    return Ok(Value::obj(vec![
+                        ("ok", Value::Bool(false)),
+                        ("error", Value::str("У сервера не задана рабочая папка")),
+                    ]));
+                };
+                Ok(modrinth::install(&dir, args.get(1).unwrap_or(&Value::Null)))
+            }
+            other => Err(not_migrated("modrinth", other)),
         }
     }
 

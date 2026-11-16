@@ -150,11 +150,16 @@ const httpApi = {
     const q = new URLSearchParams(opts || {}).toString();
     return (await fetch('/api/modrinth/search?' + q)).json();
   },
-  async modrinthDetect(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
-  async modrinthInstalled(id) { return (await fetch('/api/modrinth/info?id=' + encodeURIComponent(id))).json(); },
-  async modrinthInstall(id, opts) { return post('/api/modrinth/install', { id, ...(opts || {}) }); },
-  async modrinthVersions() { return { ok: false, versions: [] }; },
-  async modrinthCategories() { return { ok: false, categories: [] }; },
+  async modrinthDetect(id) { return (await fetch('/api/modrinth/detect?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstalled(id) { return (await fetch('/api/modrinth/installed?id=' + encodeURIComponent(id))).json(); },
+  async modrinthInstall(id, opts) { return post('/api/modrinth/install', { serverId: id, ...(opts || {}) }); },
+  async modrinthVersions(id, opts) {
+    const q = new URLSearchParams({ id, ...(opts || {}) }).toString();
+    return (await fetch('/api/modrinth/versions?' + q)).json();
+  },
+  async modrinthCategories(type) {
+    return (await fetch('/api/modrinth/categories?type=' + encodeURIComponent(type || 'plugin'))).json();
+  },
   async wallPalette(source) { return post('/api/wall/palette', source || {}); },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },

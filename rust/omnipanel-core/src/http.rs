@@ -239,6 +239,36 @@ impl PanelServer {
                 vec![Value::Str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
             ),
             /* ── свои обои, окна вопросов, уведомления ── */
+            /* ── каталог Modrinth ── */
+            ("GET", "/api/modrinth/search") => (
+                "modrinth:search",
+                vec![Value::Obj(
+                    params
+                        .iter()
+                        .map(|(key, value)| (key.clone(), Value::Str(value.clone())))
+                        .collect(),
+                )],
+            ),
+            ("GET", "/api/modrinth/versions") => (
+                "modrinth:versions",
+                vec![
+                    Value::str(arg("id")),
+                    Value::obj(vec![
+                        ("loader", Value::str(arg("loader"))),
+                        ("version", Value::str(arg("version"))),
+                    ]),
+                ],
+            ),
+            ("GET", "/api/modrinth/categories") => ("modrinth:categories", vec![Value::str(arg("type"))]),
+            ("GET", "/api/modrinth/detect") => ("modrinth:detect", vec![Value::str(arg("id"))]),
+            ("GET", "/api/modrinth/installed") => ("modrinth:installed", vec![Value::str(arg("id"))]),
+            ("POST", "/api/modrinth/install") => (
+                "modrinth:install",
+                vec![
+                    Value::str(body_json.get("serverId").map(|v| v.text()).unwrap_or_else(|| arg("id"))),
+                    body_json.clone(),
+                ],
+            ),
             ("POST", "/api/backup/delete") => (
                 "backup:delete",
                 vec![
