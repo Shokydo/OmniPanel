@@ -7,7 +7,6 @@
 //! * недостающие ключи дописываются в конец.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 /// Что получилось из файла: значения, комментарии и порядок строк.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -188,70 +187,50 @@ pub fn decode(value: &str) -> String {
     out
 }
 
-/// Готовый набор базовых ключей (как `PROP_FIELDS` в панели).
+/// Настройки `server.properties` по схеме интерфейса (`ui/props-schema.js`).
+///
+/// Таблица полей лежит в `props_schema.rs` и собирается генератором
+/// `tools/gen-props-schema.js`: список настроек один на всю панель, чтобы окно
+/// и ядро не разъехались.
 pub struct Props {
     pub file: PropsFile,
 }
 
 impl Props {
-    pub const BOOL_KEYS: &'static [&'static str] = &[
-        "online-mode",
-        "enable-command-block",
-        "allow-flight",
-        "spawn-animals",
-        "spawn-monsters",
-        "spawn-npcs",
-        "pvp",
-        "hardcore",
-        "allow-nether",
-        "enable-status",
-        "white-list",
-        "force-gamemode",
-        "prevent-proxy-connections",
-    ];
-    pub const NUMBER_KEYS: &'static [&'static str] = &[
-        "server-port",
-        "max-players",
-        "view-distance",
-        "simulation-distance",
-        "spawn-protection",
-        "query.port",
-        "rcon.port",
-        "op-permission-level",
-        "player-idle-timeout",
-        "network-compression-threshold",
-    ];
-    pub const TEXT_KEYS: &'static [&'static str] = &["motd", "level-name", "level-type", "difficulty", "gamemode", "level-seed"];
-
-    pub fn parse(text: &str) -> Self {
-        Props {
-            file: PropsFile::parse(text),
-        }
+    /// Все ключи схемы — остальное панель считает «прочими» (плагины, моды).
+    pub fn all_keys() -> Vec<&'static str> {
+        crate::props_schema::keys()
     }
 
-    /// Базовые значения для экрана настроек.
+    /// Настройка по ключу вместе с типом.
+    pub fn field(key: &str) -> Option<&'static crate::props_schema::Field> {
+        crate::props_schema::field(key)
+    }
+
+    pub fn parse(text: &str) -> Self {
+        Props { file: PropsFile::parse(text) }
+    }
+
+    /// Значения для окна настроек: все поля схемы; отсутствующие — пустые.
     pub fn view(&self) -> BTreeMap<String, Option<String>> {
         let mut out = BTreeMap::new();
-        for key in Self::BOOL_KEYS
-            .iter()
-            .chain(Self::NUMBER_KEYS.iter())
-            .chain(Self::TEXT_KEYS.iter())
-        {
-            let value = if Self::BOOL_KEYS.contains(key) {
-                self.file.get_bool(key).map(|b| if b { "true".into() } else { "false".into() })
-            } else if Self::TEXT_KEYS.contains(key) {
-                self.file.get_text(key)
-            } else {
-                self.file.get(key).map(|s| s.trim().to_string())
+        for field in crate::props_schema::FIELDS {
+            let value = match field.kind {
+                crate::props_schema::Kind::Bool => self
+                    .file
+                    .get_bool(field.key)
+                    .map(|b| if b { "true".into() } else { "false".into() }),
+                crate::props_schema::Kind::Num => self.file.get(field.key).map(|s| s.trim().to_string()),
+                crate::props_schema::Kind::Text => self.file.get_text(field.key),
             };
-            out.insert(key.to_string(), value);
+            out.insert(field.key.to_string(), value);
         }
         out
     }
-}
 
-impl fmt::Display for PropsFile {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.lines.join("\n"))
+    /// Прочие ключи файла (не из схемы) — их панель тоже показывает и правит.
+    pub fn extra(&self) -> BTreeMap<String, String> {
+        let keys = Self::all_keys();
+        self.file.extra(&keys)
     }
 }

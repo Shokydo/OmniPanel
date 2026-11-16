@@ -8,7 +8,9 @@
 //! Пока канал не перенесён, он отвечает понятной ошибкой по-русски —
 //! панель не падает и не показывает пустоту.
 
+use crate::b64;
 use crate::files::{kind_of, Entry, FileError, Files, READ_LIMIT, WRITE_LIMIT};
+use crate::ports;
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
 use std::path::PathBuf;
@@ -94,6 +96,21 @@ pub const READY_CHANNELS: &[&str] = &[
     "files:move",
     "files:image",
     "path:check",
+    "archive:open",
+    "archive:read",
+    "archive:extract",
+    "ports:own",
+    "ports:check",
+    "ports:free",
+    "ports:set",
+    "props:read",
+    "props:write",
+    "files:upload",
+    "files:openExternal",
+    "files:editor",
+    "shell:openPath",
+    "server:editor",
+    "server:autoFolder",
 ];
 
 impl App {
@@ -148,6 +165,10 @@ impl App {
              * `fsWrap` отдаёт `{ ok: false, error }`, и интерфейс смотрит именно
              * на `ok`. Здесь так же — иначе кнопки молча перестанут работать. */
             "files" => Ok(wrap_files(self.files(action, args))),
+            "archive" => Ok(wrap_files(self.archive(action, args))),
+            "ports" => Ok(wrap_files(self.ports(action, args))),
+            "props" => Ok(wrap_files(self.props(action, args))),
+            "shell" => Ok(wrap_files(self.shell(action, args))),
             "app" => self.app(action, args),
             "path" => self.path(action, args),
             _ => Err(format!(
@@ -252,6 +273,23 @@ impl App {
                 self.manager.clear_logs(&id);
                 Ok(Value::Bool(true))
             }
+            "editor" => {
+                let root = self
+                    .manager
+                    .find(&id)
+                    .map(|c| c.root_dir())
+                    .unwrap_or_default();
+                if root.is_empty() {
+                    return Err("У сервера не задана рабочая папка".to_string());
+                }
+                open_in_system(&root)?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true))]))
+            }
+            "autoFolder" => {
+                /* папка `server` рядом с программой — как в панели */
+                let base = self.info.app_dir.clone();
+                Ok(Value::str(base.join("server").to_string_lossy()))
+            }
             other => Err(not_migrated("server", other)),
         }
     }
@@ -337,7 +375,328 @@ impl App {
                 let rel = text(args, 1);
                 image_json(&files, &rel)
             }
+            "upload" => {
+                /* перетаскивание файлов в окно: байты приходят base64-строкой */
+                let rel_dir = text(args, 1);
+                let name = text(args, 2);
+                let data = b64::decode(&text(args, 3))?;
+                let safe_name = sanitize_name(&name)?;
+                let target = if rel_dir.trim().is_empty() {
+                    safe_name.clone()
+                } else {
+                    format!("{}/{}", rel_dir.trim_matches('/'), safe_name)
+                };
+                let size = files.write_bytes(&target, &data).map_err(file_err)?;
+                Ok(Value::obj(vec![
+                    ("ok", Value::Bool(true)),
+                    ("name", Value::str(safe_name)),
+                    ("rel", Value::str(target)),
+                    ("size", Value::from(size)),
+                ]))
+            }
+            "openExternal" => {
+                let rel = text(args, 1);
+                let path = files.resolve(&rel).map_err(file_err)?;
+                open_in_system(&path.to_string_lossy())?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true))]))
+            }
+            "editor" => {
+                let rel = text(args, 1);
+                let path = files.resolve(&rel).map_err(file_err)?;
+                open_in_system(&path.to_string_lossy())?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true))]))
+            }
             other => Err(not_migrated("files", other)),
+        }
+    }
+
+    /* ───────────── archive:* ───────────── */
+
+    /// Архив целиком с диска: панель не открывает архивы больше 512 МБ.
+    fn archive_bytes(&self, files: &Files, rel: &str) -> Result<Vec<u8>, String> {
+        let (size, _) = files.meta(rel).map_err(file_err)?;
+        if size > 512 * 1024 * 1024 {
+            return Err("Архив больше 512 МБ — открой его архиватором".to_string());
+        }
+        files.read_bytes(rel).map_err(file_err)
+    }
+
+    fn archive(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        let rel = text(args, 1);
+        let files = self.files_of(&id)?;
+        match action {
+            "open" => {
+                let name = rel.to_lowercase();
+                if name.ends_with(".7z") {
+                    return Err("7z панель пока не распаковывает сама — открой архив архиватором".to_string());
+                }
+                if !(name.ends_with(".zip")
+                    || name.ends_with(".jar")
+                    || name.ends_with(".mcpack")
+                    || name.ends_with(".whl")
+                    || name.ends_with(".epub"))
+                {
+                    return Err("Это не архив".to_string());
+                }
+                let data = self.archive_bytes(&files, &rel)?;
+                let entries = crate::zip::list(&data)?;
+                let raw: u64 = entries.iter().map(|e| e.size).sum();
+                let list: Vec<Value> = entries
+                    .iter()
+                    .map(|e| {
+                        Value::obj(vec![
+                            ("name", Value::str(&e.name)),
+                            ("size", Value::from(e.size)),
+                            ("packed", Value::from(e.packed)),
+                        ])
+                    })
+                    .collect();
+                Ok(Value::obj(vec![
+                    ("path", Value::str(&rel)),
+                    ("size", Value::from(data.len() as u64)),
+                    ("total", Value::from(entries.len())),
+                    ("raw", Value::from(raw)),
+                    ("entries", Value::Arr(list)),
+                    ("format", Value::str("zip")),
+                ]))
+            }
+            "read" => {
+                let entry = text(args, 2);
+                let data = self.archive_bytes(&files, &rel)?;
+                let content = crate::zip::read_by_name(&data, &entry)?;
+                describe_entry(&entry, &content)
+            }
+            "extract" => {
+                let dest_rel = text(args, 2);
+                let only = text(args, 3);
+                let data = self.archive_bytes(&files, &rel)?;
+                let dest = files.resolve(&dest_rel).map_err(file_err)?;
+                std::fs::create_dir_all(&dest).map_err(|e| format!("не удалось создать папку: {}", e))?;
+                let (count, bytes, names) = crate::zip::extract(&data, &dest, &only)?;
+                let list: Vec<Value> = names.iter().take(20).map(|n| Value::str(n)).collect();
+                Ok(Value::obj(vec![
+                    ("files", Value::from(count)),
+                    ("bytes", Value::from(bytes)),
+                    ("list", Value::Arr(list)),
+                    ("dest", Value::str(if dest_rel.is_empty() { "/" } else { &dest_rel })),
+                ]))
+            }
+            other => Err(not_migrated("archive", other)),
+        }
+    }
+
+    /* ───────────── ports:* ───────────── */
+
+    fn props_text(&self, files: &Files) -> String {
+        files.read_text("server.properties").unwrap_or_default()
+    }
+
+    /// Чужие занятые порты для проверки: только запущенные серверы панели.
+    fn busy_ports(&self, except: &str) -> Vec<(String, String, Vec<(String, u16)>)> {
+        let mut out = Vec::new();
+        for cfg in self.manager.servers() {
+            if cfg.id == except || self.manager.state(&cfg.id) == ServerState::Stopped {
+                continue;
+            }
+            let root = cfg.root_dir();
+            if root.is_empty() {
+                continue;
+            }
+            let text = Files::new(&root).read_text("server.properties").unwrap_or_default();
+            let list: Vec<(String, u16)> =
+                ports::own(&text).into_iter().map(|p| (p.key, p.port)).collect();
+            out.push((cfg.id, cfg.name, list));
+        }
+        out
+    }
+
+    fn ports(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        let files = self.files_of(&id)?;
+        match action {
+            "own" => {
+                let list: Vec<Value> = ports::own(&self.props_text(&files))
+                    .into_iter()
+                    .map(|p| {
+                        Value::obj(vec![
+                            ("key", Value::str(p.key)),
+                            ("label", Value::str(p.label)),
+                            ("port", Value::from(p.port as u64)),
+                        ])
+                    })
+                    .collect();
+                Ok(Value::obj(vec![("ports", Value::Arr(list))]))
+            }
+            "check" => {
+                let report = ports::check_all(&self.props_text(&files), &self.busy_ports(&id));
+                let ports_json: Vec<Value> = report
+                    .ports
+                    .iter()
+                    .map(|p| {
+                        Value::obj(vec![
+                            ("key", Value::str(&p.key)),
+                            ("label", Value::str(&p.label)),
+                            ("port", Value::from(p.port as u64)),
+                        ])
+                    })
+                    .collect();
+                let conflicts_json: Vec<Value> = report
+                    .conflicts
+                    .iter()
+                    .map(|c| {
+                        Value::obj(vec![
+                            ("key", Value::str(&c.key)),
+                            ("label", Value::str(&c.label)),
+                            ("port", Value::from(c.port as u64)),
+                            ("serverId", Value::str(&c.server_id)),
+                            ("serverName", Value::str(&c.server_name)),
+                            ("otherKey", Value::str(&c.other_key)),
+                        ])
+                    })
+                    .collect();
+                /* для занятого порта сразу предлагаем свободный — панель показывает
+                 * уведомление с кнопкой «сменить порт», и ей нужно значение */
+                let taken: Vec<u16> = report.ports.iter().map(|p| p.port).collect();
+                let busy_json: Vec<Value> = report
+                    .busy
+                    .iter()
+                    .map(|b| {
+                        let suggestion = report.suggestion(b.port, &taken);
+                        Value::obj(vec![
+                            ("key", Value::str(&b.key)),
+                            ("label", Value::str(&b.label)),
+                            ("port", Value::from(b.port as u64)),
+                            ("reason", Value::str("other-app")),
+                            (
+                                "suggest",
+                                suggestion.map(|p| Value::from(p as u64)).unwrap_or(Value::Null),
+                            ),
+                        ])
+                    })
+                    .collect();
+                Ok(Value::obj(vec![
+                    ("ports", Value::Arr(ports_json)),
+                    ("conflicts", Value::Arr(conflicts_json)),
+                    ("busy", Value::Arr(busy_json)),
+                ]))
+            }
+            "free" => {
+                let from = text(args, 1).parse::<u16>().unwrap_or(25565);
+                let taken: Vec<u16> = self.busy_ports(&id)
+                    .iter()
+                    .flat_map(|(_, _, list)| list.iter().map(|(_, p)| *p))
+                    .collect();
+                let mut candidate = from.max(1024);
+                let mut found = 0u16;
+                for _ in 0..300 {
+                    if candidate >= 65535 {
+                        break;
+                    }
+                    if !taken.contains(&candidate) && !ports::is_busy(candidate) {
+                        found = candidate;
+                        break;
+                    }
+                    candidate += 1;
+                }
+                Ok(Value::obj(vec![
+                    ("port", Value::from(found as u64)),
+                    ("ok", Value::Bool(found > 0)),
+                ]))
+            }
+            "set" => {
+                let key = text(args, 1);
+                let port = text(args, 2).parse::<u16>().unwrap_or(0);
+                let known = ports::SERVER_PORTS.iter().any(|(k, _, _, _)| *k == key);
+                if !known {
+                    return Err("Такой порт панель не меняет".to_string());
+                }
+                if port == 0 {
+                    return Err("Порт должен быть от 1 до 65535".to_string());
+                }
+                let old = self.props_text(&files);
+                let patch: std::collections::BTreeMap<String, String> =
+                    [(key.clone(), port.to_string())].into_iter().collect();
+                let parsed = crate::props::PropsFile::parse(&old);
+                let text_new = parsed.apply(&patch, &["enable-query", "enable-rcon"]);
+                files.write_text("server.properties", &text_new).map_err(file_err)?;
+                Ok(Value::obj(vec![
+                    ("key", Value::str(&key)),
+                    ("port", Value::from(port as u64)),
+                ]))
+            }
+            other => Err(not_migrated("ports", other)),
+        }
+    }
+
+    /* ───────────── props:* и shell:* ───────────── */
+
+    fn props(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        let files = self.files_of(&id)?;
+        match action {
+            "read" => {
+                let text_props = self.props_text(&files);
+                if text_props.is_empty() {
+                    return Ok(Value::obj(vec![
+                        ("exists", Value::Bool(false)),
+                        ("path", Value::str("server.properties")),
+                        ("props", Value::Obj(Vec::new())),
+                        ("other", Value::Obj(Vec::new())),
+                    ]));
+                }
+                let parsed = crate::props::PropsFile::parse(&text_props);
+                let view = crate::props::Props::parse(&text_props).view();
+                let props: Vec<(String, Value)> = view
+                    .into_iter()
+                    .map(|(k, v)| (k, v.map(Value::Str).unwrap_or(Value::Null)))
+                    .collect();
+                let other: Vec<(String, Value)> = parsed
+                    .extra(&crate::props::Props::all_keys())
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::Str(v)))
+                    .collect();
+                Ok(Value::obj(vec![
+                    ("exists", Value::Bool(true)),
+                    ("path", Value::str("server.properties")),
+                    ("props", Value::Obj(props)),
+                    ("other", Value::Obj(other)),
+                ]))
+            }
+            "write" => {
+                let patch_value = args.get(1).cloned().unwrap_or(Value::Obj(Vec::new()));
+                let Value::Obj(pairs) = patch_value else {
+                    return Err("Настройки пришли в неверном виде".to_string());
+                };
+                let patch: std::collections::BTreeMap<String, String> =
+                    pairs.into_iter().map(|(k, v)| (k, v.text())).collect();
+                let old = self.props_text(&files);
+                let parsed = crate::props::PropsFile::parse(&old);
+                let text_new = parsed.apply(&patch, &["enable-query", "enable-rcon"]);
+                files.write_text("server.properties", &text_new).map_err(file_err)?;
+                Ok(Value::obj(vec![
+                    ("ok", Value::Bool(true)),
+                    ("path", Value::str("server.properties")),
+                ]))
+            }
+            other => Err(not_migrated("props", other)),
+        }
+    }
+
+    fn shell(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "openPath" => {
+                let path = text(args, 0);
+                if path.is_empty() {
+                    return Err("Путь не указан".to_string());
+                }
+                if !std::path::Path::new(&path).exists() {
+                    return Err(format!("Папка не найдена: {}", path));
+                }
+                open_in_system(&path)?;
+                Ok(Value::obj(vec![("ok", Value::Bool(true))]))
+            }
+            other => Err(not_migrated("shell", other)),
         }
     }
 
@@ -383,6 +742,70 @@ fn wrap_files(result: Result<Value, String>) -> Value {
         Ok(other) => Value::obj(vec![("ok", Value::Bool(true)), ("result", other)]),
         Err(err) => Value::obj(vec![("ok", Value::Bool(false)), ("error", Value::str(err))]),
     }
+}
+
+/// Ответ на чтение файла из архива — как `describeEntry` в панели.
+fn describe_entry(name: &str, content: &[u8]) -> Result<Value, String> {
+    let lower = name.to_lowercase();
+    let is_image = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    if is_image {
+        const MAX_ENTRY_IMAGE: u64 = 8 * 1024 * 1024;
+        if content.len() as u64 > MAX_ENTRY_IMAGE {
+            return Err("Картинка слишком большая для просмотра".to_string());
+        }
+        let mime = if lower.ends_with(".png") {
+            "image/png"
+        } else if lower.ends_with(".gif") {
+            "image/gif"
+        } else if lower.ends_with(".webp") {
+            "image/webp"
+        } else if lower.ends_with(".bmp") {
+            "image/bmp"
+        } else {
+            "image/jpeg"
+        };
+        return Ok(Value::obj(vec![
+            ("kind", Value::str("image")),
+            ("name", Value::str(name)),
+            ("size", Value::from(content.len())),
+            ("dataUrl", Value::str(format!("data:{};base64,{}", mime, b64::encode(content)))),
+        ]));
+    }
+    if content[..content.len().min(8000)].contains(&0) {
+        return Err("Двоичный файл — можно только распаковать".to_string());
+    }
+    Ok(Value::obj(vec![
+        ("kind", Value::str("text")),
+        ("name", Value::str(name)),
+        ("size", Value::from(content.len())),
+        ("content", Value::str(crate::files::decode_bytes(content))),
+    ]))
+}
+
+/// Имя файла без разделителей пути — чтобы перетаскивание не писало куда попало.
+fn sanitize_name(name: &str) -> Result<String, String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let clean: String = base
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    if clean.is_empty() {
+        return Err("Пустое имя файла".to_string());
+    }
+    Ok(clean)
+}
+
+/// Открыть файл или папку тем, чем это делает система.
+fn open_in_system(path: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let result = std::process::Command::new("cmd").args(["/C", "start", "", path]).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    result.map(|_| ()).map_err(|e| format!("не удалось открыть: {}", e))
 }
 
 fn not_migrated(module: &str, action: &str) -> String {
@@ -495,24 +918,8 @@ fn image_json(files: &Files, rel: &str) -> Result<Value, String> {
         ("kind", Value::str("image")),
         ("size", Value::from(size)),
         ("mtime", Value::from(mtime)),
-        ("dataUrl", Value::str(format!("data:{};base64,{}", mime, base64(&bytes)))),
+        ("dataUrl", Value::str(format!("data:{};base64,{}", mime, b64::encode(&bytes)))),
     ]))
-}
-
-fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(triple >> 18) as usize & 63] as char);
-        out.push(TABLE[(triple >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(triple >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[triple as usize & 63] as char } else { '=' });
-    }
-    out
 }
 
 /// Идентификатор нового сервера. Без внешних крейтов: время + счётчик.

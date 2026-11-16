@@ -68,9 +68,35 @@ fn булевы_ключи_всегда_true_или_false() {
 #[test]
 fn чужие_ключи_попадают_в_дополнительные() {
     let file = PropsFile::parse("online-mode=false\nmy.plugin.setting=42\n");
-    let extra = file.extra(Props::BOOL_KEYS);
+    let extra = file.extra(&Props::all_keys());
     assert_eq!(extra.get("my.plugin.setting").map(String::as_str), Some("42"));
     assert!(extra.get("online-mode").is_none(), "известные ключи не дублируются");
+}
+
+#[test]
+fn схема_настроек_берётся_из_интерфейса() {
+    /* в ui/props-schema.js 64 настройки; таблица собирается генератором */
+    let keys = Props::all_keys();
+    assert_eq!(keys.len(), 64, "все настройки окна: {}", keys.len());
+    for key in ["motd", "server-port", "enable-rcon", "rcon.password", "gamemode", "view-distance"] {
+        assert!(keys.contains(&key), "нет настройки {key}");
+        assert!(Props::field(key).is_some(), "у {key} нет описания");
+    }
+    let port = Props::field("server-port").unwrap();
+    assert_eq!(port.kind, omnipanel_core::props_schema::Kind::Num);
+    assert_eq!(Props::field("motd").unwrap().kind, omnipanel_core::props_schema::Kind::Text);
+    assert_eq!(Props::field("pvp").unwrap().kind, omnipanel_core::props_schema::Kind::Bool);
+}
+
+#[test]
+fn окно_настроек_отдаёт_все_поля_схемы() {
+    let props = Props::parse("server-port=25565\nmotd=Привет\npvp=false\n");
+    let view = props.view();
+    assert_eq!(view.len(), 64, "пустые значения тоже показываем");
+    assert_eq!(view.get("motd").unwrap().as_deref(), Some("Привет"));
+    assert_eq!(view.get("server-port").unwrap().as_deref(), Some("25565"));
+    assert_eq!(view.get("pvp").unwrap().as_deref(), Some("false"));
+    assert_eq!(view.get("difficulty").unwrap(), &None, "чего нет в файле — пусто");
 }
 
 #[test]

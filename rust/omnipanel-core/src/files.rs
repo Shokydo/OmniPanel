@@ -204,6 +204,16 @@ impl Files {
         Ok(text.len() as u64)
     }
 
+    /// Записывает байты (перетаскивание файлов в окно).
+    pub fn write_bytes(&self, rel: &str, data: &[u8]) -> Result<u64, FileError> {
+        let path = self.resolve(rel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, data)?;
+        Ok(data.len() as u64)
+    }
+
     /// Создаёт папку.
     pub fn mkdir(&self, rel: &str) -> Result<(), FileError> {
         let path = self.resolve(rel)?;
@@ -355,11 +365,11 @@ pub fn decode_bytes(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.strip_prefix('\u{feff}').unwrap_or(text).to_string();
     }
-    bytes.iter().map(|b| cp1251(*b)).collect()
+    bytes.iter().map(|b| cp1251_char(*b)).collect()
 }
 
 /// Windows-1251 для русских логов сервера.
-fn cp1251(byte: u8) -> char {
+pub fn cp1251_char(byte: u8) -> char {
     if byte < 0x80 {
         return byte as char;
     }
