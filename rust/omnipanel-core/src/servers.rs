@@ -358,12 +358,28 @@ impl Manager {
         self.inner.configs.lock().unwrap().clone()
     }
 
+    /// Новый id сервера: время плюс счётчик, чтобы не совпал с прежним.
+    pub fn new_id(&self) -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let step = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("s{}{}", stamp, step)
+    }
+
     pub fn find(&self, id: &str) -> Option<ServerConfig> {
         self.inner.configs.lock().unwrap().iter().find(|s| s.id == id).cloned()
     }
 
     pub fn add(&self, cfg: ServerConfig) -> ServerConfig {
-        let cfg = cfg.normalize();
+        let mut cfg = cfg.normalize();
+        /* у сервера обязан быть id: без него панель не найдёт его ни по одной кнопке */
+        if cfg.id.trim().is_empty() {
+            cfg.id = self.new_id();
+        }
         self.inner.configs.lock().unwrap().push(cfg.clone());
         cfg
     }

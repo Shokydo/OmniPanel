@@ -250,6 +250,18 @@ impl PanelServer {
                 vec![Value::str(arg("parent")), Value::str(arg("name"))],
             ),
             ("POST", "/api/wizard/create") => ("wizard:create", vec![body_json.clone()]),
+            /* ── нагрузочный тест ботами ── */
+            ("GET", "/api/load/info") => ("load:info", vec![Value::str(arg("id"))]),
+            ("GET", "/api/load/status") => ("load:status", vec![]),
+            ("GET", "/api/load/versions") => ("load:versions", vec![]),
+            ("POST", "/api/load/start") => (
+                "load:start",
+                vec![
+                    Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_else(|| arg("id"))),
+                    body_json.clone(),
+                ],
+            ),
+            ("POST", "/api/load/stop") => ("load:stop", vec![]),
             /* ── каталог Modrinth ── */
             ("GET", "/api/modrinth/search") => (
                 "modrinth:search",

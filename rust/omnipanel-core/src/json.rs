@@ -89,6 +89,20 @@ impl Value {
         }
     }
 
+    /// Добавляет поле в объект, если его там ещё нет (остальные не трогает).
+    pub fn map_with(self, key: &str, value: Value) -> Value {
+        match self {
+            Value::Obj(mut pairs) => {
+                if !pairs.iter().any(|(name, _)| name == key) {
+                    pairs.push((key.to_string(), value));
+                }
+                Value::Obj(pairs)
+            }
+            Value::Null => Value::Obj(vec![(key.to_string(), value)]),
+            other => other,
+        }
+    }
+
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }

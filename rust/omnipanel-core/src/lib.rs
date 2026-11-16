@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod backup;
+pub mod bot;
 pub mod ask;
 pub mod autostart;
 pub mod b64;
@@ -13,7 +14,9 @@ pub mod dialog;
 pub mod deflate;
 pub mod files;
 pub mod json;
+pub mod md5;
 pub mod kernels;
+pub mod load;
 pub mod modrinth;
 pub mod net;
 pub mod notify;

@@ -12,6 +12,7 @@ use crate::ask::Ask;
 use crate::autostart;
 use crate::backup;
 use crate::kernels;
+use crate::load::{Config as LoadConfig, Load};
 use crate::modrinth;
 use crate::notify;
 use crate::wall;
@@ -27,7 +28,7 @@ use crate::window::{WindowBridge, WindowCommand};
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Настройки запуска: всё, что панель показывает в «О программе».
 #[derive(Debug, Clone)]
@@ -83,9 +84,40 @@ pub struct App {
     /// Поиск серверов на дисках: его можно отменить из интерфейса.
     scanner: Scanner,
     /// Куда панель отправляет события: окно, поток событий в браузере.
-    event_sinks: Mutex<Vec<Box<dyn Fn(&str, &str) + Send + std::marker::Sync>>>,
+    /// Список в `Arc`, чтобы фоновые потоки (нагрузочные боты, поиск серверов)
+    /// тоже могли отправлять события в интерфейс.
+    event_sinks: Sinks,
     /// Свои окна вопросов вместо системных.
     ask: Ask,
+    /// Нагрузочный тест: он идёт в своём потоке и живёт, пока не остановят.
+    load_test: Arc<Mutex<Option<Arc<Mutex<Load>>>>> ,
+    /// Чей это тест — чтобы события знали, к какому серверу они относятся.
+    load_owner: Mutex<Option<String>>,
+}
+
+/// Один получатель событий панели.
+pub type Sink = Arc<dyn Fn(&str, &str) + Send + std::marker::Sync>;
+/// Список получателей: окно, поток событий для браузера.
+pub type Sinks = Arc<Mutex<Vec<Sink>>>;
+
+/// Отправитель событий, который можно унести в фоновый поток.
+pub struct Publisher(Sinks);
+
+impl Publisher {
+    /// Отправляет событие всем получателям.
+    pub fn send(&self, channel: &str, payload: &Value) {
+        let list = self.0.lock().unwrap().clone();
+        for sink in list {
+            sink(channel, &payload.to_json());
+        }
+    }
+}
+
+impl std::ops::Deref for Publisher {
+    type Target = Sinks;
+    fn deref(&self) -> &Sinks {
+        &self.0
+    }
 }
 
 /// Какие каналы уже живут в Rust. Список нужен и тестам, и генератору моста:
@@ -188,6 +220,11 @@ pub const READY_CHANNELS: &[&str] = &[
     "autostart:set",
     "shell:editor",
     "server:moveToApp",
+    "load:info",
+    "load:start",
+    "load:stop",
+    "load:status",
+    "load:versions",
     "wizard:catalog",
     "wizard:versions",
     "wizard:java",
@@ -224,8 +261,10 @@ impl App {
             last_save_error: Mutex::new(None),
             window: Mutex::new(WindowBridge::new()),
             scanner: Scanner::new(),
-            event_sinks: Mutex::new(Vec::new()),
+            event_sinks: Arc::new(Mutex::new(Vec::new())),
             ask: Ask::new(),
+            load_test: Arc::new(Mutex::new(None)),
+            load_owner: Mutex::new(None),
         }
     }
 
@@ -234,7 +273,12 @@ impl App {
     where
         F: Fn(&str, &str) + Send + std::marker::Sync + 'static,
     {
-        self.event_sinks.lock().unwrap().push(Box::new(handler));
+        self.event_sinks.lock().unwrap().push(Arc::new(handler));
+    }
+
+    /// Отправитель событий для фонового потока: можно звать из любого потока.
+    pub fn publisher(&self) -> Publisher {
+        Publisher(Arc::clone(&self.event_sinks))
     }
 
     /// Отправить событие в интерфейс: `scan-progress`, `gh:stage`, `move-progress`…
@@ -324,6 +368,7 @@ impl App {
             "backup" => self.backup(action, args),
             "modrinth" => self.modrinth(action, args),
             "wizard" => self.wizard(action, args),
+            "load" => self.load(action, args),
             "wall" => self.wall(action, args),
             "ui" => self.ui(action, args),
             "notify" => self.notify(action, args),
@@ -1478,6 +1523,246 @@ impl App {
         }
     }
 
+    /* ───────────── load:* — нагрузочный тест ботами ───────────── */
+
+    fn load(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "versions" => Ok(Load::versions_json()),
+            "info" => Ok(self.load_info(&text(args, 0))),
+            "status" => {
+                /* интерфейс спрашивает состояние по серверу: чужой тест не показываем */
+                let wanted = text(args, 0);
+                let owner = self.load_owner.lock().unwrap().clone();
+                let mine = wanted.trim().is_empty() || owner.as_deref() == Some(wanted.as_str());
+                let running = self.load_test.lock().unwrap().clone();
+                match running {
+                    Some(load) if mine => Ok(load.lock().unwrap().status_json()),
+                    _ => Ok(Value::obj(vec![
+                        ("ok", Value::Bool(true)),
+                        ("running", Value::Bool(false)),
+                        ("status", Value::Null),
+                    ])),
+                }
+            }
+            "start" => Ok(self.load_start(&text(args, 0), args.get(1))),
+            "stop" => {
+                let wanted = text(args, 0);
+                let owner = self.load_owner.lock().unwrap().clone();
+                let mine = wanted.trim().is_empty() || owner.as_deref() == Some(wanted.as_str());
+                let running = self.load_test.lock().unwrap().clone();
+                match running {
+                    Some(load) if mine => {
+                        /* снимаем тест со счёта сразу: новый можно запускать хоть сейчас,
+                           а событие `load:done` пришлёт его собственный поток */
+                        *self.load_test.lock().unwrap() = None;
+                        let report = load.lock().unwrap().stop("остановлено вручную");
+                        Ok(Value::obj(vec![
+                            ("ok", Value::Bool(true)),
+                            ("running", Value::Bool(false)),
+                            ("report", report),
+                        ]))
+                    }
+                    _ => Ok(Value::obj(vec![
+                        ("ok", Value::Bool(false)),
+                        ("error", Value::str("тест не идёт")),
+                    ])),
+                }
+            }
+            other => Err(not_migrated("load", other)),
+        }
+    }
+
+    /// Настройки теста: сохранённые у сервера, иначе разумные значения.
+    fn load_info(&self, id: &str) -> Value {
+        if id.trim().is_empty() {
+            return load_error("Сервер не выбран");
+        }
+        let Some(server) = self.manager().find(id) else {
+            return Value::obj(vec![
+                ("ok", Value::Bool(false)),
+                ("error", Value::str("Сервер не найден")),
+            ]);
+        };
+        let saved = server
+            .extra
+            .iter()
+            .find(|(key, _)| key == "loadtest")
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Value::Null);
+        let port = saved
+            .get("port")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as u16)
+            .filter(|v| *v > 0)
+            .or_else(|| self.server_port(id))
+            .unwrap_or(25565);
+        let version = saved
+            .get("version")
+            .map(|v| v.text())
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.server_game_version(id))
+            .unwrap_or_else(|| "1.20.4".to_string());
+        let mut fields: Vec<(String, Value)> = vec![
+            ("ok".to_string(), Value::Bool(true)),
+            (
+                "host".to_string(),
+                Value::str(saved.get("host").map(|v| v.text()).unwrap_or_else(|| "127.0.0.1".to_string())),
+            ),
+            ("port".to_string(), Value::from(port as u64)),
+            ("version".to_string(), Value::str(&version)),
+            ("protocol".to_string(), Value::from(crate::bot::protocol_for_version(&version) as u64)),
+            (
+                "count".to_string(),
+                Value::Num(saved.get("count").and_then(|v| v.as_f64()).unwrap_or(5.0).max(1.0)),
+            ),
+            (
+                "rampMs".to_string(),
+                Value::Num(saved.get("rampMs").and_then(|v| v.as_f64()).unwrap_or(3000.0)),
+            ),
+            (
+                "durationMs".to_string(),
+                Value::Num(saved.get("durationMs").and_then(|v| v.as_f64()).unwrap_or(0.0)),
+            ),
+            (
+                "prefix".to_string(),
+                Value::str(saved.get("prefix").map(|v| v.text()).unwrap_or_else(|| "Bot".to_string())),
+            ),
+            (
+                "actions".to_string(),
+                crate::bot::Actions::from_json(saved.get("actions").unwrap_or(&Value::Null)).to_json(),
+            ),
+        ];
+        let running = self.load_test.lock().unwrap().clone();
+        fields.push(("running".to_string(), Value::Bool(running.is_some())));
+        fields.push((
+            "status".to_string(),
+            match running {
+                Some(load) => load.lock().unwrap().status_json(),
+                None => Value::Null,
+            },
+        ));
+        Value::obj(
+            fields
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect::<Vec<(&str, Value)>>(),
+        )
+    }
+
+    /// Порт сервера из его `server.properties`.
+    fn server_port(&self, id: &str) -> Option<u16> {
+        let dir = self.server_cwd(id)?;
+        let text = std::fs::read_to_string(dir.join("server.properties")).ok()?;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("server-port=") {
+                return rest.trim().parse::<u16>().ok();
+            }
+        }
+        None
+    }
+
+    /// Версия игры сервера — по его папке.
+    fn server_game_version(&self, id: &str) -> Option<String> {
+        let dir = self.server_cwd(id)?;
+        let detected = crate::modrinth::detect(&dir);
+        if detected.version.is_empty() {
+            None
+        } else {
+            Some(detected.version)
+        }
+    }
+
+    /// Запускает тест в отдельном потоке: боты не должны тормозить панель.
+    fn load_start(&self, id: &str, opts: Option<&Value>) -> Value {
+        if id.trim().is_empty() {
+            return load_error("Сервер не выбран");
+        }
+        let Some(server) = self.manager().find(id) else {
+            return load_error("Сервер не найден");
+        };
+        if self.load_test.lock().unwrap().is_some() {
+            return load_error("тест уже идёт");
+        }
+        let mut opts = opts.cloned().unwrap_or(Value::Null);
+        /* чего человек не указал — берём из сохранённых настроек сервера */
+        if opts.get("port").is_none() {
+            if let Some(port) = self.server_port(id) {
+                opts = opts.map_with("port", Value::from(port as u64));
+            }
+        }
+        if opts.get("version").is_none() {
+            if let Some(version) = self.server_game_version(id) {
+                opts = opts.map_with("version", Value::str(version));
+            }
+        }
+        let cfg = LoadConfig::from_json(&opts);
+        let load = std::sync::Arc::new(Mutex::new(Load::new(cfg.clone())));
+        *self.load_test.lock().unwrap() = Some(std::sync::Arc::clone(&load));
+        *self.load_owner.lock().unwrap() = Some(id.to_string());
+
+        /* настройки теста запоминаем у сервера — в следующий раз как было */
+        let mut patched = server.clone();
+        if let Some(slot) = patched.extra.iter_mut().find(|(key, _)| key == "loadtest") {
+            slot.1 = cfg.to_settings();
+        } else {
+            patched.extra.push(("loadtest".to_string(), cfg.to_settings()));
+        }
+        self.manager().update(id, patched);
+
+        /* поток теста: шаг 50 мс, события — в интерфейс */
+        let shared = std::sync::Arc::clone(&load);
+        let app_id = id.to_string();
+        let sinks = self.publisher();
+        let test_ref = Arc::clone(&self.load_test);
+        std::thread::spawn(move || {
+            loop {
+                let (running, logs, status) = {
+                    let mut test = shared.lock().unwrap();
+                    test.tick();
+                    let running = test.is_running();
+                    (running, test.take_logs(), test.status_json())
+                };
+                for line in logs {
+                    /* строка журнала — объект {t, text}: так её рисует вкладка ботов */
+                    sinks.send(
+                        "load:log",
+                        &Value::obj(vec![
+                            ("id", Value::str(&app_id)),
+                            ("line", line),
+                        ]),
+                    );
+                }
+                sinks.send(
+                    "load:change",
+                    &Value::obj(vec![
+                        ("id", Value::str(&app_id)),
+                        ("status", status),
+                    ]),
+                );
+                if !running {
+                    let report = shared.lock().unwrap().stop("готово");
+                    sinks.send(
+                        "load:done",
+                        &Value::obj(vec![
+                            ("id", Value::str(&app_id)),
+                            ("report", report),
+                        ]),
+                    );
+                    *test_ref.lock().unwrap() = None;
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+
+        let status = load.lock().unwrap().status_json();
+        Value::obj(vec![
+            ("ok", Value::Bool(true)),
+            ("status", status),
+        ])
+    }
+
     /* ───────────── wizard:* — мастер создания сервера ───────────── */
 
     fn wizard(&self, action: &str, args: &[Value]) -> Result<Value, String> {
@@ -2189,6 +2474,13 @@ fn backup_restore(app: &App, id: &str, args: &[Value]) -> Value {
         }
         Err(err) => backup_error(&err),
     }
+}
+
+fn load_error(message: &str) -> Value {
+    Value::obj(vec![
+        ("ok", Value::Bool(false)),
+        ("error", Value::str(message)),
+    ])
 }
 
 fn backup_error(message: &str) -> Value {

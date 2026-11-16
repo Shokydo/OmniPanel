@@ -412,3 +412,26 @@ fn без_папки_интерфейса_понятная_страница() {
     assert!(body.contains("ui"), "нет упоминания папки ui");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn нагрузочный_тест_по_http() {
+    let panel = start_panel();
+    /* список версий и пустое состояние — панель спрашивает их при открытии окна */
+    let (status, body) = request(panel.port, "GET", "/api/load/versions", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("1.20.4"), "версии: {body}");
+
+    let (status, body) = request(panel.port, "GET", "/api/load/status", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"running\":false"), "состояние: {body}");
+
+    /* без сервера тест не запускается — и это понятная ошибка, а не 500 */
+    let (status, body) = request(panel.port, "POST", "/api/load/start", r#"{"id":"нет-такого"}"#);
+    assert_eq!(status, 200);
+    assert!(body.contains("не найден") || body.contains("не выбран"), "ответ: {body}");
+
+    /* остановка, когда ничего не идёт */
+    let (status, body) = request(panel.port, "POST", "/api/load/stop", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("не идёт"), "ответ: {body}");
+}
