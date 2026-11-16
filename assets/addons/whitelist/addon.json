@@ -1,0 +1,11 @@
+{
+  "id": "whitelist",
+  "name": "Белый список",
+  "version": "1.0.0",
+  "author": "OmniPanel",
+  "description": "Игроки, которым можно заходить на сервер: добавление по нику, UUID через Mojang, запись в whitelist.json и переключатель white-list в server.properties.",
+  "icon": "Б",
+  "panel": { "title": "Белый список", "file": "panel.html" },
+  "permissions": ["files", "command"],
+  "defaultEnabled": true
+}

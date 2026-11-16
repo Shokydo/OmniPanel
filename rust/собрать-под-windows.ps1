@@ -13,7 +13,11 @@
 
 param(
   [string]$Version = "1.27.0",
-  [switch]$SkipInstall
+  [switch]$SkipInstall,
+  # Заодно скачать 7-Zip (7zr.exe, 590 КБ) — тогда бэкапы делаются плотным .7z
+  # и панель открывает чужие .7z-архивы. Без него панель работает, но бэкапы
+  # будут zip.
+  [switch]$With7z
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,6 +57,20 @@ if ($verMajor -lt 1 -or ($verMajor -eq 1 -and $verMinor -lt 91)) {
     rustup update stable
   } else {
     throw "Обновите Rust: https://rustup.rs (нужен 1.91 или новее)"
+  }
+}
+
+# ── 1б. 7-Zip рядом с панелью (по желанию) ─────────────────────────────────
+if ($With7z) {
+  Write-Step "скачиваю 7-Zip (7zr.exe)"
+  $binDir = Join-Path $Root "assets\bin"
+  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+  $seven = Join-Path $binDir "7za.exe"
+  if (Test-Path $seven) {
+    Write-Host "7-Zip уже на месте: $seven"
+  } else {
+    Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile $seven -UseBasicParsing
+    Write-Host ("7-Zip скачан: {0:N0} КБ" -f ((Get-Item $seven).Length / 1KB))
   }
 }
 

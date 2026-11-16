@@ -37,6 +37,16 @@ powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1
 
 Версию можно задать: `-File rust\собрать-под-windows.ps1 -Version 1.27.0`.
 
+Плотные бэкапы `.7z` (и открытие чужих `.7z`-архивов) включаются одним
+ключом — скрипт скачает консольный 7-Zip (590 КБ) в `assets\bin`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -With7z
+```
+
+Без него панель работает так же, только бэкапы делает своим zip (тоже сжатым),
+а на `.7z` честно отвечает, что нужен 7-Zip.
+
 ## Что делает установщик
 
 * первый запуск: распаковывает панель в `%LOCALAPPDATA%\OmniPanel`,

@@ -341,3 +341,47 @@ fn без_папки_сервера_мост_отвечает_понятно() {
         "ошибка: {error}"
     );
 }
+
+#[test]
+fn встроенные_аддоны_панели_на_месте() {
+    /* свои аддоны не должны затирать встроенные: у панели они уже есть
+       (белый список и мифические мобы), и они едут вместе с программой */
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("addons");
+    if !repo.is_dir() {
+        return; /* панель собрана без папки assets — проверять нечего */
+    }
+
+    let root = temp_dir("builtin");
+    let data = root.join("data");
+    let app_dir = repo.parent().unwrap().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&data).unwrap();
+    let mut info = AppInfo::default();
+    info.data_dir = data.clone();
+    info.config_path = data.join("servers.json");
+    info.app_dir = app_dir;
+    let app = App::new(info);
+
+    let items = list_of(&app);
+    let ids: Vec<String> = items.iter().map(|a| a.get("id").map(|v| v.text()).unwrap_or_default()).collect();
+    assert!(ids.contains(&"whitelist".to_string()), "встроенные аддоны: {:?}", ids);
+    assert!(ids.contains(&"mythic-mobs".to_string()), "встроенные аддоны: {:?}", ids);
+
+    let whitelist = items
+        .iter()
+        .find(|a| a.get("id").map(|v| v.text()) == Some("whitelist".to_string()))
+        .unwrap();
+    assert_eq!(whitelist.get("builtin").map(|v| v.text()), Some("true".to_string()));
+    assert_eq!(whitelist.get("hasPanel").map(|v| v.text()), Some("true".to_string()));
+    assert_eq!(whitelist.get("enabled").map(|v| v.text()), Some("true".to_string()));
+
+    /* панель встроенного аддона отдаётся целиком — в ней есть свой интерфейс */
+    let panel = call(&app, "addons:panel", &[Value::str("whitelist")]);
+    assert_eq!(panel.get("ok").map(|v| v.text()), Some("true".to_string()));
+    let html = panel.get("html").map(|v| v.text()).unwrap_or_default();
+    assert!(html.contains("<"), "панель аддона пустая");
+    assert!(html.len() > 500, "панель аддона подозрительно короткая: {}", html.len());
+}

@@ -1,0 +1,11 @@
+{
+  "id": "mythic-mobs",
+  "name": "Мифические мобы",
+  "version": "1.0.0",
+  "author": "OmniPanel",
+  "description": "Вики по MythicMobs, адаптация кода мобов (табуляция, Skill: → Skills:, Health) и проверка файлов MythicMobs на ошибки.",
+  "icon": "М",
+  "panel": { "title": "Мифические мобы", "file": "panel.html" },
+  "permissions": ["files", "command"],
+  "defaultEnabled": false
+}
