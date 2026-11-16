@@ -15,7 +15,11 @@ pub fn api() -> String {
 }
 
 /// Панель представляется Modrinth честно: их правила требуют имя и ссылку.
-pub const USER_AGENT: &str = "OmniPanel/1.27.0 (github.com/Shokydo/OmniPanel)";
+pub const USER_AGENT: &str = concat!(
+    "OmniPanel/",
+    env!("CARGO_PKG_VERSION"),
+    " (github.com/Shokydo/OmniPanel)"
+);
 
 /// Сколько берём за один запрос.
 const PAGE_LIMIT: usize = 40;

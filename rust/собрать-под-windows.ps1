@@ -79,13 +79,20 @@ $tauri = Join-Path $Root "src-tauri"
 # ── 1в. Версия ─────────────────────────────────────────────────────────────
 # Версию пишем в двух местах: её показывают окно панели и мастер установки.
 Write-Step "версия $Version"
-# без BOM: JSON и version.txt с меткой в начале ломают и Tauri, и version.txt
+# без BOM: метка в начале ломает и JSON, и чтение номера версии
 $noBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText((Join-Path $Rust "omnipanel-setup\version.txt"), $Version, $noBom)
-$conf = Join-Path $tauri "tauri.conf.json"
-$json = [System.IO.File]::ReadAllText($conf)
-$json = $json -replace '"version":\s*"[^"]*"', ('"version": "' + $Version + '"')
-[System.IO.File]::WriteAllText($conf, $json, $noBom)
+$manifests = @(
+  (Join-Path $Rust "omnipanel-core\Cargo.toml"),
+  (Join-Path $Rust "omnipanel-setup\Cargo.toml"),
+  (Join-Path $tauri "Cargo.toml"),
+  (Join-Path $tauri "tauri.conf.json")
+)
+foreach ($file in $manifests) {
+  $text = [System.IO.File]::ReadAllText($file)
+  $text = $text -replace '(?m)^version = "[^"]*"', ('version = "' + $Version + '"')
+  $text = $text -replace '"version":\s*"[^"]*"', ('"version": "' + $Version + '"')
+  [System.IO.File]::WriteAllText($file, $text, $noBom)
+}
 
 # ── 2. Сборка ──────────────────────────────────────────────────────────────
 # если в проекте уже есть окно на Tauri — собираем его, а не консольную панель
@@ -170,6 +177,7 @@ Write-Host "готово:" -ForegroundColor Green
 Write-Host ("  портативная сборка: {0}  ({1})" -f $zip, (Size $zip))
 Write-Host ("  установщик:         {0}  ({1})" -f $setupOut, (Size $setupOut))
 Write-Host ""
-Write-Host "Установщик кладёт панель в %LOCALAPPDATA%\OmniPanel,"
-Write-Host "делает ярлыки на рабочем столе и в меню «Пуск» и запускает её."
-Write-Host "Удаление: тот же exe с ключом --uninstall"
+Write-Host "Установщик показывает окно мастера: куда ставить (по умолчанию"
+Write-Host "%LOCALAPPDATA%\OmniPanel), ярлык на рабочем столе, кнопки «Установить»"
+Write-Host "и «Запустить». Ставится в выбранную папку и попадает в «Программы и"
+Write-Host "компоненты». Удаление: тот же exe с ключом --uninstall"

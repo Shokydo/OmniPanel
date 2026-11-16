@@ -17,9 +17,9 @@ use omnipanel_core::zip;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// Версия сборки: её пишет скрипт сборки в `version.txt` перед компиляцией.
+/// Версия сборки — из Cargo.toml, её пишет скрипт сборки перед компиляцией.
 fn setup_version() -> &'static str {
-    include_str!("../version.txt").trim()
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Метка встроенного архива.
