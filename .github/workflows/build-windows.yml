@@ -1,0 +1,114 @@
+# Сборка OmniPanel на Rust под Windows — прямо на GitHub.
+#
+#   Actions → «Сборка под Windows» → Run workflow
+#
+# Что делает то же самое, что rust\собрать-под-windows.ps1 на вашей машине:
+# ставит Rust, собирает окно (Tauri), установщик и портативную сборку,
+# кладёт в артефакты, а по галочке «release» — ещё и в релиз.
+#
+# Windows-раннер GitHub уже содержит MSVC (Visual Studio Build Tools) и
+# WebView2 — то есть ровно то, чего нет в песочнице, где писался переезд.
+
+name: Сборка под Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия сборки (например 1.27.0)'
+        required: false
+        default: '1.27.0'
+      release:
+        description: 'Опубликовать релиз с установщиком'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'src-tauri/**'
+      - 'ui/**'
+      - 'assets/**'
+      - 'tools/**'
+      - '.github/workflows/build-windows.yml'
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Собрать панель и установщик
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Взять код
+        uses: actions/checkout@v4
+
+      - name: Поставить Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 1.91 нужен HTTPS-клиенту панели (ureq + rustls)
+          toolchain: '1.91.0'
+
+      - name: Кэш сборки
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/omnipanel-core/target
+            rust/omnipanel-setup/target
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Тесты ядра
+        shell: pwsh
+        working-directory: rust/omnipanel-core
+        run: cargo test --release
+
+      - name: Собрать окно, портативную версию и установщик
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          if (-not $version) { $version = "1.27.0" }
+          powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z
+
+      - name: Что получилось
+        shell: pwsh
+        run: |
+          Get-ChildItem dist | Format-Table Name, @{n='МБ';e={[math]::Round($_.Length/1MB,1)}}
+
+      - name: Отдать сборку
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniPanel-win64
+          path: |
+            dist/OmniPanel-win64.zip
+            dist/*.exe
+          if-no-files-found: error
+
+      - name: Релиз с установщиком
+        if: ${{ inputs.release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ inputs.version }}"
+          if (-not $version) { $version = "1.27.0" }
+          $tag = "v$version"
+          # в релизе только установщик и архив кода — как договорились
+          gh release create $tag `
+            "dist/OmniPanel-Установка-$version.exe" `
+            "dist/OmniPanel-win64.zip" `
+            --title "OmniPanel $version на Rust" `
+            --notes @"
+          Панель управления серверами на Rust: одно окно, без Node.js.
+
+          **Установщик:** ``OmniPanel-Установка-$version.exe`` — ставит панель в
+          %LOCALAPPDATA%\OmniPanel, делает ярлыки и запускает её.
+          **Портативная сборка:** ``OmniPanel-win64.zip`` — распаковал и запустил.
+          "@
