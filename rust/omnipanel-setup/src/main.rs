@@ -11,7 +11,7 @@
 //! Ничего внешнего не нужно: распаковка своя (модуль `zip` ядра), ярлыки —
 //! через PowerShell, который в Windows есть всегда.
 
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 use omnipanel_core::zip;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -186,6 +186,7 @@ pub fn default_dir() -> PathBuf {
 }
 
 /// Значение из `HKCU\Software\OmniPanel` (пусто, если нет).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn registry_value(name: &str) -> Option<String> {
     let mut command = std::process::Command::new("reg");
     command.args(["query", "HKCU\\Software\\OmniPanel", "/v", name]);
@@ -292,6 +293,7 @@ pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> 
 
 /// Окно установщика: раскрывается, только если внутри есть панель.
 fn wizard() -> Result<(), String> {
+    #[cfg(windows)]
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     #[cfg(windows)]
     {
