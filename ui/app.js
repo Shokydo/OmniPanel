@@ -235,7 +235,9 @@ async function post(url, body) {
 }
 
 const API = window.desktop || httpApi;
-const IS_DESKTOP = API.mode === 'desktop';
+/* Окно Tauri показывает ту же страницу через свой сервер панели, поэтому
+   «настольный» режим узнаём по ответу ядра: mode = desktop. */
+let IS_DESKTOP = API.mode === 'desktop';
 
 /* ═════════════════════ настройки интерфейса ═════════════════════ */
 
@@ -7796,6 +7798,9 @@ function bindAddonsPage() {
   if (API.connect) API.connect();
 
   try { S.info = await API.info(); } catch { S.info = null; }
+  /* ядро на Rust живёт рядом с человеком: диалоги, автозапуск и обои доступны,
+     даже если страница открыта браузером на этом же компьютере */
+  if (S.info && S.info.mode === 'desktop') IS_DESKTOP = true;
 
   wizBind();
   fmBind();
