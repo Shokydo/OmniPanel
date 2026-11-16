@@ -22,14 +22,14 @@ const httpApi = {
   },
   async openPath(p) { return post('/api/open', { path: p }); },
   async pickIcon() { return null; },        // в браузере картинку выбираем через <input type=file>
-  async pickFolder() { return null; },
-  async pickFile() { return null; },
-  async pickFolders() { return []; },
+  async pickFolder() { return (await fetch('/api/dialog/pickFolder', { method: 'POST' })).json(); },
+  async pickFile() { return (await fetch('/api/dialog/pickFile', { method: 'POST' })).json(); },
+  async pickFolders() { return (await fetch('/api/dialog/pickFolders', { method: 'POST' })).json(); },
   async scanRoots() { return (await fetch('/api/scan/roots')).json(); },
   async scanStart(opts) { return post('/api/scan/start', opts); },
   async scanCancel() { return post('/api/scan/cancel'); },
-  async autostartGet() { return null; },
-  async autostartSet() { return null; },
+  async autostartGet() { return (await fetch('/api/autostart/get')).json(); },
+  async autostartSet(v) { return post('/api/autostart/set', { value: !!v }); },
   async startAll() { await Promise.all(S.servers.map((s) => this.start(s.id))); return true; },
   async stopAll() { await Promise.all(S.servers.map((s) => this.stop(s.id))); return true; },
   async restartAll() { for (const s of S.servers) await this.restart(s.id); return true; },
@@ -75,9 +75,7 @@ const httpApi = {
   async updApply() { return post('/api/upd/apply'); },
   async updDownloadFull() { return post('/api/upd/downloadFull'); },
   async updRevealBackups() { return post('/api/upd/revealBackups'); },
-  onUpdState() { /* в браузере нет */ },
-  onUpdAvailable() { /* в браузере нет */ },
-  onUpdProgress() { /* в браузере нет */ },
+
   /* GitHub: те же адреса, что у Rust-ядра */
   async ghVerify(cfg) { return post('/api/gh/verify', cfg || {}); },
   async ghAccount() { return (await fetch('/api/gh/account')).json(); },
@@ -103,8 +101,8 @@ const httpApi = {
   async ghStatus(id) { return (await fetch(`/api/gh/status?id=${encodeURIComponent(id)}`)).json(); },
   async ghForget(id) { return post(`/api/gh/forget?id=${encodeURIComponent(id)}`); },
   async serverAutoFolder() { return ''; },
-  async serverMoveToApp() { return { ok: false, error: 'Только в exe-версии' }; },
-  onMoveProgress() { /* в браузере нет */ },
+  async serverMoveToApp(id, opts) { return post(`/api/server/moveToApp?id=${encodeURIComponent(id)}`, opts || {}); },
+
   async wallRemove() { return { ok: true }; },
   onWinState() { /* в браузере нет своего окна */ },
   async backupList(id) { return (await fetch(`/api/servers/${id}/backups`)).json(); },
@@ -160,7 +158,8 @@ const httpApi = {
   async wallPalette() { return { ok: false, error: 'Подбор цвета работает только в exe-версии' }; },
   async propsRead(id) { return (await fetch(`/api/props?id=${encodeURIComponent(id)}`)).json(); },
   async propsWrite(id, patch) { return post(`/api/props?id=${encodeURIComponent(id)}`, patch); },
-  async iconToServer(cwd, dataUrl) { return post('/api/icon/to', { cwd, dataUrl }); },
+  async iconPick() { return (await fetch('/api/icon/pick', { method: 'POST' })).json(); },
+  async iconToServer(cwd, dataUrl) { return post('/api/icon/toServer?cwd=' + encodeURIComponent(cwd || ''), { dataUrl }); },
   async wizardCatalog() { return (await fetch('/api/wizard/catalog')).json(); },
   async wizardVersions(id) { return (await fetch('/api/wizard/versions?id=' + encodeURIComponent(id))).json(); },
   async wizardJava() { return (await fetch('/api/wizard/java')).json(); },
@@ -181,10 +180,8 @@ const httpApi = {
   async iconFromServer(cwd) {
     if (!cwd) return null;
     try {
-      const r = await fetch('/api/icon?cwd=' + encodeURIComponent(cwd));
-      if (!r.ok) return null;
-      const d = await r.json();
-      return d.dataUrl || null;
+      const d = await (await fetch('/api/icon/fromServer?cwd=' + encodeURIComponent(cwd))).json();
+      return d || null;
     } catch { return null; }
   },
   subs: {},
@@ -194,13 +191,20 @@ const httpApi = {
   onLogsCleared(cb) { (this.subs['logs-cleared'] ||= []).push(cb); },
   onTps(cb) { (this.subs.tps ||= []).push(cb); },
   onMetrics(cb) { (this.subs.metrics ||= []).push(cb); },
-  onToast() { /* в браузере тостов от процесса нет */ },
+  onToast(cb) { (this.subs['toast'] ||= []).push(cb); },
+  onGhStage(cb) { (this.subs['gh:stage'] ||= []).push(cb); },
+  onMoveProgress(cb) { (this.subs['move-progress'] ||= []).push(cb); },
+  onUpdState(cb) { (this.subs['upd:state'] ||= []).push(cb); },
+  onUpdAvailable(cb) { (this.subs['upd:available'] ||= []).push(cb); },
+  onUpdProgress(cb) { (this.subs['upd:progress'] ||= []).push(cb); },
+  onUpdReady(cb) { (this.subs['upd:ready'] ||= []).push(cb); },
   onScanFound(cb) { (this.subs['scan-found'] ||= []).push(cb); },
   onScanProgress(cb) { (this.subs['scan-progress'] ||= []).push(cb); },
   connect() {
     const es = new EventSource('/api/events');
     for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress',
-      'load:change', 'load:log', 'load:done']) {
+      'load:change', 'load:log', 'load:done', 'gh:stage', 'move-progress', 'toast',
+      'upd:state', 'upd:available', 'upd:progress', 'upd:ready']) {
       es.addEventListener(name, (e) => {
         const data = JSON.parse(e.data);
         for (const cb of this.subs[name] || []) cb(data);

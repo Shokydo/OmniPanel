@@ -8,7 +8,11 @@
 //! Пока канал не перенесён, он отвечает понятной ошибкой по-русски —
 //! панель не падает и не показывает пустоту.
 
+use crate::autostart;
 use crate::b64;
+use crate::dialog;
+use crate::image;
+use crate::scan::{self, Scanner};
 use crate::files::{kind_of, Entry, FileError, Files, READ_LIMIT, WRITE_LIMIT};
 use crate::ports;
 use crate::sync::{self, Options, Provider, Sync};
@@ -16,7 +20,7 @@ use crate::update::Updater;
 use crate::window::{WindowBridge, WindowCommand};
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Настройки запуска: всё, что панель показывает в «О программе».
@@ -70,6 +74,10 @@ pub struct App {
     last_save_error: Mutex<Option<String>>,
     /// Мост к окну (в HTTP-режиме без окна просто копит команды).
     window: Mutex<WindowBridge>,
+    /// Поиск серверов на дисках: его можно отменить из интерфейса.
+    scanner: Scanner,
+    /// Куда панель отправляет события: окно, поток событий в браузере.
+    event_sinks: Mutex<Vec<Box<dyn Fn(&str, &str) + Send + std::marker::Sync>>>,
 }
 
 /// Какие каналы уже живут в Rust. Список нужен и тестам, и генератору моста:
@@ -159,6 +167,19 @@ pub const READY_CHANNELS: &[&str] = &[
     "upd:auto",
     "upd:downloadFull",
     "upd:revealBackups",
+    "scan:roots",
+    "scan:start",
+    "scan:cancel",
+    "dialog:pickFolder",
+    "dialog:pickFile",
+    "dialog:pickFolders",
+    "icon:pick",
+    "icon:fromServer",
+    "icon:toServer",
+    "autostart:get",
+    "autostart:set",
+    "shell:editor",
+    "server:moveToApp",
 ];
 
 impl App {
@@ -169,6 +190,24 @@ impl App {
             info,
             last_save_error: Mutex::new(None),
             window: Mutex::new(WindowBridge::new()),
+            scanner: Scanner::new(),
+            event_sinks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Подписка на события панели (окно, поток событий для браузера).
+    pub fn on_event<F>(&self, handler: F)
+    where
+        F: Fn(&str, &str) + Send + std::marker::Sync + 'static,
+    {
+        self.event_sinks.lock().unwrap().push(Box::new(handler));
+    }
+
+    /// Отправить событие в интерфейс: `scan-progress`, `gh:stage`, `move-progress`…
+    pub fn publish(&self, channel: &str, payload: &Value) {
+        let body = payload.to_json();
+        for sink in self.event_sinks.lock().unwrap().iter() {
+            sink(channel, &body);
         }
     }
 
@@ -244,6 +283,10 @@ impl App {
             "gh" => self.gh(action, args),
             "gl" => self.gl(action, args),
             "upd" => self.upd(action, args),
+            "scan" => self.scan(action, args),
+            "dialog" => self.dialog(action),
+            "icon" => self.icon(action, args),
+            "autostart" => self.autostart(action, args),
             _ => Err(format!(
                 "команда «{}» ещё не перенесена в Rust — она появится в следующем шаге",
                 channel
@@ -358,6 +401,7 @@ impl App {
                 open_in_system(&root)?;
                 Ok(Value::obj(vec![("ok", Value::Bool(true))]))
             }
+            "moveToApp" => self.move_to_app(args),
             "autoFolder" => {
                 /* папка `server` рядом с программой — как в панели */
                 let base = self.info.app_dir.clone();
@@ -848,6 +892,9 @@ impl App {
 
     fn shell(&self, action: &str, args: &[Value]) -> Result<Value, String> {
         match action {
+            "editor" => {
+                Ok(open_in_editor(&text(args, 0)))
+            }
             "openPath" => {
                 let path = text(args, 0);
                 if path.is_empty() {
@@ -900,6 +947,103 @@ impl App {
         }
     }
 
+
+
+    /// Перенос папки сервера внутрь папки программы: `<программа>/server/<имя>`.
+    /// Пока копируется, в интерфейс уходят шаги `move-progress`.
+    fn move_to_app(&self, args: &[Value]) -> Result<Value, String> {
+        let id = text(args, 0);
+        let opts = args.get(1).cloned().unwrap_or(Value::Null);
+        let remove_old = opts.get("removeOld").map(|v| v.as_bool()).unwrap_or(false);
+        let Some(server) = self.manager.find(&id) else {
+            return Ok(sync::error_json("Сервер не найден"));
+        };
+        if server.cwd.trim().is_empty() {
+            return Ok(sync::error_json("У сервера не задана рабочая папка"));
+        }
+        if self.manager.state(&id) != ServerState::Stopped {
+            return Ok(sync::error_json("Останови сервер перед переносом"));
+        }
+
+        let root = self.info.app_dir.join("server");
+        if let Err(err) = std::fs::create_dir_all(&root) {
+            return Ok(sync::error_json(format!("Не удалось создать папку: {}", err)));
+        }
+        let safe = safe_folder_name(&server.name);
+        let mut dest = root.join(&safe);
+        let mut index = 2;
+        while dest.exists() && !same_path(&dest, PathBuf::from(&server.cwd).as_path()) {
+            dest = root.join(format!("{}_{}", safe, index));
+            index += 1;
+        }
+        let source = PathBuf::from(&server.cwd);
+        if same_path(&dest, &source) {
+            return Ok(Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("path", Value::str(server.cwd.clone())),
+                ("unchanged", Value::Bool(true)),
+            ]));
+        }
+
+        self.publish(
+            "move-progress",
+            &Value::obj(vec![
+                ("stage", Value::str("copy")),
+                ("text", Value::str("Копирую файлы…")),
+            ]),
+        );
+        let copied = copy_tree_with(&source, &dest, &|done, bytes| {
+            self.publish(
+                "move-progress",
+                &Value::obj(vec![
+                    ("stage", Value::str("copy")),
+                    ("files", Value::from(done)),
+                    ("bytes", Value::from(bytes)),
+                ]),
+            );
+        });
+        let copied = match copied {
+            Ok(count) => count,
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&dest);
+                return Ok(sync::error_json(format!("Перенос не удался: {}", err)));
+            }
+        };
+
+        let mut patch = ServerConfig::from_json(&Value::obj(vec![(
+            "cwd",
+            Value::str(dest.display().to_string()),
+        )]));
+        patch.id = server.id.clone();
+        patch.name = server.name.clone();
+        patch.command = server.command.clone();
+        patch.extra = server.extra.clone();
+        self.manager.update(&id, patch);
+        self.persist();
+        self.publish(
+            "move-progress",
+            &Value::obj(vec![
+                ("stage", Value::str("done")),
+                ("text", Value::str(format!("Готово: {}", dest.display()))),
+            ]),
+        );
+
+        let mut removed_old = false;
+        if remove_old {
+            if std::fs::remove_dir_all(&source).is_ok() {
+                removed_old = true;
+            } else {
+                self.note(&id, "Старую папку удалить не удалось");
+            }
+        }
+        self.note(&id, &format!("Папка сервера перенесена: {}", dest.display()));
+        Ok(Value::obj(vec![
+            ("ok", Value::Bool(true)),
+            ("path", Value::str(dest.display().to_string())),
+            ("files", Value::from(copied)),
+            ("removedOld", Value::Bool(removed_old)),
+        ]))
+    }
 
     /* ───────────── gh:* и gl:* — синхронизация сервера ───────────── */
 
@@ -1035,6 +1179,7 @@ impl App {
                 let who = opts.provider.name().to_string();
                 self.note(&server.id, &format!("{}: отправляю изменения…", who));
                 let result = sync::push(&store, &mut opts);
+                self.publish_logs(&server.id, &opts.logs);
                 self.note_push(&server.id, &who, &result);
                 Ok(result)
             }
@@ -1050,10 +1195,24 @@ impl App {
                 let who = opts.provider.name().to_string();
                 self.note(&server.id, &format!("{}: забираю сервер…", who));
                 let result = sync::pull(&store, &mut opts);
+                self.publish_logs(&server.id, &opts.logs);
                 self.note_push(&server.id, &who, &result);
                 Ok(result)
             }
             other => Err(not_migrated("gh", other)),
+        }
+    }
+
+    /// Шаги синхронизации — в окно настроек сервера, как в прежней панели.
+    fn publish_logs(&self, id: &str, logs: &[String]) {
+        for line in logs {
+            self.publish(
+                "gh:stage",
+                &Value::obj(vec![
+                    ("id", Value::str(id)),
+                    ("text", Value::str(line.clone())),
+                ]),
+            );
         }
     }
 
@@ -1125,6 +1284,157 @@ impl App {
                 Ok(result)
             }
             other => Err(not_migrated("upd", other)),
+        }
+    }
+
+
+    /* ───────────── scan:* — поиск серверов на дисках ───────────── */
+
+    fn scan(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "roots" => Ok(Value::Arr(scan::roots().iter().map(|r| Value::str(r.clone())).collect())),
+            "cancel" => {
+                self.scanner.cancel();
+                Ok(Value::Bool(true))
+            }
+            "start" => {
+                let opts = args.first().cloned().unwrap_or(Value::Null);
+                let roots: Vec<String> = match opts.get("roots") {
+                    Some(Value::Arr(items)) => items.iter().map(|v| v.text()).filter(|v| !v.is_empty()).collect(),
+                    _ => Vec::new(),
+                };
+                let roots = if roots.is_empty() { scan::roots() } else { roots };
+                let depth = opts
+                    .get("maxDepth")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as usize)
+                    .filter(|v| *v > 0)
+                    .unwrap_or(4)
+                    .min(8);
+                let types: Vec<String> = match opts.get("types") {
+                    Some(Value::Arr(items)) => items.iter().map(|v| v.text()).filter(|v| !v.is_empty()).collect(),
+                    _ => Vec::new(),
+                };
+                /* панель сама себя в списке не показывает */
+                let ignore = vec![
+                    self.info.app_dir.display().to_string(),
+                    self.info.data_dir.display().to_string(),
+                ];
+                let known: std::collections::HashSet<String> = self
+                    .manager
+                    .servers()
+                    .iter()
+                    .map(|server| server.work_dir().to_lowercase())
+                    .collect();
+
+                self.scanner.reset();
+                let app = self;
+                let found = self.scanner.scan(
+                    &roots,
+                    depth,
+                    &ignore,
+                    &types,
+                    &known,
+                    |item, added| app.publish("scan-found", &item.to_json(added)),
+                    |progress| app.publish("scan-progress", &progress.to_json()),
+                );
+                Ok(Value::Arr(
+                    found.iter().map(|item| item.to_json(known.contains(&item.path.to_lowercase()))).collect(),
+                ))
+            }
+            other => Err(not_migrated("scan", other)),
+        }
+    }
+
+    /* ───────────── dialog:* — выбор файла и папки ───────────── */
+
+    fn dialog(&self, action: &str) -> Result<Value, String> {
+        match action {
+            "pickFolder" => {
+                let picked = dialog::pick(dialog::Pick::Folder, "Выберите папку сервера");
+                Ok(picked.into_iter().next().map(Value::str).unwrap_or(Value::Null))
+            }
+            "pickFile" => {
+                let picked = dialog::pick(dialog::Pick::File, "Выберите файл запуска");
+                Ok(picked.into_iter().next().map(Value::str).unwrap_or(Value::Null))
+            }
+            "pickFolders" => {
+                let picked = dialog::pick(dialog::Pick::Folders, "Выберите папку или диск для поиска");
+                Ok(Value::Arr(picked.into_iter().map(Value::str).collect()))
+            }
+            other => Err(not_migrated("dialog", other)),
+        }
+    }
+
+    /* ───────────── icon:* — свои иконки серверов ───────────── */
+
+    fn icon(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            /* выбор картинки: сразу отдаём её интерфейсу как data-адрес */
+            "pick" => {
+                let picked = dialog::pick(dialog::Pick::File, "Выберите иконку сервера");
+                let Some(path) = picked.into_iter().next() else {
+                    return Ok(Value::Null);
+                };
+                Ok(match icon_data_url(PathBuf::from(&path).as_path()) {
+                    Some(url) => Value::str(url),
+                    None => Value::Null,
+                })
+            }
+            /* иконка, которая уже лежит в папке сервера */
+            "fromServer" => {
+                let dir = PathBuf::from(text(args, 0));
+                if dir.as_os_str().is_empty() {
+                    return Ok(Value::Null);
+                }
+                for name in ["server-icon.png", "icon.png", "logo.png", "server-icon.jpg"] {
+                    if let Some(url) = icon_data_url(&dir.join(name)) {
+                        return Ok(Value::str(url));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            /* иконка из интерфейса → server-icon.png 64×64 в папке сервера */
+            "toServer" => {
+                let dir = PathBuf::from(text(args, 0));
+                let data_url = text(args, 1);
+                if dir.as_os_str().is_empty() || data_url.is_empty() {
+                    return Ok(sync::error_json("Нет папки или иконки"));
+                }
+                if !dir.exists() {
+                    return Ok(sync::error_json(format!("Папка не найдена: {}", dir.display())));
+                }
+                match image::from_data_url(&data_url) {
+                    Ok(picture) => {
+                        let target = dir.join("server-icon.png");
+                        match std::fs::write(&target, image::server_icon(&picture)) {
+                            Ok(_) => Ok(Value::obj(vec![
+                                ("ok", Value::Bool(true)),
+                                ("path", Value::str(target.display().to_string())),
+                            ])),
+                            Err(err) => Ok(sync::error_json(format!("Не удалось записать иконку: {}", err))),
+                        }
+                    }
+                    Err(message) => Ok(sync::error_json(format!(
+                        "{} — сохрани иконку в PNG",
+                        message
+                    ))),
+                }
+            }
+            other => Err(not_migrated("icon", other)),
+        }
+    }
+
+    /* ───────────── autostart:* — запуск вместе с системой ───────────── */
+
+    fn autostart(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "get" => Ok(Value::Bool(autostart::get())),
+            "set" => {
+                let enabled = args.first().map(|v| v.as_bool()).unwrap_or(false);
+                Ok(Value::Bool(autostart::set(&autostart::Entry::current(), enabled)))
+            }
+            other => Err(not_migrated("autostart", other)),
         }
     }
 
@@ -1360,4 +1670,161 @@ fn new_id() -> String {
         .unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{:x}-{:04x}", now, n & 0xffff)
+}
+
+/// Имя папки из названия сервера: без запрещённых символов и пробелов.
+fn safe_folder_name(name: &str) -> String {
+    let mut out = String::new();
+    for symbol in name.chars() {
+        if "\\/:*?\"<>|".contains(symbol) {
+            continue;
+        }
+        out.push(if symbol.is_whitespace() { '_' } else { symbol });
+    }
+    let trimmed: String = out.chars().take(60).collect();
+    if trimmed.is_empty() {
+        "server".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Копирует папку целиком, сообщая о ходе (файлы и байты).
+fn copy_tree_with(
+    from: &Path,
+    to: &Path,
+    progress: &dyn Fn(usize, u64),
+) -> Result<usize, String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("не создать папку: {}", e))?;
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let mut stack = vec![from.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = match path.strip_prefix(from) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => continue,
+            };
+            let target = to.join(&rel);
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                let _ = std::fs::create_dir_all(&target);
+                stack.push(path);
+            } else if meta.is_file() {
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let size = std::fs::copy(&path, &target).map_err(|e| format!("не скопировать {}: {}", rel.display(), e))?;
+                files += 1;
+                bytes += size;
+                if files % 50 == 0 {
+                    progress(files, bytes);
+                }
+            }
+        }
+    }
+    progress(files, bytes);
+    Ok(files)
+}
+
+/// Картинка из файла в виде data-адреса. Крупные файлы не берём.
+fn icon_data_url(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    if data.starts_with(b"\x89PNG") {
+        /* PNG уменьшаем сами: в списке серверов иконка мелкая */
+        if let Ok(picture) = image::decode_png(&data) {
+            return Some(image::to_data_url(&picture.resize(128, 128)));
+        }
+    }
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    let mime = if data.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if name.ends_with(".webp") {
+        "image/webp"
+    } else if name.ends_with(".bmp") {
+        "image/bmp"
+    } else if name.ends_with(".ico") {
+        "image/x-icon"
+    } else {
+        return None;
+    };
+    Some(format!("data:{};base64,{}", mime, b64::encode(&data)))
+}
+
+/// Открыть файл в редакторе кода; если его нет — системным приложением.
+fn open_in_editor(target: &str) -> Value {
+    let path = if target.trim().is_empty() {
+        return sync::error_json("Путь не указан");
+    } else {
+        PathBuf::from(target.trim())
+    };
+    if !path.exists() {
+        return sync::error_json(format!("Не найдено: {}", path.display()));
+    }
+    for candidate in editor_candidates() {
+        let result = std::process::Command::new(&candidate)
+            .arg("--reuse-window")
+            .arg(&path)
+            .spawn();
+        if result.is_ok() {
+            return Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("editor", Value::str("editor")),
+                ("bin", Value::str(candidate)),
+            ]);
+        }
+    }
+    match open_in_system(&path.display().to_string()) {
+        Ok(_) => Value::obj(vec![("ok", Value::Bool(true)), ("editor", Value::str("system"))]),
+        Err(message) => sync::error_json(message),
+    }
+}
+
+/// Какие редакторы ищем: сначала VS Code и его родня, потом «блокнот».
+fn editor_candidates() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if cfg!(windows) {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            for sub in [
+                "Programs\\Microsoft VS Code\\bin\\code.cmd",
+                "Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd",
+                "Programs\\VSCodium\\bin\\codium.cmd",
+            ] {
+                out.push(format!("{}\\{}", local, sub));
+            }
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            out.push(format!("{}\\Microsoft VS Code\\bin\\code.cmd", pf));
+        }
+    }
+    for name in ["code", "code-insiders", "codium", "subl", "notepad++"] {
+        out.push(name.to_string());
+    }
+    out
 }

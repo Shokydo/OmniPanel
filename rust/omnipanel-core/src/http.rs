@@ -49,6 +49,13 @@ impl PanelServer {
             broadcast(&sink, kind, &payload);
         });
 
+        /* события панели (поиск серверов, шаги синхронизации, перенос папки)
+           тоже уходят в открытые страницы — под своим именем */
+        let sink = Arc::clone(&listeners);
+        app.on_event(move |channel, payload| {
+            broadcast(&sink, channel, payload);
+        });
+
         PanelServer {
             app,
             ui_dir: ui_dir.into(),
@@ -212,6 +219,35 @@ impl PanelServer {
             ("POST", "/api/server/editor") => (
                 "server:editor",
                 vec![Value::Str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
+            ),
+            /* ── поиск серверов, диалоги, иконки, автозапуск ── */
+            ("GET", "/api/scan/roots") => ("scan:roots", vec![]),
+            ("POST", "/api/scan/start") => ("scan:start", vec![body_json.clone()]),
+            ("POST", "/api/scan/cancel") => ("scan:cancel", vec![]),
+            ("POST", "/api/dialog/pickFolder") => ("dialog:pickFolder", vec![]),
+            ("POST", "/api/dialog/pickFile") => ("dialog:pickFile", vec![]),
+            ("POST", "/api/dialog/pickFolders") => ("dialog:pickFolders", vec![]),
+            ("POST", "/api/icon/pick") => ("icon:pick", vec![]),
+            ("GET", "/api/icon/fromServer") => ("icon:fromServer", vec![Value::str(arg("cwd"))]),
+            ("POST", "/api/icon/toServer") => (
+                "icon:toServer",
+                vec![
+                    Value::str(arg("cwd")),
+                    Value::str(body_json.get("dataUrl").map(|v| v.text()).unwrap_or_default()),
+                ],
+            ),
+            ("GET", "/api/autostart/get") => ("autostart:get", vec![]),
+            ("POST", "/api/autostart/set") => (
+                "autostart:set",
+                vec![Value::Bool(body_json.get("value").map(|v| v.as_bool()).unwrap_or(false))],
+            ),
+            ("POST", "/api/server/moveToApp") => (
+                "server:moveToApp",
+                vec![Value::str(arg("id")), body_json.clone()],
+            ),
+            ("POST", "/api/shell/editor") => (
+                "shell:editor",
+                vec![Value::str(body_json.get("path").map(|v| v.text()).unwrap_or_else(|| arg("path")))],
             ),
             /* ── синхронизация сервера ── */
             ("GET", "/api/gh/account") => ("gh:account", vec![]),

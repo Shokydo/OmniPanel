@@ -168,8 +168,8 @@ fn все_каналы_новых_модулей_объявлены() {
     for channel in CHANNELS {
         assert!(READY_CHANNELS.contains(&channel), "канала нет в списке: {channel}");
     }
-    /* 56 готовых каналов + 28 новых = 84 */
-    assert_eq!(READY_CHANNELS.len(), 84, "каналов в Rust: {:?}", READY_CHANNELS.len());
+    /* 56 + 28 (синхронизация и обновления) + 13 (поиск, диалоги, иконки, автозапуск) = 97 */
+    assert_eq!(READY_CHANNELS.len(), 97, "каналов в Rust: {:?}", READY_CHANNELS.len());
     let mut unique: Vec<&str> = READY_CHANNELS.to_vec();
     unique.sort_unstable();
     unique.dedup();

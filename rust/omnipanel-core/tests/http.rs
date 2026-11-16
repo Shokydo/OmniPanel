@@ -264,3 +264,35 @@ fn синхронизация_и_обновления_по_http() {
     assert!(body.contains("\"ok\":false"), "пустой канал должен давать понятный отказ: {body}");
     assert!(body.contains("не нашлось"), "текст отказа: {body}");
 }
+
+#[test]
+fn поиск_серверов_по_http() {
+    let panel = start_panel();
+    let root = std::env::temp_dir().join(format!("omnipanel-http-scan-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let server = root.join("настоящий");
+    fs::create_dir_all(&server).unwrap();
+    fs::write(server.join("server.properties"), "level-name=world\n").unwrap();
+    fs::write(server.join("paper.jar"), "jar").unwrap();
+    fs::write(server.join("eula.txt"), "eula=true\n").unwrap();
+
+    let (status, body) = request(panel.port, "GET", "/api/scan/roots", "");
+    assert_eq!(status, 200);
+    assert!(body.contains('/'), "корни для поиска: {body}");
+
+    let payload = format!(
+        r#"{{"roots":["{}"],"maxDepth":3}}"#,
+        server.display().to_string().replace('\\', "\\\\")
+    );
+    let (_, body) = request(panel.port, "POST", "/api/scan/start", &payload);
+    assert!(body.contains("minecraft"), "сервер не найден: {body}");
+    assert!(body.contains("paper.jar"), "нет подсказок: {body}");
+    let (_, body) = request(panel.port, "POST", "/api/scan/cancel", "");
+    assert!(body.contains("true"), "{body}");
+
+    /* автозапуск: чтение состояния не должно падать */
+    let (_, body) = request(panel.port, "GET", "/api/autostart/get", "");
+    assert!(body == "true" || body == "false", "состояние автозапуска: {body}");
+
+    let _ = fs::remove_dir_all(&root);
+}
