@@ -4,6 +4,7 @@
 //! файлами, `server.properties` и портами. Всё на стандартной библиотеке —
 //! никаких внешних зависимостей, поэтому собирается быстро и без сети.
 
+pub mod addons;
 pub mod app;
 pub mod backup;
 pub mod bot;

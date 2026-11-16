@@ -69,7 +69,7 @@ fn каналы_нагрузки_объявлены() {
     for channel in ["load:info", "load:start", "load:stop", "load:status", "load:versions"] {
         assert!(READY_CHANNELS.contains(&channel), "канала нет: {channel}");
     }
-    assert_eq!(READY_CHANNELS.len(), 127, "каналов в Rust: {}", READY_CHANNELS.len());
+    assert_eq!(READY_CHANNELS.len(), 133, "каналов в Rust: {}", READY_CHANNELS.len());
 }
 
 #[test]

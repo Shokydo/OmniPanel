@@ -167,13 +167,18 @@ fn настройки_и_порты_по_http() {
 }
 
 #[test]
-fn ошибка_неперенесённого_адреса_понятная() {
+fn неизвестный_адрес_отвечает_по_русски() {
     let panel = start_panel();
-    /* адрес, который ещё не перенесён, обязан отвечать по-русски и с кодом 200,
+    /* даже если адрес выдуман, панель отвечает по-русски и с кодом 200,
        чтобы интерфейс показал сообщение, а не «сломалось всё» */
-    let (status, body) = request(panel.port, "GET", "/api/addons/list", "");
+    let (status, body) = request(panel.port, "GET", "/api/такого-нет", "");
     assert_eq!(status, 200);
     assert!(body.contains("ещё не перенес") || body.contains("не перенесён"), "ответ: {body}");
+
+    /* а аддоны уже работают: список приходит пустым массивом, а не ошибкой */
+    let (status, body) = request(panel.port, "GET", "/api/addons/list", "");
+    assert_eq!(status, 200);
+    assert!(body.trim_start().starts_with('['), "список аддонов: {body}");
 }
 
 #[test]

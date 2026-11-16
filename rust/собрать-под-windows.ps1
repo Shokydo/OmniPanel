@@ -101,6 +101,13 @@ if ($windowed) {
 }
 Copy-Item (Join-Path $Root "ui\*") (Join-Path $portable "ui") -Recurse -Force
 
+# встроенные аддоны и обои едут рядом с программой: панель ищет их в assets\
+$assets = Join-Path $Root "assets"
+if (Test-Path $assets) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $portable "assets") | Out-Null
+  Copy-Item (Join-Path $assets "*") (Join-Path $portable "assets") -Recurse -Force
+}
+
 @"
 OmniPanel $Version на Rust
 =========================

@@ -11,6 +11,7 @@
 use crate::ask::Ask;
 use crate::autostart;
 use crate::backup;
+use crate::addons;
 use crate::kernels;
 use crate::load::{Config as LoadConfig, Load};
 use crate::modrinth;
@@ -220,6 +221,12 @@ pub const READY_CHANNELS: &[&str] = &[
     "autostart:set",
     "shell:editor",
     "server:moveToApp",
+    "addons:list",
+    "addons:setEnabled",
+    "addons:panel",
+    "addons:dirs",
+    "addons:reveal",
+    "addons:call",
     "load:info",
     "load:start",
     "load:stop",
@@ -369,6 +376,7 @@ impl App {
             "modrinth" => self.modrinth(action, args),
             "wizard" => self.wizard(action, args),
             "load" => self.load(action, args),
+            "addons" => Ok(self.addons(action, args)),
             "wall" => self.wall(action, args),
             "ui" => self.ui(action, args),
             "notify" => self.notify(action, args),
@@ -1520,6 +1528,124 @@ impl App {
                 Ok(Value::Bool(autostart::set(&autostart::Entry::current(), enabled)))
             }
             other => Err(not_migrated("autostart", other)),
+        }
+    }
+
+    /* ───────────── addons:* — расширения панели ───────────── */
+
+    /// Папка своих аддонов и папка встроенных.
+    fn addons(&self, action: &str, args: &[Value]) -> Value {
+        let data = self.info.data_dir.clone();
+        let app = self.info.app_dir.clone();
+        match action {
+            "list" => addons::list(&data, &app),
+            "dirs" => addons::dirs(&data, &app),
+            "setEnabled" => addons::set_enabled(&data, &app, &text(args, 0), args.get(1).map(|v| v.as_bool()).unwrap_or(false)),
+            "panel" => addons::panel(&data, &app, &text(args, 0)),
+            "reveal" => {
+                /* открываем папку аддона, а если id не назван — папку своих аддонов */
+                let id = text(args, 0);
+                let found = addons::scan(&data, &app).into_iter().find(|a| a.id == id);
+                let target = found.map(|a| a.dir).unwrap_or_else(|| addons::user_dir(&data));
+                let _ = std::fs::create_dir_all(&target);
+                match open_in_system(&target.to_string_lossy()) {
+                    Ok(_) => Value::obj(vec![("ok", Value::Bool(true))]),
+                    Err(err) => addons::err_json(&err),
+                }
+            }
+            "call" => self.addon_call(&text(args, 0), &text(args, 1), args.get(2), &text(args, 3)),
+            _ => addons::err_json("Неизвестное действие аддонов"),
+        }
+    }
+
+    /// Мост «аддон → панель»: только разрешённые действия и только свой сервер.
+    fn addon_call(&self, id: &str, method: &str, args: Option<&Value>, server_id: &str) -> Value {
+        let data = self.info.data_dir.clone();
+        let app = self.info.app_dir.clone();
+        let chosen = addons::read_state_public(&data);
+        let Some(addon) = addons::scan(&data, &app).into_iter().find(|a| a.id == id) else {
+            return addons::err_json("Аддон не найден");
+        };
+        if !addons::is_enabled(&chosen, &addon) {
+            return addons::err_json("Аддон выключен");
+        }
+        let Some(action) = addons::Action::parse(method) else {
+            return addons::err_json(&format!("Аддону неизвестно действие: {}", method));
+        };
+        if let Err(deny) = addons::check(&addon, action) {
+            return addons::err_json(&deny);
+        }
+        let empty = Value::Arr(Vec::new());
+        let call_args = args.map(|v| v.as_arr().to_vec()).unwrap_or_else(|| empty.as_arr().to_vec());
+        let arg = |index: usize| {
+            call_args
+                .get(index)
+                .map(|v| v.text())
+                .unwrap_or_default()
+        };
+
+        /* всё, что трогает файлы, работает только внутри папки сервера */
+        let files = match self.files_of(server_id) {
+            Ok(files) => files,
+            Err(err) => return addons::err_json(&err),
+        };
+        let result = match action {
+            addons::Action::List => files
+                .list(&arg(0))
+                .map(|items| Value::Arr(items.iter().map(entry_json).collect()))
+                .map_err(|e| file_err(e)),
+            addons::Action::Read => read_for_editor(&files, &arg(0)),
+            addons::Action::Write => {
+                let rel = arg(0);
+                let content = arg(1);
+                if content.as_bytes().len() as u64 > WRITE_LIMIT {
+                    Err("Слишком большой файл для записи".to_string())
+                } else {
+                    files.write_text(&rel, &content).map_err(file_err).map(|size| {
+                        Value::obj(vec![
+                            ("path", Value::str(&rel)),
+                            ("size", Value::from(size)),
+                        ])
+                    })
+                }
+            }
+            addons::Action::Props => {
+                let patch = call_args.first().cloned().unwrap_or(Value::Null);
+                self.props("write", &[Value::str(server_id), patch])
+            }
+            addons::Action::Command => {
+                let command = arg(0).trim().to_string();
+                if command.is_empty() {
+                    Err("Пустая команда".to_string())
+                } else {
+                    let running = self
+                        .manager
+                        .find(server_id)
+                        .map(|srv| self.manager.state(&srv.id) == crate::servers::ServerState::Running)
+                        .unwrap_or(false);
+                    if !running {
+                        Err("Сервер не запущен".to_string())
+                    } else {
+                        self.manager.command(server_id, &command).map(|_| Value::Bool(true))
+                    }
+                }
+            }
+            addons::Action::OpenEditor => match files.resolve(&arg(0)) {
+                Ok(path) => open_in_system(&path.to_string_lossy()).map(|_| Value::Bool(true)),
+                Err(err) => Err(file_err(err)),
+            },
+            addons::Action::LookupUuid => {
+                let nick = arg(0).trim().to_string();
+                if !addons::nick_ok(&nick) {
+                    Err("Плохой ник".to_string())
+                } else {
+                    addons::mojang_uuid(&nick).map(|uuid| Value::obj(vec![("uuid", Value::str(uuid))]))
+                }
+            }
+        };
+        match result {
+            Ok(data) => Value::obj(vec![("ok", Value::Bool(true)), ("data", data)]),
+            Err(err) => addons::err_json(&err),
         }
     }
 

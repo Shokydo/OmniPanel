@@ -250,6 +250,30 @@ impl PanelServer {
                 vec![Value::str(arg("parent")), Value::str(arg("name"))],
             ),
             ("POST", "/api/wizard/create") => ("wizard:create", vec![body_json.clone()]),
+            /* ── аддоны панели ── */
+            ("GET", "/api/addons/list") => ("addons:list", vec![]),
+            ("GET", "/api/addons/dirs") => ("addons:dirs", vec![]),
+            ("GET", "/api/addons/panel") => ("addons:panel", vec![Value::str(arg("id"))]),
+            ("POST", "/api/addons/toggle") => (
+                "addons:setEnabled",
+                vec![
+                    Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_default()),
+                    Value::Bool(body_json.get("on").map(|v| v.as_bool()).unwrap_or(false)),
+                ],
+            ),
+            ("POST", "/api/addons/reveal") => (
+                "addons:reveal",
+                vec![Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
+            ),
+            ("POST", "/api/addons/call") => (
+                "addons:call",
+                vec![
+                    Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_default()),
+                    Value::str(body_json.get("method").map(|v| v.text()).unwrap_or_default()),
+                    body_json.get("args").cloned().unwrap_or(Value::Arr(Vec::new())),
+                    Value::str(body_json.get("serverId").map(|v| v.text()).unwrap_or_default()),
+                ],
+            ),
             /* ── нагрузочный тест ботами ── */
             ("GET", "/api/load/info") => ("load:info", vec![Value::str(arg("id"))]),
             ("GET", "/api/load/status") => ("load:status", vec![]),
