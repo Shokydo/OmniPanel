@@ -10,6 +10,8 @@ const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const { ServerManager } = require('./core/manager');
+const { LoadTest, normalizeActions } = require('./core/loadtest');
+const { nearestProtocol, versions: protoVersions } = require('./core/proto');
 const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
 const playersCore = require('./core/players');
@@ -61,6 +63,63 @@ manager.on('servers', (p) => broadcast('servers', p));
 manager.on('logs-cleared', (p) => broadcast('logs-cleared', p));
 manager.on('tps', (p) => broadcast('tps', p));
 manager.on('metrics', (p) => broadcast('metrics', p));
+
+/* --------------------- нагрузочные боты (браузер) --------------------- */
+const loadTests = new Map();
+
+function loadPortOf(srv) {
+  try {
+    const file = path.join(srv.cwd || '', 'server.properties');
+    const text = fs.readFileSync(file, 'utf8');
+    const m = text.match(/^server-port=(\d+)/m);
+    if (m) return Number(m[1]);
+  } catch { /* файла нет — стандартный порт */ }
+  return 25565;
+}
+
+function mcVersionOf(srv) {
+  if (srv.mcVersion) return String(srv.mcVersion);
+  const cwd = srv.cwd || '';
+  try {
+    const vj = path.join(cwd, 'version.json');
+    if (fs.existsSync(vj)) {
+      const data = JSON.parse(fs.readFileSync(vj, 'utf8'));
+      if (data && data.id) return String(data.id);
+    }
+  } catch { /* нет файла */ }
+  try {
+    for (const jar of fs.readdirSync(cwd).filter((f) => /\.jar$/i.test(f))) {
+      const m = jar.match(/(\d+\.\d+(?:\.\d+)?)/);
+      if (m) return m[1];
+    }
+  } catch { /* папка недоступна */ }
+  return '';
+}
+
+function startLoadTest(srv, opts) {
+  const test = new LoadTest({ serverMetrics: () => {
+    const st = manager.status(srv.id);
+    return { cpu: st.metrics ? st.metrics.cpu : null, rss: st.metrics ? st.metrics.rss : null, tps: st.tps != null ? st.tps : null };
+  } });
+  test.on('log', (line) => broadcast('load:log', { id: srv.id, line }));
+  test.on('change', (status) => broadcast('load:change', { id: srv.id, status }));
+  test.on('done', (report) => broadcast('load:done', { id: srv.id, report }));
+  loadTests.set(srv.id, test);
+  test.start({
+    host: (opts && opts.host) || '127.0.0.1',
+    port: Number(opts && opts.port) || loadPortOf(srv),
+    version: (opts && opts.version) || mcVersionOf(srv),
+    protocol: Number(opts && opts.protocol) || 0,
+    count: opts && opts.count,
+    rampMs: opts && opts.rampMs,
+    durationMs: opts && opts.durationMs,
+    prefix: opts && opts.prefix,
+    respawn: !(opts && opts.respawn === false),
+    actions: normalizeActions(opts && opts.actions),
+    serverName: srv.name,
+  });
+  return test;
+}
 
 /* ------------------------------ статика ------------------------------ */
 const MIME = {
@@ -448,6 +507,57 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, playersCore.unbanOffline(srv.cwd, body));
     }
     return sendJson(res, 404, { error: 'Неизвестное действие' });
+  }
+
+  /* ── нагрузочные боты ── */
+  if (p === '/api/load/versions') {
+    return sendJson(res, 200, protoVersions().sort((a, b) => b.protocol - a.protocol));
+  }
+  if (p === '/api/load/info') {
+    const srv = manager.get(url.searchParams.get('id'));
+    if (!srv) return sendJson(res, 404, { ok: false, error: 'Сервер не найден' });
+    const saved = srv.loadtest || {};
+    const test = loadTests.get(srv.id);
+    return sendJson(res, 200, {
+      ok: true,
+      host: saved.host || '127.0.0.1',
+      port: saved.port || loadPortOf(srv),
+      version: saved.version || mcVersionOf(srv),
+      count: Number(saved.count) > 0 ? Number(saved.count) : 5,
+      rampMs: Number(saved.rampMs) || 3000,
+      durationMs: Number(saved.durationMs) || 0,
+      prefix: saved.prefix || 'Bot',
+      actions: normalizeActions(saved.actions || {}),
+      running: !!(test && test.running),
+      status: test ? test.status() : null,
+    });
+  }
+  if (p === '/api/load/start' && req.method === 'POST') {
+    const srv = manager.get(url.searchParams.get('id'));
+    if (!srv) return sendJson(res, 404, { ok: false, error: 'Сервер не найден' });
+    const runningTest = loadTests.get(srv.id);
+    if (runningTest && runningTest.running) return sendJson(res, 200, { ok: false, error: 'тест уже идёт' });
+    const body = await readBody(req);
+    try {
+      const test = startLoadTest(srv, body);
+      try {
+        manager.update(srv.id, { loadtest: { ...body, actions: normalizeActions(body.actions), protocol: 0 } });
+      } catch { /* настройки не сохранились — не беда */ }
+      return sendJson(res, 200, { ok: true, status: test.status() });
+    } catch (err) {
+      return sendJson(res, 200, { ok: false, error: err.message });
+    }
+  }
+  if (p === '/api/load/stop') {
+    const srv = manager.get(url.searchParams.get('id'));
+    const test = srv && loadTests.get(srv.id);
+    if (!test || !test.running) return sendJson(res, 200, { ok: false, error: 'тест не идёт' });
+    return sendJson(res, 200, { ok: true, report: test.stop('остановлено вручную') });
+  }
+  if (p === '/api/load/status') {
+    const srv = manager.get(url.searchParams.get('id'));
+    const test = srv && loadTests.get(srv.id);
+    return sendJson(res, 200, { ok: true, running: !!(test && test.running), status: test ? test.status() : null });
   }
 
   const tm = p.match(/^\/api\/servers\/([^/]+)\/tps(?:\/(\w+))?$/);

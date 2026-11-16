@@ -141,6 +141,14 @@ const httpApi = {
   async wizardCreate(opts) { return post('/api/wizard/create', opts); },
   onWizardProgress(cb) { (this.subs['wizard-progress'] ||= []).push(cb); },
   async tpsClear(id) { return post(`/api/servers/${id}/tps/clear`); },
+  async loadInfo(id) { return (await fetch(`/api/load/info?id=${encodeURIComponent(id)}`)).json(); },
+  async loadStart(id, opts) { return post(`/api/load/start?id=${encodeURIComponent(id)}`, opts || {}); },
+  async loadStop(id) { return post(`/api/load/stop?id=${encodeURIComponent(id)}`); },
+  async loadStatus(id) { return (await fetch(`/api/load/status?id=${encodeURIComponent(id)}`)).json(); },
+  async loadVersions() { return (await fetch('/api/load/versions')).json(); },
+  onLoadChange(cb) { (this.subs['load:change'] ||= []).push(cb); },
+  onLoadLog(cb) { (this.subs['load:log'] ||= []).push(cb); },
+  onLoadDone(cb) { (this.subs['load:done'] ||= []).push(cb); },
   async iconFromServer(cwd) {
     if (!cwd) return null;
     try {
@@ -162,7 +170,8 @@ const httpApi = {
   onScanProgress(cb) { (this.subs['scan-progress'] ||= []).push(cb); },
   connect() {
     const es = new EventSource('/api/events');
-    for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress']) {
+    for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress',
+      'load:change', 'load:log', 'load:done']) {
       es.addEventListener(name, (e) => {
         const data = JSON.parse(e.data);
         for (const cb of this.subs[name] || []) cb(data);
@@ -848,6 +857,19 @@ const el = {
   cpuNow: $('cpuNow'), ramNow: $('ramNow'), procNow: $('procNow'),
   cpuChart: $('cpuChart'), ramChart: $('ramChart'), tpsChart: $('tpsChart'),
   tpsStats: $('tpsStats'), backupList: $('backupList'), backupSub: $('backupSub'),
+  loadSub: $('loadSub'), loadStart: $('loadStart'), loadStop: $('loadStop'),
+  loadHost: $('loadHost'), loadPort: $('loadPort'), loadVersion: $('loadVersion'),
+  loadCount: $('loadCount'), loadRamp: $('loadRamp'), loadDuration: $('loadDuration'),
+  loadPrefix: $('loadPrefix'), loadWalk: $('loadWalk'), loadJump: $('loadJump'),
+  loadChat: $('loadChat'), loadCmd: $('loadCmd'), loadSwing: $('loadSwing'),
+  loadRespawn: $('loadRespawn'), loadWalkMs: $('loadWalkMs'), loadJumpMs: $('loadJumpMs'),
+  loadChatMs: $('loadChatMs'), loadCmdMs: $('loadCmdMs'), loadSwingMs: $('loadSwingMs'),
+  loadChatText: $('loadChatText'), loadCmdList: $('loadCmdList'),
+  loadOnline: $('loadOnline'), loadOnlineAll: $('loadOnlineAll'), loadPps: $('loadPps'),
+  loadTraffic: $('loadTraffic'), loadChunks: $('loadChunks'), loadCpu: $('loadCpu'),
+  loadRam: $('loadRam'), loadTps: $('loadTps'),
+  loadPpsChart: $('loadPpsChart'), loadCpuChart: $('loadCpuChart'),
+  loadBots: $('loadBots'), loadLog: $('loadLog'),
 };
 
 /* ═════════════════ графика (SVG, без библиотек) ═════════════════ */
@@ -2134,6 +2156,7 @@ function setTab(name) {
   if (activeTab && activeTab.scrollIntoView) activeTab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   Sound.play('nav');
   if (name === 'perf') { renderPerf(); loadTpsTab(); }
+  if (name === 'load') loadTabOpen();
   if (name === 'backups') loadBackups();
   if (name === 'files') fmLoadTree();
   if (name === 'players') { renderPlayers(); playersAutoStart(); }
@@ -2146,6 +2169,238 @@ function setTab(name) {
     if (s) { rescanIssues(s.id); markIssuesSeen(s.id); renderIssues(); }
   }
   hideCmdSuggest();
+}
+
+/* ═════════════════ вкладка нагрузки (тестовые боты) ═════════════════ */
+
+function loadState() {
+  if (!S.load) S.load = { info: null, status: null, logs: [], report: null, filled: false };
+  return S.load;
+}
+
+function loadNum(input, def) {
+  const v = Number(String(input.value || '').replace(',', '.'));
+  return Number.isFinite(v) && v > 0 ? v : def;
+}
+
+/** Заполняем поля один раз: дальше пользователь правит их сам. */
+async function loadTabOpen() {
+  const s = current();
+  const st = loadState();
+  if (!s) { el.loadSub.textContent = 'сервер не выбран'; return; }
+  if (st.id !== s.id) {
+    st.id = s.id;
+    st.filled = false;
+    st.status = null;
+    st.logs = [];
+    st.report = null;
+  }
+  if (!st.filled) {
+    let info = null;
+    try { info = await API.loadInfo(s.id); } catch { info = null; }
+    if (!info || info.ok === false) {
+      loadRender();
+      if (info && info.error) toast(info.error, 'err');
+      return;
+    }
+    st.info = info;
+    st.filled = true;
+    el.loadHost.value = info.host || '127.0.0.1';
+    el.loadPort.value = info.port || 25565;
+    el.loadVersion.value = info.version || '';
+    el.loadCount.value = info.count || 5;
+    el.loadRamp.value = Math.round((info.rampMs || 0) / 1000);
+    el.loadDuration.value = Math.round((info.durationMs || 0) / 60000);
+    el.loadPrefix.value = info.prefix || 'Bot';
+    const a = info.actions || {};
+    el.loadWalk.checked = !!a.walk;
+    el.loadJump.checked = !!a.jump;
+    el.loadChat.checked = !!a.chat;
+    el.loadCmd.checked = !!a.cmd;
+    el.loadSwing.checked = !!a.swing;
+    el.loadRespawn.checked = true;
+    el.loadWalkMs.value = a.walkMs || 50;
+    el.loadJumpMs.value = Math.max(1, Math.round((a.jumpMs || 3000) / 1000));
+    el.loadChatMs.value = Math.max(1, Math.round((a.chatMs || 1000) / 1000));
+    el.loadCmdMs.value = Math.max(1, Math.round((a.cmdMs || 1500) / 1000));
+    el.loadSwingMs.value = Math.max(1, Math.round((a.swingMs || 700) / 1000));
+    el.loadChatText.value = a.chatText || '';
+    el.loadCmdList.value = (a.commands || []).join('\n');
+    if (info.status) loadStoreStatus(info.status);
+  }
+  loadRender();
+}
+
+function loadStoreStatus(status) {
+  const st = loadState();
+  if (!status) return;
+  st.status = status;
+  st.running = !!status.running;
+  if (status.logs) st.logs = status.logs.slice();
+}
+
+function loadRenderLog() {
+  const st = loadState();
+  if (!el.loadLog) return;
+  const lines = st.logs.slice(-200);
+  el.loadLog.innerHTML = lines.map((l) => {
+    const t = new Date(l.t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `<div class="ll-line"><span class="ll-t">${t}</span>${esc(l.text)}</div>`;
+  }).join('') || '<div class="ll-line">пока пусто</div>';
+  el.loadLog.scrollTop = el.loadLog.scrollHeight;
+}
+
+function loadStateName(state) {
+  return {
+    idle: 'не подключён', login: 'вход', config: 'конфигурация',
+    play: 'в игре', closed: 'отключён',
+  }[state] || state || '—';
+}
+
+function loadRender() {
+  const st = loadState();
+  const status = st.status;
+  const totals = status && status.totals ? status.totals : null;
+  const last = status && status.last ? status.last : null;
+  const running = !!(status && status.running);
+
+  el.loadStart.disabled = running;
+  el.loadStop.disabled = !running;
+  el.loadStart.classList.toggle('btn-primary', !running);
+
+  if (!totals) {
+    el.loadSub.textContent = st.info && st.info.running === false ? 'боты не запущены' : (el.loadSub.textContent || 'боты не запущены');
+  } else {
+    const sec = Math.round((status.elapsed || 0) / 1000);
+    const time = `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+    el.loadSub.textContent = running
+      ? `идёт ${time} · в игре ${totals.online} из ${totals.bots}`
+      : `остановлено (${status.stopReason || 'готово'}) · в игре ${totals.online} из ${totals.bots}`;
+  }
+
+  const set = (node, text) => { if (node) node.textContent = text; };
+  set(el.loadOnline, totals ? String(totals.online) : '—');
+  set(el.loadOnlineAll, totals ? `/ ${totals.bots}` : '');
+  set(el.loadPps, last ? String((last.ppsIn || 0) + (last.ppsOut || 0)) : '—');
+  set(el.loadTraffic, last ? `${Math.round((last.kbpsIn || 0) + (last.kbpsOut || 0))} КБ/с` : '—');
+  set(el.loadChunks, totals ? String(totals.chunksLoaded) : '—');
+  set(el.loadCpu, last && last.cpu != null ? String(Math.round(last.cpu)) : '—');
+  set(el.loadRam, last && last.rss ? String(Math.round(last.rss / 1048576)) : '—');
+  set(el.loadTps, last && last.tps != null ? Number(last.tps).toFixed(1) : '—');
+
+  const tl = (status && status.timeline) || [];
+  drawChart(el.loadPpsChart, tl.map((p) => ({ t: p.t, v: (p.ppsIn || 0) + (p.ppsOut || 0) })), { min: 0 });
+  drawChart(el.loadCpuChart, tl.filter((p) => p.cpu != null).map((p) => ({ t: p.t, v: p.cpu })), { fixedMax: 100 });
+
+  const bots = (status && status.bots) || [];
+  el.loadBots.innerHTML = bots.map((b) => {
+    const stt = b.stats || {};
+    const cls = b.state === 'play' ? 'ok' : 'bad';
+    const right = `${stt.packetsOut || 0}↑ ${stt.packetsIn || 0}↓`;
+    const chunks = `${stt.chunksLoaded || 0} чанк.`;
+    const acts = `чат ${stt.chat || 0} · ком. ${stt.cmd || 0}`;
+    const err = b.error ? `<div class="lb-err">${esc(b.error)}</div>` : '';
+    return `<div class="load-bot ${cls}">
+      <span class="lb-name">${esc(b.name || '')}</span>
+      <span class="lb-state">${loadStateName(b.state)}</span>
+      <span class="lb-num">${right}</span>
+      <span class="lb-num">${chunks} · ${acts}</span>
+      ${err}
+    </div>`;
+  }).join('') || '<div class="load-bot"><span class="lb-name">боты не запущены</span></div>';
+
+  loadRenderLog();
+}
+
+function loadCollectOpts() {
+  const commands = String(el.loadCmdList.value || '')
+    .split(/[\n,;]+/).map((c) => c.replace(/^\//, '').trim()).filter(Boolean);
+  return {
+    host: String(el.loadHost.value || '127.0.0.1').trim() || '127.0.0.1',
+    port: loadNum(el.loadPort, 25565),
+    version: String(el.loadVersion.value || '').trim(),
+    count: Math.max(1, Math.min(200, Math.round(loadNum(el.loadCount, 5)))),
+    rampMs: Math.round(loadNum(el.loadRamp, 0) * 1000),
+    durationMs: Math.round((Number(el.loadDuration.value) || 0) * 60000),
+    prefix: String(el.loadPrefix.value || 'Bot').replace(/[^A-Za-z0-9_]/g, '').slice(0, 10) || 'Bot',
+    respawn: !!el.loadRespawn.checked,
+    actions: {
+      walk: !!el.loadWalk.checked,
+      walkMs: Math.round(loadNum(el.loadWalkMs, 50)),
+      jump: !!el.loadJump.checked,
+      jumpMs: Math.round(loadNum(el.loadJumpMs, 3) * 1000),
+      chat: !!el.loadChat.checked,
+      chatText: String(el.loadChatText.value || '').trim() || 'нагрузочный тест OmniPanel',
+      chatMs: Math.round(loadNum(el.loadChatMs, 1) * 1000),
+      cmd: !!el.loadCmd.checked && commands.length > 0,
+      commands,
+      cmdMs: Math.round(loadNum(el.loadCmdMs, 1.5) * 1000),
+      swing: !!el.loadSwing.checked,
+      swingMs: Math.round(loadNum(el.loadSwingMs, 0.7) * 1000),
+    },
+  };
+}
+
+async function loadRun() {
+  const s = current();
+  if (!s) return;
+  const opts = loadCollectOpts();
+  if (opts.actions.cmd === false && el.loadCmd.checked && !opts.actions.commands.length) {
+    toast('Добавь хотя бы одну команду или выключи переключатель команд', 'err');
+    return;
+  }
+  el.loadStart.disabled = true;
+  const st = loadState();
+  st.logs = [];
+  st.report = null;
+  const res = await API.loadStart(s.id, opts);
+  if (!res || res.ok === false) {
+    el.loadStart.disabled = false;
+    toast((res && res.error) || 'Не удалось запустить ботов', 'err');
+    return;
+  }
+  loadStoreStatus(res.status);
+  loadRender();
+  toast(`Боты пошли на сервер: ${opts.count}`, 'ok');
+}
+
+async function loadHalt() {
+  const s = current();
+  if (!s) return;
+  const res = await API.loadStop(s.id);
+  if (!res || res.ok === false) {
+    toast((res && res.error) || 'Не удалось остановить', 'err');
+    return;
+  }
+  if (res.report) loadState().report = res.report;
+  toast('Тест остановлен', 'ok');
+  loadRender();
+}
+
+function loadReportToast(report) {
+  if (!report) return;
+  const avg = report.avg || {};
+  const peak = report.peak || {};
+  const parts = [
+    `ботов: ${report.bots}`,
+    `в игре: ${report.online}`,
+    `время: ${report.durationSec} с`,
+  ];
+  if (avg.cpu != null) parts.push(`CPU в среднем ${avg.cpu}% (пик ${peak.cpu || 0}%)`);
+  if (avg.tps != null) parts.push(`TPS ${avg.tps}${report.low && report.low.tps != null ? ` (минимум ${report.low.tps})` : ''}`);
+  if (peak.ppsIn || peak.ppsOut) parts.push(`пакеты/с (пик) ${(peak.ppsIn || 0) + (peak.ppsOut || 0)}`);
+  toast(parts.join(' · '), 'ok');
+}
+
+function bindLoadTab() {
+  if (!el.loadStart) return;
+  el.loadStart.onclick = () => loadRun();
+  el.loadStop.onclick = () => loadHalt();
+  el.loadCmd.onchange = () => {
+    el.loadCmdList.disabled = !el.loadCmd.checked;
+    if (el.loadCmd.checked && el.loadCmdList) el.loadCmdList.focus();
+  };
+  el.loadCmdList.disabled = !(el.loadCmd && el.loadCmd.checked);
 }
 
 /* ═════════════════ вкладка производительности ═════════════════ */
@@ -3492,6 +3747,7 @@ function selectServer(id) {
   renderIssuesBadge();
   if (S.tab === 'players') renderPlayers();
   if (S.tab === 'issues') renderIssues();
+  if (S.tab === 'load') loadTabOpen();
   if (S.tab === 'addons') addonsLoadInfo().then(() => addonsSearch(true));
 }
 
@@ -3892,6 +4148,25 @@ function bindSubscriptions() {
       el.consoleEl.innerHTML = '<div class="placeholder">Консоль очищена.</div>';
       S.domLines = [];
     }
+  });
+
+  API.onLoadChange(({ id, status }) => {
+    if (id !== S.currentId) return;
+    loadStoreStatus(status);
+    loadRender();
+  });
+
+  API.onLoadLog(({ id, line }) => {
+    if (id !== S.currentId || !line) return;
+    S.load.logs.push(line);
+    if (S.load.logs.length > 200) S.load.logs.shift();
+    loadRenderLog();
+  });
+
+  API.onLoadDone(({ id, report }) => {
+    if (id !== S.currentId || !report) return;
+    S.load.report = report;
+    loadReportToast(report);
   });
 
   API.onTps(({ id, tps, history }) => {
@@ -6956,6 +7231,7 @@ function bindAddonsPage() {
   bindActions();
   bindEffects();
   bindSubscriptions();
+  bindLoadTab();
   if (API.connect) API.connect();
 
   try { S.info = await API.info(); } catch { S.info = null; }

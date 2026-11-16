@@ -15,3 +15,6 @@ error.log
 .DS_Store
 update-installed.json
 screenshot-update-real.png
+
+# кэш описаний протокола (пересобирается tools/gen-bot-protocols.js)
+.cache-protocols/

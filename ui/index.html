@@ -177,6 +177,7 @@
         <button class="tab active" data-tab="console">Консоль</button>
         <button class="tab" data-tab="files">Файлы</button>
         <button class="tab" data-tab="perf">Производительность</button>
+        <button class="tab" data-tab="load">Нагрузка</button>
         <button class="tab" data-tab="backups">Бэкапы</button>
         <button class="tab" data-tab="addons">Плагины</button>
         <button class="tab" data-tab="players">Игроки</button>
@@ -331,6 +332,111 @@
               <span class="tm-note">первый замер сразу после запуска, дальше по таймеру</span>
               <button id="tpsSaveBtn" class="btn btn-mini btn-primary">Сохранить</button>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- нагрузка: тестовые боты -->
+      <section id="tab-load" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Нагрузка</div>
+            <div class="ph-sub" id="loadSub">боты не запущены</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <button id="loadStart" class="btn btn-primary">Запустить ботов</button>
+            <button id="loadStop" class="btn" disabled>Остановить</button>
+          </div>
+        </div>
+
+        <div class="load-grid">
+          <label class="mini-field">Сервер
+            <input id="loadHost" type="text" placeholder="127.0.0.1" spellcheck="false" />
+          </label>
+          <label class="mini-field">Порт
+            <input id="loadPort" type="number" min="1" max="65535" step="1" placeholder="25565" />
+          </label>
+          <label class="mini-field">Версия сервера
+            <input id="loadVersion" type="text" placeholder="1.21.8" spellcheck="false" />
+          </label>
+          <label class="mini-field">Ботов
+            <input id="loadCount" type="number" min="1" max="200" step="1" placeholder="5" />
+          </label>
+          <label class="mini-field">Разбег входа, секунд
+            <input id="loadRamp" type="number" min="0" max="60" step="1" placeholder="3" />
+          </label>
+          <label class="mini-field">Длительность, минут
+            <input id="loadDuration" type="number" min="0" max="1440" step="1" placeholder="0" />
+          </label>
+          <label class="mini-field">Начало ников
+            <input id="loadPrefix" type="text" placeholder="Bot" spellcheck="false" />
+          </label>
+        </div>
+
+        <div class="load-actions">
+          <label class="switch"><input id="loadWalk" type="checkbox" /><span class="box"></span>ходьба</label>
+          <label class="switch"><input id="loadJump" type="checkbox" /><span class="box"></span>прогрузка чанков</label>
+          <label class="switch"><input id="loadChat" type="checkbox" /><span class="box"></span>спам в чат</label>
+          <label class="switch"><input id="loadCmd" type="checkbox" /><span class="box"></span>команды</label>
+          <label class="switch"><input id="loadSwing" type="checkbox" /><span class="box"></span>взмахи</label>
+          <label class="switch"><input id="loadRespawn" type="checkbox" checked /><span class="box"></span>переподключать выбывших</label>
+        </div>
+
+        <div class="load-grid tight">
+          <label class="mini-field">шаг ходьбы, мс
+            <input id="loadWalkMs" type="number" min="20" max="5000" step="10" placeholder="50" />
+          </label>
+          <label class="mini-field">прыжки, секунд
+            <input id="loadJumpMs" type="number" min="1" max="600" step="1" placeholder="3" />
+          </label>
+          <label class="mini-field">спам, секунд
+            <input id="loadChatMs" type="number" min="1" max="600" step="1" placeholder="1" />
+          </label>
+          <label class="mini-field">команды, секунд
+            <input id="loadCmdMs" type="number" min="1" max="600" step="1" placeholder="1.5" />
+          </label>
+          <label class="mini-field">взмахи, секунд
+            <input id="loadSwingMs" type="number" min="1" max="600" step="1" placeholder="0.7" />
+          </label>
+          <label class="mini-field wide">текст для чата
+            <input id="loadChatText" type="text" placeholder="нагрузочный тест OmniPanel" spellcheck="false" />
+          </label>
+        </div>
+
+        <div class="load-commands">
+          <div class="lc-head">команды ботов</div>
+          <textarea id="loadCmdList" class="load-textarea" rows="3" spellcheck="false" placeholder="list&#10;tps&#10;help"></textarea>
+        </div>
+
+        <div class="load-cards" id="loadCards">
+          <div class="perf-card small"><div class="pc-label">Ботов в игре</div><div class="pc-value"><span id="loadOnline">—</span><em id="loadOnlineAll"></em></div></div>
+          <div class="perf-card small"><div class="pc-label">Пакеты в секунду</div><div class="pc-value"><span id="loadPps">—</span></div></div>
+          <div class="perf-card small"><div class="pc-label">Трафик в секунду</div><div class="pc-value"><span id="loadTraffic">—</span></div></div>
+          <div class="perf-card small"><div class="pc-label">Чанков у ботов</div><div class="pc-value"><span id="loadChunks">—</span></div></div>
+          <div class="perf-card small"><div class="pc-label">CPU сервера</div><div class="pc-value"><span id="loadCpu">—</span><em>%</em></div></div>
+          <div class="perf-card small"><div class="pc-label">RAM сервера</div><div class="pc-value"><span id="loadRam">—</span><em>МБ</em></div></div>
+          <div class="perf-card small"><div class="pc-label">TPS</div><div class="pc-value"><span id="loadTps">—</span></div></div>
+        </div>
+
+        <div class="load-charts">
+          <div class="load-chart-card">
+            <div class="pc-label">пакеты в секунду</div>
+            <div id="loadPpsChart" class="chart"></div>
+          </div>
+          <div class="load-chart-card">
+            <div class="pc-label">CPU сервера, %</div>
+            <div id="loadCpuChart" class="chart"></div>
+          </div>
+        </div>
+
+        <div class="load-bottom">
+          <div class="load-panel">
+            <div class="lb-head">боты</div>
+            <div id="loadBots" class="load-bots"></div>
+          </div>
+          <div class="load-panel">
+            <div class="lb-head">журнал теста</div>
+            <div id="loadLog" class="load-log"></div>
           </div>
         </div>
       </section>

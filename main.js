@@ -6,6 +6,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, dialog, shell, Not
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
+const { LoadTest, normalizeActions: normalizeLoadActions } = require('./core/loadtest');
 const { ServerManager } = require('./core/manager');
 const { scanServers, listRoots } = require('./core/scan');
 const backup = require('./core/backup');
@@ -1808,6 +1809,155 @@ function wireIpc() {
   /* ── история TPS ── */
   ipcMain.handle('tps:history', (_e, id) => manager.tpsHistory(id));
   ipcMain.handle('tps:clear', (_e, id) => manager.clearTpsHistory(id));
+
+  /* ── нагрузочные боты ── */
+  const loadTests = new Map();
+
+  /** Версия игры для ботов: version.json, имя ядра или строка запуска в логах. */
+  const mcVersionOf = async (id) => {
+    const srv = manager.get(id);
+    if (!srv) return '';
+    if (srv.mcVersion) return String(srv.mcVersion);
+    const cwd = srv.cwd;
+    if (cwd) {
+      try {
+        const vj = path.join(cwd, 'version.json');
+        if (fs.existsSync(vj)) {
+          const data = JSON.parse(fs.readFileSync(vj, 'utf8'));
+          if (data && data.id) return String(data.id);
+        }
+      } catch { /* нет файла — идём дальше */ }
+      try {
+        const jars = fs.readdirSync(cwd).filter((f) => /\.jar$/i.test(f));
+        for (const jar of jars) {
+          const m = jar.match(/(\d+\.\d+(?:\.\d+)?)/);
+          if (m) return m[1];
+        }
+        const versions = path.join(cwd, 'versions');
+        if (fs.existsSync(versions)) {
+          const dirs = fs.readdirSync(versions).filter((f) => /^\d+\.\d+/.test(f));
+          if (dirs.length) return dirs.sort().pop();
+        }
+      } catch { /* папка недоступна */ }
+    }
+    const logs = manager.logs(id) || [];
+    for (const e of logs) {
+      const m = String(e.m || '').match(/(?:Starting minecraft server version|Starting Minecraft server version)\s+([\d.]+)/i);
+      if (m) return m[1];
+    }
+    return '';
+  };
+
+  /** Порт, на который заходят игроки: из server.properties, иначе 25565. */
+  const loadPortOf = async (id) => {
+    const srv = manager.get(id);
+    if (!srv || !srv.cwd) return 25565;
+    try {
+      const props = await files.readServerProperties(srv.cwd);
+      const port = props && props.props && props.props['server-port'];
+      if (Number(port) > 0) return Number(port);
+    } catch { /* нет свойств — берём по умолчанию */ }
+    return 25565;
+  };
+
+  const serverMetricsOf = (id) => {
+    const st = manager.status(id);
+    return {
+      cpu: st.metrics ? st.metrics.cpu : null,
+      rss: st.metrics ? st.metrics.rss : null,
+      tps: st.tps != null ? st.tps : null,
+    };
+  };
+
+  const pushLoad = (channel, id, payload) => {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, { id, ...payload });
+  };
+
+  ipcMain.handle('load:info', async (_e, id) => {
+    try {
+      const srv = manager.get(id);
+      if (!srv) return { ok: false, error: 'Сервер не найден' };
+      const saved = srv.loadtest || {};
+      return {
+        ok: true,
+        host: saved.host || '127.0.0.1',
+        port: saved.port || (await loadPortOf(id)),
+        version: saved.version || (await mcVersionOf(id)),
+        count: Number(saved.count) > 0 ? Number(saved.count) : 5,
+        rampMs: Number(saved.rampMs) || 3000,
+        durationMs: Number(saved.durationMs) || 0,
+        prefix: saved.prefix || 'Bot',
+        actions: normalizeLoadActions(saved.actions || {}),
+        running: loadTests.has(id),
+        status: loadTests.has(id) ? loadTests.get(id).status() : null,
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('load:start', async (_e, id, opts) => {
+    try {
+      const srv = manager.get(id);
+      if (!srv) return { ok: false, error: 'Сервер не найден' };
+      let test = loadTests.get(id);
+      if (test && test.running) return { ok: false, error: 'тест уже идёт' };
+      const port = Number(opts && opts.port) || (await loadPortOf(id));
+      const version = (opts && opts.version) || (await mcVersionOf(id));
+      const cfg = {
+        host: (opts && opts.host) || '127.0.0.1',
+        port,
+        version,
+        protocol: Number(opts && opts.protocol) || 0,
+        count: opts && opts.count,
+        rampMs: opts && opts.rampMs,
+        durationMs: opts && opts.durationMs,
+        prefix: opts && opts.prefix,
+        respawn: !(opts && opts.respawn === false),
+        actions: normalizeLoadActions(opts && opts.actions),
+        serverName: srv.name,
+      };
+      test = new LoadTest({ serverMetrics: () => serverMetricsOf(id) });
+      test.on('log', (line) => pushLoad('load:log', id, { line }));
+      test.on('change', (st) => pushLoad('load:change', id, { status: st }));
+      test.on('done', (report) => pushLoad('load:done', id, { report }));
+      loadTests.set(id, test);
+      test.start(cfg);
+      const savedSettings = {
+        loadtest: {
+          host: cfg.host,
+          port: cfg.port,
+          version: cfg.version,
+          count: cfg.count,
+          rampMs: cfg.rampMs,
+          durationMs: cfg.durationMs,
+          prefix: cfg.prefix,
+          actions: cfg.actions,
+        },
+      };
+      try { manager.update(id, savedSettings); } catch { /* настройки не сохранились — не беда */ }
+      return { ok: true, status: test.status() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('load:stop', (_e, id) => {
+    const test = loadTests.get(id);
+    if (!test || !test.running) return { ok: false, error: 'тест не идёт' };
+    return { ok: true, report: test.stop('остановлено вручную') };
+  });
+
+  ipcMain.handle('load:status', (_e, id) => {
+    const test = loadTests.get(id);
+    if (!test) return { ok: true, running: false, status: null };
+    return { ok: true, running: test.running, status: test.status() };
+  });
+
+  ipcMain.handle('load:versions', () => {
+    const { versions } = require('./core/proto');
+    return versions().map((v) => ({ ...v, label: v.version })).sort((a, b) => b.protocol - a.protocol);
+  });
 
   /* ── иконка из server-icon.png ── */
   ipcMain.handle('icon:fromServer', (_e, cwd) => {
