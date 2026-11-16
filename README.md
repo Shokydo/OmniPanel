@@ -4,6 +4,22 @@
 [![Лицензия](https://img.shields.io/badge/лицензия-MIT-000000?style=for-the-badge)](LICENSE)
 [![Платформа](https://img.shields.io/badge/Windows-10%2F11-000000?style=for-the-badge)](#)
 
+## ⚡ Версия 1.27.0 — панель уже на Rust
+
+Та же панель, переписанная на **Tauri + Rust**: одно окно, без Node.js и Electron.
+
+- установщик — **4,9 МБ** (было ~100 МБ), память в покое — около 60 МБ, запуск — доли секунды;
+- 133 команды интерфейса, живые логи, трей, аддоны, бэкапы 7z/LZMA2, GitLab и GitHub, тестовые боты — всё на месте;
+- код ядра — [`rust/omnipanel-core`](rust/omnipanel-core), окно — [`src-tauri`](src-tauri), интерфейс — тот же [`ui`](ui).
+
+Скачать: **[OmniPanel-Setup-1.27.0.exe](https://github.com/Shokydo/OmniPanel/releases/download/v1.27.0/OmniPanel-Setup-1.27.0.exe)**
+Портативная сборка (без установки) — в [Actions → «Сборка под Windows»](https://github.com/Shokydo/OmniPanel/actions/workflows/build-windows.yml) → артефакт `OmniPanel-win64`.
+Собрать самому: `powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version 1.27.0 -With7z`
+
+Ниже — описание панели и установка версии 1.26.0 на Electron; она остаётся рабочей, её канал обновлений не тронут.
+
+---
+
 ![OmniPanel](docs/screens/screenshot.png)
 
 ![Полный экран](docs/screens/fullscreen-bar.png)
