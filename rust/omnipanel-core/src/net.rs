@@ -269,3 +269,57 @@ pub fn get_bytes(url: &str, header: Option<(&str, &str)>) -> Result<(u16, Vec<u8
         Err(err) => Err(format!("нет связи: {}", err)),
     }
 }
+
+/// Скачивание с прогрессом: панель показывает «скачано 12 из 50 МБ».
+/// `progress(получено, всего)` вызывается не чаще раза на 256 КБ.
+pub fn download_streaming(
+    url: &str,
+    dest: &std::path::Path,
+    header: Option<(&str, &str)>,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    use std::io::{Read, Write};
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("не создать папку: {}", e))?;
+    }
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(900)))
+        .user_agent("OmniPanel")
+        .build();
+    let agent: ureq::Agent = config.into();
+    let mut req = agent.get(url);
+    if let Some((name, value)) = header {
+        req = req.header(name, value);
+    }
+    let mut response = match req.call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(code)) => return Err(format!("сервер ответил кодом {}", code)),
+        Err(err) => return Err(format!("нет связи: {}", err)),
+    };
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("не создать файл: {}", e))?;
+    let mut reader = response.body_mut().as_reader();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut received: u64 = 0;
+    let mut last_report: u64 = 0;
+    loop {
+        let read = reader.read(&mut buffer).map_err(|e| format!("не прочитать ответ: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|e| format!("не записать файл: {}", e))?;
+        received += read as u64;
+        if received - last_report >= 256 * 1024 || Some(received) == total {
+            last_report = received;
+            progress(received, total);
+        }
+    }
+    file.flush().ok();
+    progress(received, total);
+    Ok(received)
+}

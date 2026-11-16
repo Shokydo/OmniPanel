@@ -11,6 +11,7 @@
 use crate::ask::Ask;
 use crate::autostart;
 use crate::backup;
+use crate::kernels;
 use crate::modrinth;
 use crate::notify;
 use crate::wall;
@@ -187,6 +188,13 @@ pub const READY_CHANNELS: &[&str] = &[
     "autostart:set",
     "shell:editor",
     "server:moveToApp",
+    "wizard:catalog",
+    "wizard:versions",
+    "wizard:java",
+    "wizard:openJava",
+    "wizard:pickParent",
+    "wizard:suggestDir",
+    "wizard:create",
     "modrinth:search",
     "modrinth:versions",
     "modrinth:categories",
@@ -315,6 +323,7 @@ impl App {
             "autostart" => self.autostart(action, args),
             "backup" => self.backup(action, args),
             "modrinth" => self.modrinth(action, args),
+            "wizard" => self.wizard(action, args),
             "wall" => self.wall(action, args),
             "ui" => self.ui(action, args),
             "notify" => self.notify(action, args),
@@ -1466,6 +1475,75 @@ impl App {
                 Ok(Value::Bool(autostart::set(&autostart::Entry::current(), enabled)))
             }
             other => Err(not_migrated("autostart", other)),
+        }
+    }
+
+    /* ───────────── wizard:* — мастер создания сервера ───────────── */
+
+    fn wizard(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "catalog" => Ok(kernels::catalog()),
+            "versions" => {
+                let list = kernels::versions(&kernels::Bases::from_env(), &text(args, 0))?;
+                Ok(Value::Arr(list))
+            }
+            "java" => Ok(kernels::detect_java()),
+            "openJava" => {
+                /* страница Temurin: там кнопка «скачать JDK для Windows» */
+                let url = "https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk";
+                Ok(Value::Bool(open_in_system(url).is_ok()))
+            }
+            "pickParent" => {
+                let chosen = crate::dialog::pick(crate::dialog::Pick::Folder, "Куда создать папку сервера");
+                Ok(match chosen.first() {
+                    Some(path) => Value::str(path),
+                    None => Value::Null,
+                })
+            }
+            "suggestDir" => Ok(Value::str(kernels::suggest_dir(&text(args, 0), &text(args, 1)))),
+            "create" => {
+                let opts = args.first().cloned().unwrap_or(Value::Null);
+                let bases = kernels::Bases::from_env();
+                let created = kernels::create_server(&bases, &opts, |stage, text, percent| {
+                    self.publish(
+                        "wizard-progress",
+                        &Value::obj(vec![
+                            ("stage", Value::str(stage)),
+                            ("text", Value::str(text)),
+                            (
+                                "percent",
+                                match percent {
+                                    Some(percent) => Value::Num(percent as f64),
+                                    None => Value::Null,
+                                },
+                            ),
+                        ]),
+                    );
+                });
+                Ok(match created {
+                    Ok(result) => {
+                        let mut fields: Vec<(String, Value)> = vec![("ok".to_string(), Value::Bool(true))];
+                        if let Value::Obj(pairs) = result.to_json() {
+                            fields.extend(pairs);
+                        }
+                        Value::Obj(fields)
+                    }
+                    Err(err) => {
+                        self.publish(
+                            "wizard-progress",
+                            &Value::obj(vec![
+                                ("stage", Value::str("error")),
+                                ("text", Value::str(&err)),
+                            ]),
+                        );
+                        Value::obj(vec![
+                            ("ok", Value::Bool(false)),
+                            ("error", Value::str(err)),
+                        ])
+                    }
+                })
+            }
+            other => Err(not_migrated("wizard", other)),
         }
     }
 

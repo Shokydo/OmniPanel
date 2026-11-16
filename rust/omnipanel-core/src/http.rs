@@ -239,6 +239,17 @@ impl PanelServer {
                 vec![Value::Str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
             ),
             /* ── свои обои, окна вопросов, уведомления ── */
+            /* ── мастер создания сервера ── */
+            ("GET", "/api/wizard/catalog") => ("wizard:catalog", vec![]),
+            ("GET", "/api/wizard/versions") => ("wizard:versions", vec![Value::str(arg("id"))]),
+            ("GET", "/api/wizard/java") => ("wizard:java", vec![]),
+            ("POST", "/api/wizard/openJava") => ("wizard:openJava", vec![]),
+            ("POST", "/api/wizard/pickParent") => ("wizard:pickParent", vec![]),
+            ("GET", "/api/wizard/suggestDir") => (
+                "wizard:suggestDir",
+                vec![Value::str(arg("parent")), Value::str(arg("name"))],
+            ),
+            ("POST", "/api/wizard/create") => ("wizard:create", vec![body_json.clone()]),
             /* ── каталог Modrinth ── */
             ("GET", "/api/modrinth/search") => (
                 "modrinth:search",

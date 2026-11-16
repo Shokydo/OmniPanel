@@ -171,7 +171,7 @@ fn ошибка_неперенесённого_адреса_понятная() {
     let panel = start_panel();
     /* адрес, который ещё не перенесён, обязан отвечать по-русски и с кодом 200,
        чтобы интерфейс показал сообщение, а не «сломалось всё» */
-    let (status, body) = request(panel.port, "GET", "/api/wizard/catalog", "");
+    let (status, body) = request(panel.port, "GET", "/api/addons/list", "");
     assert_eq!(status, 200);
     assert!(body.contains("ещё не перенес") || body.contains("не перенесён"), "ответ: {body}");
 }

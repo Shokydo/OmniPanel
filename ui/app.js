@@ -169,8 +169,11 @@ const httpApi = {
   async wizardVersions(id) { return (await fetch('/api/wizard/versions?id=' + encodeURIComponent(id))).json(); },
   async wizardJava() { return (await fetch('/api/wizard/java')).json(); },
   async wizardOpenJava() { window.open('https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk', '_blank'); return true; },
-  async wizardPickParent() { return null; },
-  async wizardSuggestDir(parent, name) { return (parent ? parent.replace(/[\\/]+$/, '') + '/' + name : name); },
+  async wizardPickParent() { return (await fetch('/api/wizard/pickParent', { method: 'POST' })).json(); },
+  async wizardSuggestDir(parent, name) {
+    const q = new URLSearchParams({ parent: parent || '', name: name || '' }).toString();
+    return (await fetch('/api/wizard/suggestDir?' + q)).json();
+  },
   async wizardCreate(opts) { return post('/api/wizard/create', opts); },
   onWizardProgress(cb) { (this.subs['wizard-progress'] ||= []).push(cb); },
   async tpsClear(id) { return post(`/api/servers/${id}/tps/clear`); },

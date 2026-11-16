@@ -13,6 +13,7 @@ pub mod dialog;
 pub mod deflate;
 pub mod files;
 pub mod json;
+pub mod kernels;
 pub mod modrinth;
 pub mod net;
 pub mod notify;
