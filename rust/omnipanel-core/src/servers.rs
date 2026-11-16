@@ -563,6 +563,20 @@ impl Manager {
 
         let (program, args) = cfg.shell_command();
         let mut command = Command::new(&program);
+        #[cfg(windows)]
+        {
+            /* На Windows команда идёт в cmd как есть, одной строкой.
+               Через `args` Rust экранирует кавычки как \" — а cmd такого не
+               понимает и падает на первом же пути с пробелом, поэтому строку
+               отдаём целиком, без правок. */
+            let _ = &args;
+            use std::os::windows::process::CommandExt;
+            command.raw_arg("/d");
+            command.raw_arg("/s");
+            command.raw_arg("/c");
+            command.raw_arg(format!("\"{}\"", cfg.command));
+        }
+        #[cfg(not(windows))]
         command.args(&args);
         command.current_dir(cfg.work_dir());
         for (key, value) in &cfg.env {
@@ -876,10 +890,13 @@ impl Manager {
 
     /// Отметить завершение процесса — вызывается сторожем, когда сервер вышел сам.
     pub fn mark_exited(&self, id: &str, code: Option<i32>) {
-        let manual = {
+        let (manual, lived_ms) = {
             let mut rt = self.inner.runtimes.lock().unwrap();
             match rt.get_mut(id) {
                 Some(r) => {
+                    /* сколько прожил процесс — чтобы отличить «не запустился»
+                       от «поработал и упал» */
+                    let lived = r.started_at.map(|t| (self.inner.clock)() - t).unwrap_or(0);
                     r.child = None;
                     r.pid = None;
                     r.stdin = None;
@@ -887,13 +904,45 @@ impl Manager {
                     r.started_at = None;
                     r.state = ServerState::Stopped;
                     r.stopping = false;
-                    r.manual_stop
+                    (r.manual_stop, lived)
                 }
                 None => return,
             }
         };
         let код = code.map(|c| c.to_string()).unwrap_or_else(|| "—".to_string());
         self.log(id, "system", format!("Процесс завершён (код: {})", код));
+        /* запуск провалился сразу же — чаще всего не нашлась сама программа
+           (`java`, `node`): говорим об этом прямым текстом, а не «процесс завершён» */
+        if !manual && code.map(|c| c != 0).unwrap_or(false) {
+            let quick = lived_ms < 5000;
+            let tail: Vec<String> = self
+                .logs(id)
+                .into_iter()
+                .rev()
+                .take(8)
+                .map(|line| line.to_lowercase())
+                .collect();
+            let not_found = tail.iter().any(|line| {
+                line.contains("is not recognized")
+                    || line.contains("не является внутренней")
+                    || line.contains("no such file")
+                    || line.contains("не найден")
+                    || line.contains("cannot find")
+            });
+            if quick && not_found {
+                self.log(
+                    id,
+                    "system",
+                    "Похоже, программы из команды нет в этой системе — проверь путь в команде запуска или поставь её.",
+                );
+            } else if quick {
+                self.log(
+                    id,
+                    "system",
+                    "Сервер завершился сразу после запуска — смотри строки выше: обычно там причина.",
+                );
+            }
+        }
         self.emit(id, EventKind::Exit, код);
 
         let auto_restart = self.find(id).map(|c| c.auto_restart).unwrap_or(false);

@@ -84,8 +84,33 @@ impl WindowBridge {
     }
 
     /// Интерфейс просит выполнить команду.
+    ///
+    /// Состояние меняется сразу, ещё до того как оконный поток её применит:
+    /// интерфейс получает в ответе уже новое состояние и рисует правильную
+    /// кнопку. Оконный поток потом уточняет его настоящим (`set_state`).
     pub fn request(&self, command: WindowCommand) {
-        self.shared.lock().unwrap().queue.push_back(command);
+        let mut shared = self.shared.lock().unwrap();
+        match command {
+            WindowCommand::Minimize | WindowCommand::Close => shared.visible = false,
+            WindowCommand::Show => {
+                shared.visible = true;
+                shared.maximized = shared.maximized && !shared.fullscreen;
+            }
+            WindowCommand::ToggleMaximize => {
+                if shared.fullscreen {
+                    /* из полного экрана та же кнопка возвращает окно */
+                    shared.fullscreen = false;
+                    shared.maximized = false;
+                } else {
+                    shared.maximized = !shared.maximized;
+                }
+            }
+            WindowCommand::ToggleFullscreen => {
+                shared.fullscreen = !shared.fullscreen;
+            }
+            WindowCommand::Quit => {}
+        }
+        shared.queue.push_back(command);
     }
 
     /// Оконный поток забирает все накопившиеся команды.

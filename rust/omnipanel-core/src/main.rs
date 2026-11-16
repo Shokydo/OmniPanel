@@ -42,7 +42,21 @@ fn main() {
     info.app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let app = Arc::new(App::with_store(info, store));
-    let server = Arc::new(PanelServer::new(Arc::clone(&app), ui_dir.clone()));
+    /* картинки лежат в папке assets рядом с интерфейсом или с программой */
+    let mut panel = PanelServer::new(Arc::clone(&app), ui_dir.clone());
+    for candidate in [
+        ui_dir.parent().map(|p| p.join("assets")),
+        std::env::current_dir().ok().map(|p| p.join("assets")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate.is_dir() {
+            panel = panel.with_assets(candidate);
+            break;
+        }
+    }
+    let server = Arc::new(panel);
 
     println!("OmniPanel на Rust {} — интерфейс: {}", env!("CARGO_PKG_VERSION"), ui_dir.display());
     println!("  данные: {}", data_dir.display());

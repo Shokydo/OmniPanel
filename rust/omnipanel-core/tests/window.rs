@@ -133,3 +133,23 @@ fn приложение_с_мостом_работает_как_обычное()
     let shared: Arc<WindowBridge> = Arc::new(bridge);
     assert_eq!(shared.pending(), 0, "добавление сервера не трогает окно");
 }
+
+#[test]
+fn переключение_окна_сразу_отвечает_новым_состоянием() {
+    let (app, _bridge) = app_with_bridge();
+    /* развернуть: интерфейс должен получить готовое состояние, иначе он решает,
+       что окно не отозвалось, и уходит в полноэкранный режим браузера */
+    let answer = app.invoke("win:toggleMax", &[]).unwrap();
+    assert!(answer.get("ok").map(|v| v.as_bool()).unwrap_or(false));
+    let state = answer.get("state").expect("состояние окна в ответе");
+    assert!(state.get("maximized").unwrap().as_bool(), "окно развёрнуто");
+    /* ещё раз — обратно в окно */
+    let answer = app.invoke("win:toggleMax", &[]).unwrap();
+    let state = answer.get("state").unwrap();
+    assert!(!state.get("maximized").unwrap().as_bool(), "окно вернулось в размер");
+    /* полный экран: из него та же кнопка выводит окно */
+    let answer = app.invoke("win:toggleFull", &[]).unwrap();
+    assert!(answer.get("state").unwrap().get("fullscreen").unwrap().as_bool());
+    let answer = app.invoke("win:toggleMax", &[]).unwrap();
+    assert!(!answer.get("state").unwrap().get("fullscreen").unwrap().as_bool());
+}

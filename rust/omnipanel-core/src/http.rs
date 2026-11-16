@@ -22,11 +22,21 @@ type Listeners = Arc<Mutex<Vec<TcpStream>>>;
 pub struct PanelServer {
     app: Arc<App>,
     ui_dir: PathBuf,
+    /// Папка `assets` рядом с программой: иконки, обои, встроенные аддоны.
+    /// Интерфейс ссылается на них как `../assets/…`, то есть просит `/assets/…`
+    /// у этого сервера — раньше он отвечал 404, и картинки в окне не грузились.
+    assets_dir: Option<PathBuf>,
     listeners: Listeners,
     stop: Arc<AtomicBool>,
 }
 
 impl PanelServer {
+    /// Где лежат картинки панели: папка `assets` рядом с программой.
+    pub fn with_assets(mut self, dir: impl Into<PathBuf>) -> PanelServer {
+        self.assets_dir = Some(dir.into());
+        self
+    }
+
     pub fn new(app: Arc<App>, ui_dir: impl Into<PathBuf>) -> PanelServer {
         let listeners: Listeners = Arc::new(Mutex::new(Vec::new()));
 
@@ -59,6 +69,7 @@ impl PanelServer {
         PanelServer {
             app,
             ui_dir: ui_dir.into(),
+            assets_dir: None,
             listeners,
             stop: Arc::new(AtomicBool::new(false)),
         }
@@ -543,6 +554,17 @@ impl PanelServer {
             rel = "index.html";
         }
         let mut file = self.ui_dir.join(rel);
+        /* картинки и встроенные аддоны лежат не в ui, а рядом с программой:
+           интерфейс просит `../assets/…`, то есть `/assets/…` — отдаём их
+           отсюда, иначе в окне остаются пустые места вместо иконок и обоев */
+        if !file.exists() {
+            if let Some(assets) = &self.assets_dir {
+                let outside = assets.join(rel.strip_prefix("assets/").unwrap_or(rel));
+                if outside.exists() {
+                    file = outside;
+                }
+            }
+        }
         if !file.exists() && !rel.contains('.') {
             /* адрес без файла — это раздел интерфейса, отдаём главную страницу */
             file = self.ui_dir.join("index.html");

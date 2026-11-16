@@ -74,9 +74,21 @@ if ($With7z) {
   }
 }
 
+$tauri = Join-Path $Root "src-tauri"
+
+# ── 1в. Версия ─────────────────────────────────────────────────────────────
+# Версию пишем в двух местах: её показывают окно панели и мастер установки.
+Write-Step "версия $Version"
+# без BOM: JSON и version.txt с меткой в начале ломают и Tauri, и version.txt
+$noBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $Rust "omnipanel-setup\version.txt"), $Version, $noBom)
+$conf = Join-Path $tauri "tauri.conf.json"
+$json = [System.IO.File]::ReadAllText($conf)
+$json = $json -replace '"version":\s*"[^"]*"', ('"version": "' + $Version + '"')
+[System.IO.File]::WriteAllText($conf, $json, $noBom)
+
 # ── 2. Сборка ──────────────────────────────────────────────────────────────
 # если в проекте уже есть окно на Tauri — собираем его, а не консольную панель
-$tauri = Join-Path $Root "src-tauri"
 $windowed = Test-Path (Join-Path $tauri "Cargo.toml")
 if ($windowed) {
   Write-Step "собираю окно на Tauri"
@@ -130,13 +142,10 @@ if (Test-Path $assets) {
 OmniPanel $Version на Rust
 =========================
 
-Запуск:  omnipanel-core.exe
-Панель откроется по адресу из окна консоли (по умолчанию http://127.0.0.1:47800/).
+Запуск:  OmniPanel.exe — открывается окно панели на весь экран.
+Ничего ставить не нужно: папка ui и assets идут рядом с exe.
 
-Ключи запуска:
-  --port 47800        порт панели
-  --data OmniPanelData  папка с настройками (servers.json)
-  --ui ui             папка с интерфейсом
+Установка насовсем — exe-установщик из релиза: он спросит, куда ставить.
 
 Настройки и серверы лежат в папке OmniPanelData рядом с программой —
 сборка портативная, можно носить на флешке.

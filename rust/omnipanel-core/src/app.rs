@@ -1065,11 +1065,11 @@ impl App {
             }
             "toggleMax" => {
                 self.window().request(WindowCommand::ToggleMaximize);
-                Ok(self.window().state_json())
+                Ok(toggled(self.window().state_json()))
             }
             "toggleFull" => {
                 self.window().request(WindowCommand::ToggleFullscreen);
-                Ok(self.window().state_json())
+                Ok(toggled(self.window().state_json()))
             }
             "show" => {
                 self.window().request(WindowCommand::Show);
@@ -2268,6 +2268,27 @@ fn open_in_system(path: &str) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open").arg(path).spawn();
     result.map(|_| ()).map_err(|e| format!("не удалось открыть: {}", e))
+}
+
+/// Ответ на переключение окна: состояние и плоско, и в `state`.
+///
+/// Интерфейс ждёт `{ state: { maximized, fullscreen } }` — иначе он решает, что
+/// окно не отозвалось, и уходит в полноэкранный режим браузера, из-за чего
+/// кнопка «развернуть» выглядела нерабочей. Плоские поля оставлены для старых
+/// мест, которые читают `maximized` напрямую.
+fn toggled(state: Value) -> Value {
+    Value::obj(vec![
+        ("ok", Value::Bool(true)),
+        ("state", state.clone()),
+        (
+            "maximized",
+            state.get("maximized").cloned().unwrap_or(Value::Bool(false)),
+        ),
+        (
+            "fullscreen",
+            state.get("fullscreen").cloned().unwrap_or(Value::Bool(false)),
+        ),
+    ])
 }
 
 fn not_migrated(module: &str, action: &str) -> String {

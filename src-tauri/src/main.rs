@@ -81,7 +81,12 @@ fn main() {
             let mut app = App::with_store(info, store);
             app.attach_window(bridge.clone());
             let app_state = Arc::new(app);
-            let panel = Arc::new(PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app)));
+            /* картинки (иконки, обои, встроенные аддоны) лежат рядом с программой
+               в папке assets — сервер панели отдаёт их по адресу /assets/… */
+            let assets = info.app_dir.join("assets");
+            let panel = Arc::new(
+                PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app)).with_assets(assets),
+            );
 
             /* панель отвечает на запросы интерфейса в своём потоке */
             let serving = Arc::clone(&panel);
@@ -102,8 +107,28 @@ fn main() {
             .inner_size(1280.0, 840.0)
             .min_inner_size(940.0, 620.0)
             .decorations(false)
+            /* панель открывается сразу на весь экран: разворачивать вручную
+               не нужно, кнопка в шапке просто возвращает окно в размер */
+            .maximized(true)
             .visible(true)
             .build()?;
+
+            /* на всякий случай: если разворот при создании не сработал,
+               занимаем экран сами — панель должна открыться на весь экран */
+            if !window.is_maximized().unwrap_or(false) && !window.is_fullscreen().unwrap_or(false) {
+                let _ = window.maximize();
+                std::thread::sleep(Duration::from_millis(150));
+                if !window.is_maximized().unwrap_or(false) {
+                    let _ = window.set_fullscreen(true);
+                }
+            }
+
+            /* окно сообщает о себе правду сразу: иначе шапка рисует не ту кнопку */
+            bridge.set_state(
+                window.is_visible().unwrap_or(true),
+                window.is_maximized().unwrap_or(true),
+                window.is_fullscreen().unwrap_or(false),
+            );
 
             /* трей: открыть, свернуть, выйти */
             let open = MenuItem::with_id(tauri_app, "open", "Открыть панель", true, None::<&str>)?;
@@ -157,8 +182,16 @@ fn main() {
                                 let _ = win.set_fullscreen(false);
                             } else if win.is_maximized().unwrap_or(false) {
                                 let _ = win.unmaximize();
+                                let _ = win.set_size(tauri::LogicalSize::new(1280.0, 840.0));
+                                let _ = win.center();
                             } else {
                                 let _ = win.maximize();
+                                /* окно без рамки иногда не отзывается на
+                                   разворот — тогда занимаем экран целиком */
+                                std::thread::sleep(Duration::from_millis(180));
+                                if !win.is_maximized().unwrap_or(false) {
+                                    let _ = win.set_fullscreen(true);
+                                }
                             }
                         }
                         WindowCommand::ToggleFullscreen => {

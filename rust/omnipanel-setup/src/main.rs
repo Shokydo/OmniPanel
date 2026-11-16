@@ -11,9 +11,16 @@
 //! Ничего внешнего не нужно: распаковка своя (модуль `zip` ядра), ярлыки —
 //! через PowerShell, который в Windows есть всегда.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use omnipanel_core::zip;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// Версия сборки: её пишет скрипт сборки в `version.txt` перед компиляцией.
+fn setup_version() -> &'static str {
+    include_str!("../version.txt").trim()
+}
 
 /// Метка встроенного архива.
 const TRAILER_MAGIC: &[u8; 8] = b"OMNIUPD1";
@@ -55,6 +62,17 @@ fn main() {
             Ok(()) => println!("OmniPanel удалён"),
             Err(err) => fail(&err),
         },
+        "--default-dir" => println!("{}", default_dir().display()),
+        /* мастер установки передаёт папку, выбранную человеком */
+        "--install-dir" => {
+            let dir = args.get(2).map(PathBuf::from).unwrap_or_else(default_dir);
+            let run = !args.iter().any(|a| a == "--no-run");
+            let desktop = !args.iter().any(|a| a == "--no-desktop");
+            match install_into(&dir, desktop, run) {
+                Ok(()) => println!("OmniPanel установлен в {}", dir.display()),
+                Err(err) => fail(&err),
+            }
+        }
         _ => match install_and_run() {
             Ok(()) => {}
             Err(err) => fail(&err),
@@ -143,7 +161,7 @@ pub fn unpack(exe: &Path, dest: &Path) -> Result<usize, String> {
 
 /* ───────────── установка ───────────── */
 
-/// Куда ставим панель.
+/// Куда ставим панель по умолчанию.
 pub fn install_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -152,6 +170,161 @@ pub fn install_dir() -> PathBuf {
         }
     }
     std::env::temp_dir().join("OmniPanel")
+}
+
+/// Путь прошлой установки из реестра — чтобы при обновлении не спрашивать заново.
+pub fn default_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(dir) = registry_value("InstallDir") {
+            if !dir.trim().is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
+    }
+    install_dir()
+}
+
+/// Значение из `HKCU\Software\OmniPanel` (пусто, если нет).
+fn registry_value(name: &str) -> Option<String> {
+    let mut command = std::process::Command::new("reg");
+    command.args(["query", "HKCU\\Software\\OmniPanel", "/v", name]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = command.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    /* строка вида:  InstallDir    REG_SZ    C:\Users\…\OmniPanel */
+    text.lines()
+        .find(|line| line.trim_start().starts_with(name))
+        .and_then(|line| line.split("REG_SZ").nth(1))
+        .map(|value| value.trim().to_string())
+}
+
+/// Запоминаем папку и версию — для «Программы и компоненты» и для обновлений.
+fn remember_install(dir: &Path) {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let pairs = [
+        ("InstallDir".to_string(), dir.display().to_string()),
+        ("Uninstall".to_string(), format!("\"{}\" --uninstall", exe.display())),
+    ];
+    for (name, value) in pairs {
+        let mut command = std::process::Command::new("reg");
+        command.args(["add", "HKCU\\Software\\OmniPanel", "/v", &name, "/t", "REG_SZ", "/d", &value, "/f"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = command.output();
+    }
+    /* запись в списке установленных программ Windows */
+    let exe = std::env::current_exe().unwrap_or_default();
+    let key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmniPanel";
+    let values = [
+        ("DisplayName".to_string(), "OmniPanel".to_string()),
+        (
+            "DisplayVersion".to_string(),
+            setup_version().to_string(),
+        ),
+        ("Publisher".to_string(), "OmniPanel".to_string()),
+        ("InstallLocation".to_string(), dir.display().to_string()),
+        (
+            "DisplayIcon".to_string(),
+            app_exe(dir).display().to_string(),
+        ),
+        (
+            "UninstallString".to_string(),
+            format!("\"{}\" --uninstall", exe.display()),
+        ),
+        ("NoModify".to_string(), "1".to_string()),
+        ("NoRepair".to_string(), "1".to_string()),
+    ];
+    for (name, value) in values {
+        let mut command = std::process::Command::new("reg");
+        command.args(["add", key, "/v", &name, "/t", "REG_SZ", "/d", &value, "/f"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = command.output();
+    }
+}
+
+fn forget_install() {
+    for key in [
+        "HKCU\\Software\\OmniPanel",
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmniPanel",
+    ] {
+        let mut command = std::process::Command::new("reg");
+        command.args(["delete", key, "/f"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = command.output();
+    }
+}
+
+/// Установка в выбранную папку — этим пользуется мастер установки.
+pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let count = unpack(&exe, dir)?;
+    shortcuts(dir, desktop)?;
+    remember_install(dir);
+    println!("распаковано файлов: {}", count);
+    if run {
+        launch(&app_exe(dir), dir)?;
+    }
+    Ok(())
+}
+
+/// Окно установщика: раскрывается, только если внутри есть панель.
+fn wizard() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        let script = std::env::temp_dir().join("omnipanel-install.ps1");
+        /* UTF-8 с BOM: Windows PowerShell 5.1 иначе читает файл как cp1251 */
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(include_str!("../installer.ps1").as_bytes());
+        std::fs::write(&script, &bytes).map_err(|e| format!("не создать мастер: {}", e))?;
+        let status = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script.display().to_string(),
+                "-SetupExe",
+                &exe.display().to_string(),
+                "-Version",
+                setup_version(),
+                "-DefaultDir",
+                &default_dir().display().to_string(),
+            ])
+            .status();
+        let _ = std::fs::remove_file(&script);
+        return match status {
+            Ok(_) => Ok(()),
+            /* PowerShell почему-то нет — ставим без окна, в папку по умолчанию */
+            Err(_) => install_into(&default_dir(), true, true),
+        };
+    }
+    #[cfg(not(windows))]
+    install_into(&default_dir(), true, true)
 }
 
 /// Имя запускаемого файла панели.
@@ -173,14 +346,17 @@ fn app_exe(dir: &Path) -> PathBuf {
 
 fn install_and_run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = install_dir();
+    let dir = default_dir();
+
+    /* панель внутри есть и она ещё не стоит — показываем мастер с выбором папки */
+    if payload_offset(&exe).is_ok() && !app_exe(&dir).exists() {
+        return wizard();
+    }
 
     /* уже установлено — просто запускаем */
     let installed = app_exe(&dir);
     if !installed.exists() {
-        let count = unpack(&exe, &dir)?;
-        shortcuts(&dir)?;
-        println!("OmniPanel установлен в {} ({} файлов)", dir.display(), count);
+        install_into(&dir, true, false)?;
     }
     launch(&installed, &dir)
 }
@@ -196,7 +372,7 @@ fn launch(exe: &Path, dir: &Path) -> Result<(), String> {
 }
 
 fn uninstall() -> Result<(), String> {
-    let dir = install_dir();
+    let dir = default_dir();
     if !dir.exists() {
         return Err("панель не установлена".to_string());
     }
@@ -214,26 +390,36 @@ fn uninstall() -> Result<(), String> {
             .status();
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("не удалить {}: {}", dir.display(), e))?;
+    forget_install();
     #[cfg(windows)]
     {
-        let desktop = std::env::var("USERPROFILE")
-            .map(|p| PathBuf::from(p).join("Desktop").join("OmniPanel.lnk"))
-            .unwrap_or_default();
-        let _ = std::fs::remove_file(desktop);
+        let script = "$s=(New-Object -ComObject WScript.Shell); \
+             foreach($p in @([Environment]::GetFolderPath('Desktop')+'\\OmniPanel.lnk', \
+             [Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')) {{ \
+             if (Test-Path $p) {{ Remove-Item $p -Force }} }}";
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .status();
     }
     Ok(())
 }
 
 /// Ярлыки на рабочем столе и в меню «Пуск» — через PowerShell, он есть всегда.
 #[cfg(windows)]
-fn shortcuts(dir: &Path) -> Result<(), String> {
+fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
     let exe = app_exe(dir);
+    /* меню «Пуск» — всегда, рабочий стол — если переключатель включён */
+    let targets = if desktop {
+        "@([Environment]::GetFolderPath('Desktop')+'\\OmniPanel.lnk', [Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')"
+    } else {
+        "@([Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')"
+    };
     let script = format!(
         "$s=(New-Object -ComObject WScript.Shell); \
-         foreach($p in @([Environment]::GetFolderPath('Desktop')+'\\OmniPanel.lnk', \
-         [Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')) {{ \
+         foreach($p in {}) {{ \
          $l=$s.CreateShortcut($p); $l.TargetPath='{}'; $l.WorkingDirectory='{}'; \
          $l.IconLocation='{},0'; $l.Save() }}",
+        targets,
         exe.display(),
         dir.display(),
         exe.display()
@@ -246,7 +432,7 @@ fn shortcuts(dir: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn shortcuts(_dir: &Path) -> Result<(), String> {
+fn shortcuts(_dir: &Path, _desktop: bool) -> Result<(), String> {
     Ok(())
 }
 
@@ -338,6 +524,25 @@ mod tests {
         let count = unpack(&exe, &unpacked).unwrap();
         assert_eq!(count, 2);
         assert_eq!(std::fs::read_to_string(unpacked.join("ui/index.html")).unwrap(), "<html>");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ставится_в_выбранную_папку() {
+        let dir = temp("install");
+        let exe = dir.join("setup.exe");
+        std::fs::write(&exe, "MZ установщик").unwrap();
+        let archive = dir.join("panel.zip");
+        let data = tiny_zip(&[("OmniPanel.exe", "панель"), ("ui/index.html", "<html>")]);
+        std::fs::write(&archive, &data).unwrap();
+        append_payload(&exe, &archive).unwrap();
+
+        /* папку выбирает человек в мастере — установка идёт ровно туда */
+        let target = dir.join("Мои игры/OmniPanel");
+        let count = unpack(&exe, &target).unwrap();
+        assert_eq!(count, 2);
+        assert!(target.join("OmniPanel.exe").exists());
+        assert!(target.join("ui/index.html").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

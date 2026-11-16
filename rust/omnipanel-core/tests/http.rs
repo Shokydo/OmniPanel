@@ -25,6 +25,11 @@ impl Drop for Panel {
 /// Поднимает панель на свободном порту. Папка у каждого теста своя —
 /// тесты идут параллельно и не должны мешать друг другу.
 fn start_panel() -> Panel {
+    start_panel_with_assets(false)
+}
+
+/// Тот же сервер, но с папкой `assets` рядом с программой (как в окне на Tauri).
+fn start_panel_with_assets(with_assets: bool) -> Panel {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -39,7 +44,15 @@ fn start_panel() -> Panel {
     info.data_dir = dir.clone();
     info.config_path = dir.join("servers.json");
     let app = Arc::new(App::new(info));
-    let server = Arc::new(PanelServer::new(app, ui));
+    let mut panel_server = PanelServer::new(app, ui);
+    if with_assets {
+        let assets = dir.join("assets");
+        fs::create_dir_all(assets.join("wallpapers")).unwrap();
+        fs::write(assets.join("icon.png"), "PNG-картинка".as_bytes()).unwrap();
+        fs::write(assets.join("wallpapers/grid.png"), "PNG-обои".as_bytes()).unwrap();
+        panel_server = panel_server.with_assets(assets);
+    }
+    let server = Arc::new(panel_server);
 
     /* порт 0 — система сама выберет свободный, и тесты не мешают друг другу */
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -439,4 +452,28 @@ fn нагрузочный_тест_по_http() {
     let (status, body) = request(panel.port, "POST", "/api/load/stop", "");
     assert_eq!(status, 200);
     assert!(body.contains("не идёт"), "ответ: {body}");
+}
+
+#[test]
+fn картинки_рядом_с_программой_отдаются_сервером() {
+    let panel = start_panel_with_assets(true);
+    /* интерфейс пишет `../assets/icon.png` — браузер просит именно такой адрес */
+    let (status, body) = request(panel.port, "GET", "/assets/icon.png", "");
+    assert_eq!(status, 200, "иконка панели");
+    assert!(body.contains("картинка"), "это та самая картинка: {:?}", body);
+    let (status, body) = request(panel.port, "GET", "/assets/wallpapers/grid.png", "");
+    assert_eq!(status, 200, "обои");
+    assert!(body.contains("обои"));
+    /* чужих файлов через этот адрес не отдаём */
+    let (status, _) = request(panel.port, "GET", "/assets/../servers.json", "");
+    assert_ne!(status, 200, "выход за папку запрещён");
+}
+
+#[test]
+fn без_папки_картинок_панель_жива() {
+    let panel = start_panel_with_assets(false);
+    let (status, _) = request(panel.port, "GET", "/assets/icon.png", "");
+    assert_eq!(status, 404, "картинки нет — так и отвечаем");
+    let (status, _) = request(panel.port, "GET", "/", "");
+    assert_eq!(status, 200, "интерфейс при этом работает");
 }
