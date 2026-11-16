@@ -89,6 +89,11 @@ impl PanelServer {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Приложение панели — окну оно нужно, чтобы показать состояние.
+    pub fn app(&self) -> Arc<App> {
+        Arc::clone(&self.app)
+    }
+
     fn handle(&self, mut stream: TcpStream) -> std::io::Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut request_line = String::new();
@@ -164,6 +169,19 @@ impl PanelServer {
             ("POST", "/api/open") => ("shell:openPath", vec![Value::Str(body_json.get("path").map(|v| v.text()).unwrap_or_default())]),
             ("GET", "/api/props") => ("props:read", vec![Value::str(arg("id"))]),
             ("POST", "/api/props") => ("props:write", vec![Value::str(arg("id")), body_json.clone()]),
+            ("POST", "/api/win/minimize") => ("win:minimize", vec![]),
+            ("POST", "/api/win/close") => ("win:close", vec![]),
+            ("POST", "/api/win/quit") => ("win:quit", vec![]),
+            ("POST", "/api/win/toggleMax") => ("win:toggleMax", vec![]),
+            ("POST", "/api/win/toggleFull") => ("win:toggleFull", vec![]),
+            ("GET", "/api/win/state") => ("win:state", vec![]),
+            ("GET", "/api/win/visible") => ("win:isVisible", vec![]),
+            ("GET", "/api/win/startMode") => ("win:getStartMode", vec![]),
+            ("POST", "/api/win/startMode") => (
+                "win:setStartMode",
+                vec![Value::Str(body_json.get("mode").map(|v| v.text()).unwrap_or_default())],
+            ),
+            ("GET", "/api/win") => ("win:state", vec![]),
             ("GET", "/api/ports/own") => ("ports:own", vec![Value::str(arg("id"))]),
             ("GET", "/api/ports/check") => ("ports:check", vec![Value::str(arg("id"))]),
             ("GET", "/api/ports/free") => ("ports:free", vec![Value::str(arg("id")), Value::str(arg("from"))]),

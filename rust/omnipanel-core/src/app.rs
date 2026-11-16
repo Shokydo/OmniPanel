@@ -11,6 +11,7 @@
 use crate::b64;
 use crate::files::{kind_of, Entry, FileError, Files, READ_LIMIT, WRITE_LIMIT};
 use crate::ports;
+use crate::window::{WindowBridge, WindowCommand};
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
 use std::path::PathBuf;
@@ -65,6 +66,8 @@ pub struct App {
     info: AppInfo,
     /// Последняя ошибка сохранения настроек, если она была.
     last_save_error: Mutex<Option<String>>,
+    /// Мост к окну (в HTTP-режиме без окна просто копит команды).
+    window: Mutex<WindowBridge>,
 }
 
 /// Какие каналы уже живут в Rust. Список нужен и тестам, и генератору моста:
@@ -111,6 +114,16 @@ pub const READY_CHANNELS: &[&str] = &[
     "shell:openPath",
     "server:editor",
     "server:autoFolder",
+    "win:minimize",
+    "win:close",
+    "win:quit",
+    "win:toggleMax",
+    "win:toggleFull",
+    "win:show",
+    "win:isVisible",
+    "win:state",
+    "win:getStartMode",
+    "win:setStartMode",
     "bans:list",
     "bans:unban",
     "bans:ban",
@@ -125,6 +138,7 @@ impl App {
             store: Mutex::new(None),
             info,
             last_save_error: Mutex::new(None),
+            window: Mutex::new(WindowBridge::new()),
         }
     }
 
@@ -137,6 +151,24 @@ impl App {
         app
     }
 
+    /// Панель с готовым мостом окна — так её запускает оконная сборка.
+    pub fn with_window(info: AppInfo, window: WindowBridge) -> App {
+        let app = App::new(info);
+        app.attach_window(window);
+        app
+    }
+
+    /// Подключить мост окна (нужно оконной сборке и тестам).
+    pub fn attach_window(&self, bridge: WindowBridge) {
+        *self.window.lock().unwrap() = bridge;
+    }
+
+    /// Мост окна: через него интерфейс управляет окном.
+    pub fn window(&self) -> WindowBridge {
+        self.window.lock().unwrap().clone()
+    }
+
+    /// Менеджер серверов: им пользуются HTTP-режим и оконная сборка.
     pub fn manager(&self) -> Manager {
         self.manager.clone()
     }
@@ -176,6 +208,7 @@ impl App {
             "ports" => Ok(wrap_files(self.ports(action, args))),
             "props" => Ok(wrap_files(self.props(action, args))),
             "shell" => Ok(wrap_files(self.shell(action, args))),
+            "win" => self.win(action, args),
             "app" => self.app(action, args),
             "path" => self.path(action, args),
             _ => Err(format!(
@@ -794,6 +827,43 @@ impl App {
                 Ok(Value::obj(vec![("ok", Value::Bool(true))]))
             }
             other => Err(not_migrated("shell", other)),
+        }
+    }
+
+    /* ───────────── win:* ───────────── */
+
+    fn win(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "minimize" => {
+                self.window().request(WindowCommand::Minimize);
+                Ok(Value::Bool(true))
+            }
+            "close" => {
+                /* кнопка «закрыть» в шапке панели сворачивает в трей */
+                self.window().request(WindowCommand::Close);
+                Ok(Value::Bool(true))
+            }
+            "quit" => {
+                self.window().request(WindowCommand::Quit);
+                Ok(Value::Bool(true))
+            }
+            "toggleMax" => {
+                self.window().request(WindowCommand::ToggleMaximize);
+                Ok(self.window().state_json())
+            }
+            "toggleFull" => {
+                self.window().request(WindowCommand::ToggleFullscreen);
+                Ok(self.window().state_json())
+            }
+            "show" => {
+                self.window().request(WindowCommand::Show);
+                Ok(Value::Bool(true))
+            }
+            "isVisible" => Ok(Value::Bool(self.window().is_visible())),
+            "state" => Ok(self.window().state_json()),
+            "getStartMode" => Ok(Value::str("tray")),
+            "setStartMode" => Ok(args.first().cloned().unwrap_or(Value::str("tray"))),
+            other => Err(not_migrated("win", other)),
         }
     }
 

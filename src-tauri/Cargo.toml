@@ -1,0 +1,25 @@
+[package]
+name = "omnipanel"
+version = "1.27.0"
+edition = "2021"
+description = "OmniPanel — панель управления серверами на Rust"
+authors = ["Shokydo"]
+license = "MIT"
+
+[[bin]]
+name = "OmniPanel"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+omnipanel-core = { path = "../rust/omnipanel-core" }
+tauri = { version = "2", features = ["tray-icon"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

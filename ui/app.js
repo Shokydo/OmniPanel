@@ -33,19 +33,39 @@ const httpApi = {
   async startAll() { await Promise.all(S.servers.map((s) => this.start(s.id))); return true; },
   async stopAll() { await Promise.all(S.servers.map((s) => this.stop(s.id))); return true; },
   async restartAll() { for (const s of S.servers) await this.restart(s.id); return true; },
-  async winMinimize() { return false; },
-  async winClose() { return false; },
-  async winQuit() { return false; },
+  /* В обычном браузере окна нет — команды уходят в Rust-панель, если она
+   * запущена (httpApi работает и внутри окна на Tauri: оно показывает эту же
+   * страницу). Если окна нет совсем, остаётся полноэкранный режим браузера. */
+  async winMinimize() { const r = await post('/api/win/minimize'); return r && r.ok !== false; },
+  async winClose() { const r = await post('/api/win/close'); return r && r.ok !== false; },
+  async winQuit() { const r = await post('/api/win/quit'); return r && r.ok !== false; },
   async winToggleMax() {
+    const r = await post('/api/win/toggleMax');
+    if (r && r.ok !== false && r.state) return { maximized: !!r.state.maximized, fullscreen: !!r.state.fullscreen };
     if (!document.fullscreenElement) { await document.documentElement.requestFullscreen().catch(() => {}); return { fullscreen: true, maximized: false }; }
     await document.exitFullscreen().catch(() => {});
     return { fullscreen: false, maximized: false };
   },
-  async winToggleFull() { return this.winToggleMax(); },
-  async winIsVisible() { return !document.hidden; },
-  async winState() { return { maximized: false, fullscreen: !!document.fullscreenElement }; },
-  async winGetStartMode() { return 'window'; },
-  async winSetStartMode(m) { return m; },
+  async winToggleFull() {
+    const r = await post('/api/win/toggleFull');
+    if (r && r.ok !== false && r.state) return { maximized: !!r.state.maximized, fullscreen: !!r.state.fullscreen };
+    return this.winToggleMax();
+  },
+  async winIsVisible() {
+    const r = await fetch('/api/win/visible').then((x) => x.json()).catch(() => null);
+    if (r && r.ok !== false && typeof r.result === 'boolean') return r.result;
+    return !document.hidden;
+  },
+  async winState() {
+    const r = await fetch('/api/win/state').then((x) => x.json()).catch(() => null);
+    if (r && r.ok !== false && (r.maximized !== undefined || r.result)) return r.state || r;
+    return { maximized: false, fullscreen: !!document.fullscreenElement };
+  },
+  async winGetStartMode() {
+    const r = await fetch('/api/win/startMode').then((x) => x.json()).catch(() => null);
+    return (r && (r.startMode || r.result)) || 'window';
+  },
+  async winSetStartMode(m) { await post('/api/win/startMode', { mode: m }); return m; },
   async notifyDesktop() { return false; },
   async wallPick() { return null; },
   async updConfig() { return { repo: '', branch: 'main', auto: false, current: '0.0.0', packaged: false }; },

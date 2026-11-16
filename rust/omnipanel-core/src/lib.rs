@@ -14,6 +14,7 @@ pub mod props;
 pub mod props_schema;
 pub mod servers;
 pub mod http;
+pub mod window;
 pub mod zip;
 
 pub use files::{Entry, FileError, Files};

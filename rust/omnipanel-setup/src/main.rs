@@ -156,10 +156,11 @@ pub fn install_dir() -> PathBuf {
 
 /// Имя запускаемого файла панели.
 fn app_exe(dir: &Path) -> PathBuf {
+    /* окно на Tauri называется OmniPanel.exe, консольная панель — omnipanel-core */
     let names = if cfg!(windows) {
-        ["omnipanel-core.exe", "omnipanel.exe", "omnipanel-core", "omnipanel"]
+        ["OmniPanel.exe", "omnipanel-core.exe", "omnipanel.exe", "omnipanel-core", "omnipanel"]
     } else {
-        ["omnipanel-core", "omnipanel", "omnipanel-core.exe", "omnipanel.exe"]
+        ["omnipanel-core", "omnipanel", "OmniPanel", "omnipanel-core.exe", "OmniPanel.exe"]
     };
     for name in names {
         let candidate = dir.join(name);
@@ -207,6 +208,9 @@ fn uninstall() -> Result<(), String> {
             .status();
         let _ = std::process::Command::new("taskkill")
             .args(["/IM", "omnipanel.exe", "/F"])
+            .status();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "OmniPanel.exe", "/F"])
             .status();
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("не удалить {}: {}", dir.display(), e))?;
