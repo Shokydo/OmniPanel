@@ -110,15 +110,18 @@ jobs:
           $version = "${{ inputs.version }}"
           if (-not $version) { $version = "1.27.0" }
           $tag = "v$version"
+          # gh на Windows теряет кириллицу в имени ассета — грузим под латинским
+          $setup = "dist/OmniPanel-Setup-$version.exe"
+          Copy-Item "dist/OmniPanel-Установка-$version.exe" $setup
           # в релизе только установщик; архив кода GitHub добавляет сам,
           # а портативная сборка лежит в артефактах этой сборки
           gh release create $tag `
-            "dist/OmniPanel-Установка-$version.exe" `
+            $setup `
             --title "OmniPanel $version на Rust" `
             --notes @"
           Панель управления серверами на Rust: одно окно, без Node.js.
 
-          **Установщик:** ``OmniPanel-Установка-$version.exe`` — ставит панель в
+          **Установщик:** ``OmniPanel-Setup-$version.exe`` — ставит панель в
           %LOCALAPPDATA%\OmniPanel, делает ярлыки и запускает её.
           Портативная сборка (``OmniPanel-win64.zip``) — во вкладке Actions → артефакты.
           "@
