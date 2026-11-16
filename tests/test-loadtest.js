@@ -100,6 +100,7 @@ console.log('=== ДЕЙСТВИЯ БОТОВ: ЧТО ВКЛЮЧЕНО, ТО И �
   ok(empty.cmd === false, 'без списка команд действие выключается');
   const off = normalizeActions({});
   ok(!off.walk && !off.jump && !off.chat && !off.cmd && !off.swing, 'по умолчанию боты просто стоят');
+  ok(off.spread === true && off.hop === true, 'расхождение в стороны и прыжки включены по умолчанию');
   ok(normalizeActions({ walkMs: 5 }).walkMs === 20, 'слишком частый шаг поднят до 20 мс');
   ok(normalizeActions({ walkMs: 1e9 }).walkMs === 5000, 'слишком редкий шаг ограничен');
   const many = normalizeActions({ cmd: true, commands: Array.from({ length: 80 }, (_, i) => 'cmd' + i) });
@@ -193,7 +194,7 @@ function staticChecks() {
   ok(/data-tab="load">Нагрузка</.test(html), 'вкладка «Нагрузка» есть в шапке');
   ok(/id="tab-load"/.test(html), 'содержимое вкладки на месте');
   const ids = ['loadHost', 'loadPort', 'loadVersion', 'loadCount', 'loadRamp', 'loadDuration', 'loadPrefix',
-    'loadWalk', 'loadJump', 'loadChat', 'loadCmd', 'loadSwing', 'loadRespawn', 'loadCmdList',
+    'loadWalk', 'loadJump', 'loadHop', 'loadSpread', 'loadChat', 'loadCmd', 'loadSwing', 'loadRespawn', 'loadCmdList',
     'loadPps', 'loadChunks', 'loadCpu', 'loadRam', 'loadTps', 'loadBots', 'loadLog', 'loadStart', 'loadStop'];
   const missing = ids.filter((id) => !html.includes(`id="${id}"`));
   ok(!missing.length, 'все поля вкладки на месте', missing.length ? 'нет: ' + missing.join(', ') : 'все');

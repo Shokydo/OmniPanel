@@ -784,6 +784,9 @@ const S = {
   currentId: null,
   filter: '',
   domLines: [],
+  lastLogLine: null,      // для склейки одинаковых строк подряд
+  consoleBusy: false,     // история ещё дорисовывается
+  consolePending: [],     // живые строки, пришедшие во время дорисовки
   info: null,
   tps: new Map(),      // id -> {tps, history}
   tpsFull: new Map(),  // id -> [{t,v}]
@@ -861,6 +864,7 @@ const el = {
   loadHost: $('loadHost'), loadPort: $('loadPort'), loadVersion: $('loadVersion'),
   loadCount: $('loadCount'), loadRamp: $('loadRamp'), loadDuration: $('loadDuration'),
   loadPrefix: $('loadPrefix'), loadWalk: $('loadWalk'), loadJump: $('loadJump'),
+  loadHop: $('loadHop'), loadSpread: $('loadSpread'),
   loadChat: $('loadChat'), loadCmd: $('loadCmd'), loadSwing: $('loadSwing'),
   loadRespawn: $('loadRespawn'), loadWalkMs: $('loadWalkMs'), loadJumpMs: $('loadJumpMs'),
   loadChatMs: $('loadChatMs'), loadCmdMs: $('loadCmdMs'), loadSwingMs: $('loadSwingMs'),
@@ -1101,64 +1105,142 @@ async function fmRenderDir(rel, host, depth, isRoot = false) {
       showMenu(ev, menu);
     };
 
-    /* ── перетаскивание файлов и папок между папками ── */
-    row.addEventListener('dragstart', (ev) => {
-      FM.dragPath = it.path;
-      row.classList.add('dragging');
-      try {
-        ev.dataTransfer.effectAllowed = 'move';
-        ev.dataTransfer.setData('text/plain', it.path);
-      } catch { /* старые движки */ }
-    });
-    row.addEventListener('dragend', () => {
-      FM.dragPath = '';
-      row.classList.remove('dragging');
-      for (const el of document.querySelectorAll('.fm-row.drop-on')) el.classList.remove('drop-on');
-      fmEl('fmTree').classList.remove('drop-on');
-    });
-    if (it.isDir) {
-      row.addEventListener('dragover', (ev) => {
-        if (!FM.dragPath) return;
-        ev.preventDefault();
-        ev.dataTransfer.dropEffect = 'move';
-        row.classList.add('drop-on');
-      });
-      row.addEventListener('dragleave', () => row.classList.remove('drop-on'));
-      row.addEventListener('drop', async (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        row.classList.remove('drop-on');
-        await fmMoveInto(it.path);
-      });
-    }
   }
 }
 
-/** Перенос перетаскиванием: FM.dragPath → toDir. */
+/* ─────────────── перенос перетаскиванием (одно место на всё дерево) ─────────────── */
+
+/** Строка дерева под курсором и папка, в которую она превращается. */
+function fmDropSpot(ev) {
+  const src = ev.target instanceof Element ? ev.target : null;
+  const row = src ? src.closest('#fmTree .fm-row') : null;
+  if (!row || !row.dataset.path) return { row: null, toDir: '' };
+  const isDir = row.dataset.dir === '1';
+  const toDir = isDir ? row.dataset.path : fmDirOf(row.dataset.path);
+  if (isDir) return { row, toDir };
+  /* бросили на файл — значит, в его папку */
+  const parentRow = fmFindRow(toDir);
+  return { row: parentRow || null, toDir };
+}
+
+function fmFindRow(path) {
+  const host = fmEl('fmTree');
+  if (!host) return null;
+  for (const row of host.querySelectorAll('.fm-row')) {
+    if (row.dataset.path === path) return row;
+  }
+  return null;
+}
+
+function fmClearDropMarks() {
+  for (const row of document.querySelectorAll('#fmTree .fm-row.drop-on')) row.classList.remove('drop-on');
+  const tree = fmEl('fmTree');
+  if (tree) tree.classList.remove('drop-on');
+}
+
+/** Все обработчики перетаскивания — на самом дереве: переживают перерисовку. */
+function fmBindDrag() {
+  const tree = fmEl('fmTree');
+  if (!tree || tree.dataset.dragBound === '1') return;
+  tree.dataset.dragBound = '1';
+
+  tree.addEventListener('dragstart', (ev) => {
+    const row = ev.target instanceof Element ? ev.target.closest('.fm-row') : null;
+    if (!row || !row.dataset.path) return;
+    FM.dragPath = row.dataset.path;
+    row.classList.add('dragging');
+    try {
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.setData('text/plain', row.dataset.path);
+    } catch { /* старые движки */ }
+  });
+
+  tree.addEventListener('dragend', () => {
+    FM.dragPath = '';
+    for (const row of document.querySelectorAll('#fmTree .fm-row.dragging')) row.classList.remove('dragging');
+    fmClearDropMarks();
+  });
+
+  tree.addEventListener('dragover', (ev) => {
+    if (!FM.dragPath) return;                     // это не наше перетаскивание
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+    const { row, toDir } = fmDropSpot(ev);
+    const same = toDir === fmDirOf(FM.dragPath) || toDir === FM.dragPath;
+    fmClearDropMarks();
+    if (row && !same) row.classList.add('drop-on');
+    else tree.classList.add('drop-on');
+  });
+
+  tree.addEventListener('dragleave', (ev) => {
+    if (!FM.dragPath) return;
+    /* ушли из дерева совсем — снимаем подсветку */
+    if (!tree.contains(ev.relatedTarget)) fmClearDropMarks();
+  });
+
+  tree.addEventListener('drop', async (ev) => {
+    if (!FM.dragPath) return;                     // файлы с рабочего стола обрабатываются отдельно
+    ev.preventDefault();
+    ev.stopPropagation();
+    const { toDir } = fmDropSpot(ev);
+    fmClearDropMarks();
+    await fmMoveInto(toDir);
+  });
+}
+
+/**
+ * Перенос перетаскиванием: FM.dragPath → toDir.
+ * Возвращает true, если что-то действительно перенеслось.
+ */
 async function fmMoveInto(toDir) {
   const s = current();
   const from = FM.dragPath;
-  if (!s || !from) return;
-  if (from === toDir) return;
-  if (toDir === fmDirOf(from)) return;                 // уже там
-  if (toDir.startsWith(from + '/')) {
+  if (!s || !from) return false;
+  const dest = String(toDir || '');
+  if (dest === from) return false;
+  if (dest === fmDirOf(from)) {
+    toast(`«${from.split('/').pop()}» уже в этой папке`, 'info', 2200);
+    FM.dragPath = '';
+    return false;
+  }
+  if (dest === from || dest.startsWith(from + '/')) {
     toast('Нельзя перенести папку внутрь себя', 'err');
-    return;
+    FM.dragPath = '';
+    return false;
   }
   FM.dragPath = '';
-  const res = await API.filesMove(s.id, from, toDir);
+  const res = await API.filesMove(s.id, from, dest);
   if (!res || res.ok === false || res.error) {
-    toast((res && res.error) || 'Не удалось перенести', 'err');
-    return;
+    toast((res && res.error) || 'Не удалось перенести', 'err', 6000);
+    return false;
   }
-  const tab = FM.tabs.find((t) => t.path === from);
-  if (tab) tab.path = res.path;
-  if (FM.openPath === from) FM.openPath = res.path;
-  FM.expanded.add(toDir);
-  FM.lastDir = toDir;
+  if (res.same) {
+    toast('Уже на месте', 'info', 1800);
+    return false;
+  }
+  const to = res.path || dest;
+  /* открытые вкладки переезжают вместе с файлом и с папкой */
+  for (const tab of FM.tabs) {
+    if (tab.path === from) tab.path = to;
+    else if (tab.path.startsWith(from + '/')) tab.path = to + tab.path.slice(from.length);
+  }
+  if (FM.openPath === from) FM.openPath = to;
+  else if (FM.openPath.startsWith(from + '/')) FM.openPath = to + FM.openPath.slice(from.length);
+  /* цель и все её родители раскрыты — файл видно сразу */
+  for (let dir = dest; ; dir = fmDirOf(dir)) {
+    FM.expanded.add(dir);
+    if (!dir) break;
+  }
+  FM.lastDir = dest;
+  const tree = fmEl('fmTree');
+  const scroll = tree ? tree.scrollTop : 0;
   await fmLoadTree();
+  if (tree) tree.scrollTop = scroll;
+  fmRenderView();
   Sound.play('ok');
-  toast(`Перенесено в «${toDir || 'корень сервера'}»`, 'ok');
+  toast(`Перенесено в «${dest || 'корень сервера'}»`, 'ok');
+  return true;
 }
 
 function fmSize(bytes) {
@@ -1201,6 +1283,197 @@ function fmRenderTabs() {
       + `<span class="ft-x" data-close="${i}">${ico('close', 10, 2)}</span>`
       + '</div>';
   }).join('') + `<span class="fm-tab-count">${FM.tabs.length}/${FM_MAX_TABS}</span>`;
+}
+
+/* ───────────────── приближение картинок ───────────────── */
+
+const FM_ZOOM_MIN = 0.05;
+const FM_ZOOM_MAX = 16;
+
+/** Состояние приближения для активной вкладки (у каждой картинки своё). */
+function fmZoomState() {
+  const t = fmActive();
+  if (!t || t.view !== 'image') return null;
+  if (!t.zoom) t.zoom = { fit: true, scale: 1 };
+  return t.zoom;
+}
+
+/** Масштаб, при котором картинка целиком влезает в окно (мельче не растим). */
+function fmZoomFitScale() {
+  const img = fmEl('fmImage');
+  const stage = fmEl('fmImageStage');
+  if (!img || !stage || !img.naturalWidth || !img.naturalHeight) return 1;
+  const pad = 24;
+  const cw = Math.max(40, stage.clientWidth - pad);
+  const ch = Math.max(40, stage.clientHeight - pad);
+  const k = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
+  return Math.min(1, Math.max(FM_ZOOM_MIN, k));
+}
+
+function fmZoomLabel(scale) {
+  const el = fmEl('fmZoomVal');
+  if (!el) return;
+  const pct = scale * 100;
+  el.textContent = (pct >= 100 ? Math.round(pct) : pct >= 10 ? Math.round(pct) : pct.toFixed(1).replace('.', ',')) + '%';
+}
+
+/**
+ * Применяет масштаб к картинке. anchor — точка (clientX/clientY), которая
+ * должна остаться на месте (под курсором при прокрутке колесом).
+ */
+function fmZoomApply(anchor) {
+  const z = fmZoomState();
+  const img = fmEl('fmImage');
+  const stage = fmEl('fmImageStage');
+  const box = fmEl('fmImageBox');
+  if (!z || !img || !stage || !box) return;
+  if (z.fit) z.scale = fmZoomFitScale();
+  if (!img.naturalWidth) { fmZoomLabel(z.scale); return; }
+
+  const prevScale = img.dataset.scale ? Number(img.dataset.scale) : z.scale;
+  const at = anchor && stage.getBoundingClientRect
+    ? (() => {
+      const r = stage.getBoundingClientRect();
+      return {
+        x: anchor.clientX - r.left + stage.scrollLeft,
+        y: anchor.clientY - r.top + stage.scrollTop,
+      };
+    })()
+    : null;
+
+  const w = Math.max(1, Math.round(img.naturalWidth * z.scale));
+  const h = Math.max(1, Math.round(img.naturalHeight * z.scale));
+  img.dataset.scale = String(z.scale);
+  img.style.width = w + 'px';
+  img.style.height = h + 'px';
+
+  /* держим точку под курсором неподвижной */
+  if (at && prevScale && prevScale !== z.scale) {
+    const k = z.scale / prevScale;
+    stage.scrollLeft = at.x * k - (anchor.clientX - stage.getBoundingClientRect().left);
+    stage.scrollTop = at.y * k - (anchor.clientY - stage.getBoundingClientRect().top);
+  }
+
+  const bigger = w > stage.clientWidth + 1 || h > stage.clientHeight + 1;
+  box.classList.toggle('pannable', bigger);
+  fmZoomLabel(z.scale);
+}
+
+/** Установить масштаб явно (и выйти из режима «по размеру окна»). */
+function fmZoomSet(scale, anchor) {
+  const z = fmZoomState();
+  if (!z) return;
+  const next = Math.min(FM_ZOOM_MAX, Math.max(FM_ZOOM_MIN, scale));
+  z.fit = false;
+  z.scale = next;
+  fmZoomApply(anchor);
+}
+
+function fmZoomStep(dir, anchor) {
+  const z = fmZoomState();
+  if (!z) return;
+  const base = z.fit ? fmZoomFitScale() : z.scale;
+  fmZoomSet(dir > 0 ? base * 1.25 : base / 1.25, anchor);
+}
+
+/** «По размеру окна»: картинка целиком, без полос прокрутки. */
+function fmZoomToFit() {
+  const z = fmZoomState();
+  if (!z) return;
+  z.fit = true;
+  z.scale = fmZoomFitScale();
+  const stage = fmEl('fmImageStage');
+  fmZoomApply();
+  if (stage) { stage.scrollLeft = 0; stage.scrollTop = 0; }
+  fmEl('fmImageBox').classList.remove('pannable');
+}
+
+/** 100% — один пиксель картинки равен пикселю экрана. */
+function fmZoomActual() {
+  const z = fmZoomState();
+  if (!z) return;
+  z.fit = false;
+  z.scale = 1;
+  fmZoomApply();
+}
+
+/** Обработчики приближения — навешиваются один раз. */
+function fmBindZoom() {
+  const box = fmEl('fmImageBox');
+  const stage = fmEl('fmImageStage');
+  const img = fmEl('fmImage');
+  if (!box || !stage || !img || box.dataset.zoomBound === '1') return;
+  box.dataset.zoomBound = '1';
+
+  /* колесо мыши: прокрутка вверх — ближе, вниз — дальше */
+  box.addEventListener('wheel', (ev) => {
+    if (FM.view !== 'image') return;
+    ev.preventDefault();
+    const dir = ev.deltaY < 0 ? 1 : -1;
+    const z = fmZoomState();
+    if (!z) return;
+    const base = z.fit ? fmZoomFitScale() : z.scale;
+    const factor = ev.ctrlKey ? 1.12 : 1.25;
+    fmZoomSet(dir > 0 ? base * factor : base / factor, ev);
+  }, { passive: false });
+
+  /* двойной щелчок: вписать в окно ↔ настоящий размер */
+  img.addEventListener('dblclick', () => {
+    const z = fmZoomState();
+    if (!z) return;
+    if (z.fit || Math.abs(z.scale - 1) > 0.01) fmZoomActual();
+    else fmZoomToFit();
+  });
+
+  /* протаскивание картинки рукой */
+  let pan = null;
+  stage.addEventListener('pointerdown', (ev) => {
+    if (FM.view !== 'image' || ev.button !== 0) return;
+    if (!box.classList.contains('pannable')) return;
+    pan = { x: ev.clientX, y: ev.clientY, l: stage.scrollLeft, t: stage.scrollTop };
+    box.classList.add('panning');
+    try { stage.setPointerCapture(ev.pointerId); } catch { /* нет захвата — не беда */ }
+  });
+  stage.addEventListener('pointermove', (ev) => {
+    if (!pan) return;
+    stage.scrollLeft = pan.l - (ev.clientX - pan.x);
+    stage.scrollTop = pan.t - (ev.clientY - pan.y);
+  });
+  const stopPan = () => { pan = null; box.classList.remove('panning'); };
+  stage.addEventListener('pointerup', stopPan);
+  stage.addEventListener('pointercancel', stopPan);
+  stage.addEventListener('pointerleave', (ev) => { if (ev.buttons === 0) stopPan(); });
+
+  /* клавиши: «+» ближе, «−» дальше, «0» по размеру окна */
+  box.addEventListener('keydown', (ev) => {
+    if (FM.view !== 'image') return;
+    if (ev.key === '+' || ev.key === '=') { ev.preventDefault(); fmZoomStep(1); }
+    else if (ev.key === '-' || ev.key === '_') { ev.preventDefault(); fmZoomStep(-1); }
+    else if (ev.key === '0') { ev.preventDefault(); fmZoomToFit(); }
+    else if (ev.key === '1') { ev.preventDefault(); fmZoomActual(); }
+  });
+  box.addEventListener('pointerdown', () => { if (FM.view === 'image' && document.activeElement !== box) box.focus({ preventScroll: true }); });
+
+  const out = fmEl('fmZoomOut');
+  const into = fmEl('fmZoomIn');
+  const fit = fmEl('fmZoomFit');
+  if (out) out.onclick = () => fmZoomStep(-1);
+  if (into) into.onclick = () => fmZoomStep(1);
+  if (fit) fit.onclick = () => fmZoomToFit();
+
+  /* картинка догрузилась/окно изменилось — пересчитываем «по размеру окна» */
+  img.addEventListener('load', () => {
+    const z = fmZoomState();
+    if (!z) return;
+    delete img.dataset.scale;
+    if (z.fit) fmZoomToFit(); else fmZoomApply();
+  });
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => {
+      const z = fmZoomState();
+      if (z && z.fit) { z.scale = fmZoomFitScale(); fmZoomApply(); }
+    }).observe(stage);
+  }
 }
 
 /** Показывает активную вкладку: текст, картинку или содержимое архива. */
@@ -1254,7 +1527,12 @@ function fmRenderView() {
     fmRenderArchive();
   } else if (t.view === 'image') {
     show('image');
-    fmEl('fmImage').src = t.image || '';
+    const img = fmEl('fmImage');
+    if (img.getAttribute('src') !== (t.image || '')) {
+      delete img.dataset.scale;
+      img.src = t.image || '';
+    }
+    fmZoomApply();
   } else {
     show('text');
     ta.disabled = !!t.binary;
@@ -1862,21 +2140,9 @@ function fmBind() {
     if (row) await fmArchivePreview(row.dataset.name);
   });
 
-  /* перетаскивание в корень папки сервера */
-  const tree = fmEl('fmTree');
-  tree.addEventListener('dragover', (ev) => {
-    if (!FM.dragPath) return;
-    ev.preventDefault();
-    tree.classList.add('drop-on');
-  });
-  tree.addEventListener('dragleave', (ev) => {
-    if (ev.target === tree) tree.classList.remove('drop-on');
-  });
-  tree.addEventListener('drop', async (ev) => {
-    ev.preventDefault();
-    tree.classList.remove('drop-on');
-    await fmMoveInto('');
-  });
+  /* перетаскивание файлов внутри дерева: один набор обработчиков на всё дерево */
+  fmBindDrag();
+  fmBindZoom();
   fmEl('fmWikiClose').onclick = () => fmToggleWiki(false);
   fmEl('fmOpenExt').onclick = async () => {
     if (!FM.openPath) return toast('Файл не выбран', 'err');
@@ -2215,6 +2481,8 @@ async function loadTabOpen() {
     const a = info.actions || {};
     el.loadWalk.checked = !!a.walk;
     el.loadJump.checked = !!a.jump;
+    el.loadHop.checked = a.hop !== false;
+    el.loadSpread.checked = a.spread !== false;
     el.loadChat.checked = !!a.chat;
     el.loadCmd.checked = !!a.cmd;
     el.loadSwing.checked = !!a.swing;
@@ -2298,7 +2566,8 @@ function loadRender() {
     const cls = b.state === 'play' ? 'ok' : 'bad';
     const right = `${stt.packetsOut || 0}↑ ${stt.packetsIn || 0}↓`;
     const chunks = `${stt.chunksLoaded || 0} чанк.`;
-    const acts = `чат ${stt.chat || 0} · ком. ${stt.cmd || 0}`;
+    const walked = `путь ${Math.round(stt.distance || 0)} м`;
+    const acts = `${walked} · прыжков ${stt.jumps || 0} · чат ${stt.chat || 0} · ком. ${stt.cmd || 0}`;
     const err = b.error ? `<div class="lb-err">${esc(b.error)}</div>` : '';
     return `<div class="load-bot ${cls}">
       <span class="lb-name">${esc(b.name || '')}</span>
@@ -2329,6 +2598,8 @@ function loadCollectOpts() {
       walkMs: Math.round(loadNum(el.loadWalkMs, 50)),
       jump: !!el.loadJump.checked,
       jumpMs: Math.round(loadNum(el.loadJumpMs, 3) * 1000),
+      hop: !!el.loadHop.checked,
+      spread: !!el.loadSpread.checked,
       chat: !!el.loadChat.checked,
       chatText: String(el.loadChatText.value || '').trim() || 'нагрузочный тест OmniPanel',
       chatMs: Math.round(loadNum(el.loadChatMs, 1) * 1000),
@@ -2673,8 +2944,8 @@ function notify(input, kind = '') {
   return card;
 }
 
-function toast(msg, kind = '') {
-  return notify({ text: msg, kind: kind || 'info' });
+function toast(msg, kind = '', ms = 0) {
+  return notify({ text: msg, kind: kind || 'info', ...(ms ? { ms } : {}) });
 }
 
 /** Время работы сервера: «работает 1 ч 23 мин 05 с» */
@@ -3692,19 +3963,114 @@ function lineLevel(entry) {
   return 'stdout';
 }
 
+/* ═════════════ консоль: быстрый вывод без фризов ═══════════════
+   Раньше на каждую строку создавался узел и на каждую строку же
+   выставлялся scrollTop — при переключении сервера это 2500 узлов и
+   2500 пересчётов разметки подряд, отсюда «залипание» интерфейса.
+   Теперь строки приходят пачками (по кадру), прокрутка — один раз на пачку,
+   а в окне держится разумное число строк. */
+
+const CONSOLE_MAX_NODES = 1500;   // сколько строк держим в окне браузера
+const CONSOLE_CHUNK = 180;        // сколько строк вставляем за один кадр
+let consoleToken = 0;             // смена сервера отменяет недорисованную историю
+let consoleScrollQueued = false;
+
+function consoleLineHtml(entry) {
+  return `<div class="line ${lineLevel(entry)}"><span class="t">${fmtTime(entry.t)}</span><span class="m">${esc(entry.m)}</span></div>`;
+}
+
+/** Строка проходит фильтр и не повторяет предыдущую? */
+function consoleAccept(entry, last) {
+  if (S.filter && !String(entry.m || '').toLowerCase().includes(S.filter)) return false;
+  if (last && last.t === entry.t && last.m === entry.m) return false;
+  return true;
+}
+
+function consoleTrim() {
+  const host = el.consoleEl;
+  const extra = host.childElementCount - CONSOLE_MAX_NODES;
+  if (extra <= 0) return;
+  for (let i = 0; i < extra; i += 1) host.firstElementChild.remove();
+  if (S.domLines.length > CONSOLE_MAX_NODES) S.domLines.splice(0, S.domLines.length - CONSOLE_MAX_NODES);
+}
+
+/** Прокрутка вниз — один раз на пачку строк, а не на каждую строку. */
+function consoleScrollToEnd() {
+  if (consoleScrollQueued) return;
+  consoleScrollQueued = true;
+  requestAnimationFrame(() => {
+    consoleScrollQueued = false;
+    if (el.autoscroll && el.autoscroll.checked) el.consoleEl.scrollTop = el.consoleEl.scrollHeight;
+  });
+}
+
+/** Вставляет пачку строк одним куском — быстрее, чем по узлу за раз. */
+function consoleAppendBatch(entries) {
+  const host = el.consoleEl;
+  if (!host) return 0;
+  const html = [];
+  for (const entry of entries) {
+    if (!consoleAccept(entry, S.lastLogLine)) continue;
+    html.push(consoleLineHtml(entry));
+    S.lastLogLine = entry;
+    S.domLines.push(entry);
+  }
+  if (!html.length) return 0;
+  const placeholder = host.querySelector('.placeholder');
+  if (placeholder) placeholder.remove();
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html.join('');
+  host.appendChild(tpl.content);
+  consoleTrim();
+  consoleScrollToEnd();
+  return html.length;
+}
+
 function appendLine(entry) {
-  if (S.filter && !entry.m.toLowerCase().includes(S.filter)) return;
-  const last = S.domLines[S.domLines.length - 1];
-  if (last && last.entry.t === entry.t && last.entry.m === entry.m) return;
+  return consoleAppendBatch([entry]) > 0;
+}
 
-  const div = document.createElement('div');
-  div.className = 'line ' + lineLevel(entry);
-  div.innerHTML = `<span class="t">${fmtTime(entry.t)}</span><span class="m">${esc(entry.m)}</span>`;
-  el.consoleEl.appendChild(div);
+function consoleReset() {
+  const host = el.consoleEl;
+  if (host) host.innerHTML = '';
+  S.domLines = [];
+  S.lastLogLine = null;
+  S.consoleBusy = false;
+  S.consolePending = [];
+  consoleToken += 1;
+  return consoleToken;
+}
 
-  S.domLines.push({ node: div, entry });
-  if (S.domLines.length > 2500) S.domLines.shift().node.remove();
-  if (el.autoscroll.checked) el.consoleEl.scrollTop = el.consoleEl.scrollHeight;
+/** Показывает историю порциями: интерфейс остаётся отзывчивым с первой строки. */
+function consoleRenderHistory(list) {
+  const token = consoleReset();
+  const queue = (list || []).slice();
+  if (!queue.length) {
+    el.consoleEl.innerHTML = '<div class="placeholder">консоль пуста</div>';
+    return;
+  }
+  const step = () => {
+    if (token !== consoleToken) return;         // уже выбран другой сервер
+    const chunk = queue.splice(0, CONSOLE_CHUNK);
+    consoleAppendBatch(chunk);
+    if (queue.length) {
+      requestAnimationFrame(step);
+    } else {
+      S.consoleBusy = false;
+      const pending = S.consolePending || [];
+      S.consolePending = [];
+      if (pending.length) consoleAppendBatch(pending);
+      if (!S.domLines.length) {
+        el.consoleEl.innerHTML = '<div class="placeholder">консоль пуста</div>';
+      }
+      /* история дорисована — доводим прокрутку до конца сразу, без ожидания кадра */
+      consoleScrollQueued = false;
+      if (el.autoscroll && el.autoscroll.checked) el.consoleEl.scrollTop = el.consoleEl.scrollHeight;
+    }
+  };
+  S.consoleBusy = true;
+  S.consolePending = [];
+  step();
 }
 
 function pushLog(id, entry) {
@@ -3718,20 +4084,16 @@ async function loadLogs(id) {
   const seq = ++loadSeq;
   const logs = await API.logs(id);
   if (seq !== loadSeq) return;
-  LOG_CACHE.set(id, Array.isArray(logs) ? logs.slice(-2500) : []);
+  const list = Array.isArray(logs) ? logs.slice(-2500) : [];
+  LOG_CACHE.set(id, list);
   S.players.set(id, { names: new Set(), max: 0, at: 0 });
-  for (const e of LOG_CACHE.get(id)) playersOnLog(id, e.m || '');
-  S.issues.set(id, []);
+  for (const e of list) playersOnLog(id, e.m || '');
+  issuesReplace(id, []);
   S.issuesNew.set(id, 0);
   rescanIssues(id);
   if (id === S.currentId) { updateOnlineChip(); renderIssuesBadge(); renderPlayers(); }
-  el.consoleEl.innerHTML = '';
-  S.domLines = [];
-  LOG_CACHE.set(id, logs.slice());
-  for (const e of logs) appendLine(e);
-  if (!S.domLines.length) {
-    el.consoleEl.innerHTML = '<div class="placeholder">консоль пуста</div>';
-  }
+  if (id !== S.currentId) return;
+  consoleRenderHistory(list);
 }
 
 /* ═════════════════════ обновление данных ═════════════════════ */
@@ -4106,7 +4468,8 @@ function bindSubscriptions() {
     playersOnLog(id, entry.m || '');
     issuesOnLog(id, entry);
     if (id !== S.currentId) return;
-    if (el.consoleEl.querySelector('.placeholder')) el.consoleEl.innerHTML = '';
+    /* история ещё дорисовывается — строку покажем сразу после неё */
+    if (S.consoleBusy) { S.consolePending.push(entry); return; }
     appendLine(entry);
   });
 
@@ -4140,13 +4503,13 @@ function bindSubscriptions() {
 
   API.onLogsCleared(({ id }) => {
     LOG_CACHE.set(id, []);
-    S.issues.set(id, []);
+    issuesReplace(id, []);
     S.issuesNew.set(id, 0);
     renderIssuesBadge();
     if (id === S.currentId) renderIssues();
     if (id === S.currentId) {
+      consoleReset();
       el.consoleEl.innerHTML = '<div class="placeholder">Консоль очищена.</div>';
-      S.domLines = [];
     }
   });
 
@@ -4934,22 +5297,24 @@ function bindActions() {
     el.cmd.value = '';
   };
 
+  let filterTimer = 0;
   el.filter.addEventListener('input', () => {
-    S.filter = el.filter.value.trim().toLowerCase();
-    const logs = LOG_CACHE.get(S.currentId) || [];
-    el.consoleEl.innerHTML = '';
-    S.domLines = [];
-    for (const e of logs) appendLine(e);
-    if (!S.domLines.length) el.consoleEl.innerHTML = '<div class="placeholder">Ничего не найдено.</div>';
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => {
+      S.filter = el.filter.value.trim().toLowerCase();
+      const logs = LOG_CACHE.get(S.currentId) || [];
+      consoleRenderHistory(logs);
+      if (!S.filter && !logs.length) el.consoleEl.innerHTML = '<div class="placeholder">консоль пуста</div>';
+    }, 120);
   });
 
   el.btnClear.onclick = async () => {
     const s = current();
     if (!s) return;
     LOG_CACHE.set(s.id, []);
+    consoleReset();
     await API.clearLogs(s.id);
     el.consoleEl.innerHTML = '<div class="placeholder">Консоль очищена.</div>';
-    S.domLines = [];
   };
 
   el.btnDownload.onclick = () => {
@@ -5264,7 +5629,7 @@ function bindActions() {
     issuesClear.onclick = () => {
       const s = current();
       if (!s) return;
-      S.issues.set(s.id, []);
+      issuesReplace(s.id, []);
       S.issuesNew.set(s.id, 0);
       renderIssues();
       renderIssuesBadge();
@@ -6384,27 +6749,61 @@ function stripLogPrefix(line) {
     .trim();
 }
 
+const ISSUE_IDX = new WeakMap();   // список ошибок → ключ → запись
+
+/** Быстрый поиск ошибки по ключу: словарь вместо перебора списка. */
+function issuesIndex(list) {
+  let idx = ISSUE_IDX.get(list);
+  if (!idx) { idx = new Map(); ISSUE_IDX.set(list, idx); }
+  return idx;
+}
+
 function issuesState(id) {
   if (!S.issues.has(id)) S.issues.set(id, []);
   return S.issues.get(id);
 }
 
+/** Заменяет список ошибок и сразу строит к нему словарь ключей. */
+function issuesReplace(id, list) {
+  const arr = Array.isArray(list) ? list : [];
+  S.issues.set(id, arr);
+  const idx = new Map();
+  for (const it of arr) idx.set(it.key, it);
+  ISSUE_IDX.set(arr, idx);
+  return arr;
+}
+
+/* Быстрый предфильтр: если строка не подходит ни под одно правило,
+   дальше её не гоняем — в длинных логах это экономит больше всего. */
+const ISSUE_ANY = (() => {
+  try {
+    return new RegExp(ISSUE_RULES.map((r) => '(?:' + r.re.source + ')').join('|'), 'i');
+  } catch {
+    return null;
+  }
+})();
+
 function issuesAdd(id, kind, line, extraStack = '') {
   const list = issuesState(id);
+  const idx = issuesIndex(list);
   const clean = stripLogPrefix(line).slice(0, 400);
   const key = clean.toLowerCase();
-  const found = list.find((it) => it.key === key);
+  const found = idx.get(key);
   if (found) {
     found.count += 1;
     found.t = Date.now();
     if (extraStack && !found.stack.length) found.stack = [extraStack];
   } else {
-    list.push({ key, kind, line: clean, stack: extraStack ? [extraStack] : [], t: Date.now(), count: 1 });
-    if (list.length > 200) list.splice(0, list.length - 200);
+    const item = { key, kind, line: clean, stack: extraStack ? [extraStack] : [], t: Date.now(), count: 1 };
+    list.push(item);
+    idx.set(key, item);
+    if (list.length > 200) {
+      for (const gone of list.splice(0, list.length - 200)) idx.delete(gone.key);
+    }
     bumpIssueCounter(id, clean);
   }
   if (id === S.currentId) {
-    renderIssues();
+    scheduleIssuesRender();
     if (S.tab === 'issues') markIssuesSeen(id);
   }
 }
@@ -6428,7 +6827,14 @@ function bumpIssueCounter(id, line) {
     }
   }
   S.issuesNew.set(id, has + 1);
-  renderIssuesBadge();
+  scheduleIssuesBadge();
+}
+
+let issuesBadgeQueued = false;
+function scheduleIssuesBadge() {
+  if (issuesBadgeQueued) return;
+  issuesBadgeQueued = true;
+  requestAnimationFrame(() => { issuesBadgeQueued = false; renderIssuesBadge(); });
 }
 
 function renderIssuesBadge() {
@@ -6459,6 +6865,13 @@ function markIssuesSeen(id) {
   }
 }
 
+/** Строка подходит под правило? Возвращает правило или null. */
+function issueRuleOf(clean) {
+  if (ISSUE_ANY && !ISSUE_ANY.test(clean)) return null;
+  for (const rule of ISSUE_RULES) if (rule.re.test(clean)) return rule;
+  return null;
+}
+
 function issuesOnLog(id, entry) {
   const line = entry.m || '';
   const clean = stripLogPrefix(line);
@@ -6469,84 +6882,187 @@ function issuesOnLog(id, entry) {
     const last = list[list.length - 1];
     if (last && Date.now() - last.t < 60000 && last.stack.length < 12) {
       last.stack.push(clean.slice(0, 240));
-      if (id === S.currentId && S.tab === 'issues') renderIssues();
+      if (id === S.currentId && S.tab === 'issues') scheduleIssuesRender();
       return;
     }
   }
 
-  for (const rule of ISSUE_RULES) {
-    if (rule.re.test(clean)) {
-      issuesAdd(id, rule.kind, line);
-      return;
-    }
+  const rule = issueRuleOf(clean);
+  if (rule) {
+    issuesAdd(id, rule.kind, line);
+    return;
   }
 }
 
 function rescanIssues(id) {
   const logs = LOG_CACHE.get(id) || [];
   const keep = new Set((S.issues.get(id) || []).map((i) => i.key));
-  S.issues.set(id, (S.issues.get(id) || []).filter((i) => keep.has(i.key)));
+  issuesReplace(id, (S.issues.get(id) || []).filter((i) => keep.has(i.key)));
   let stack = [];
   for (const e of logs) {
     const clean = stripLogPrefix(e.m || '');
+    if (!clean) { stack = []; continue; }
     if (STACK_RE.test(clean)) { stack.push(clean.slice(0, 240)); continue; }
-    let hit = null;
-    for (const rule of ISSUE_RULES) if (rule.re.test(clean)) { hit = rule; break; }
+    const hit = issueRuleOf(clean);
     if (hit) {
       issuesAdd(id, hit.kind, e.m || '', stack.join('\n'));
       stack = [];
-    } else if (clean) {
+    } else {
       stack = [];
     }
   }
   if (id === S.currentId) renderIssues();
 }
 
+/* ───── вкладка «Ошибки»: карточки обновляются на месте ───── */
+
+const ISSUE_NODES = new Map();  // ключ → узел карточки, живёт между отрисовками
+let issuesToken = 0;            // отменяет недорисованный список
+let issuesQueued = false;
+let issuesFullNext = false;
+
+function scheduleIssuesRender(full = false) {
+  if (full) issuesFullNext = true;
+  if (issuesQueued) return;
+  issuesQueued = true;
+  requestAnimationFrame(() => {
+    issuesQueued = false;
+    const full2 = issuesFullNext;
+    issuesFullNext = false;
+    issuesRenderNow(full2);
+  });
+}
+
+/** Совместимость: там, где раньше звали renderIssues(), теперь отложенная отрисовка. */
 function renderIssues() {
+  scheduleIssuesRender(false);
+}
+
+function issueCardEl(it) {
+  const card = document.createElement('div');
+  card.className = 'issue-card kind-' + it.kind;
+  card.dataset.key = it.key;
+  card.innerHTML = `
+    <div class="issue-head">
+      <span class="issue-kind"></span>
+      <span class="issue-time"></span>
+      <span class="issue-count hidden"></span>
+    </div>
+    <div class="issue-line"></div>
+    <pre class="issue-stack hidden"></pre>
+    <div class="issue-actions">
+      <button class="btn btn-mini issue-copy">Скопировать</button>
+      <button class="btn btn-mini btn-ghost issue-hide">Скрыть</button>
+    </div>`;
+  card.querySelector('.issue-copy').onclick = () => {
+    const item = issuesFind(card.dataset.key);
+    if (!item) return;
+    const text = item.line + (item.stack.length ? '\n' + item.stack.join('\n') : '');
+    navigator.clipboard.writeText(text).then(
+      () => toast('Скопировано', 'ok'),
+      () => toast('Не удалось скопировать', 'err'),
+    );
+  };
+  card.querySelector('.issue-hide').onclick = () => {
+    const s = current();
+    if (!s) return;
+    issuesReplace(s.id, (S.issues.get(s.id) || []).filter((x) => x.key !== card.dataset.key));
+    issuesRenderNow(false);
+  };
+  return card;
+}
+
+/** Свежая запись по ключу — обработчики не держат устаревший объект. */
+function issuesFind(key) {
+  const s = current();
+  if (!s) return null;
+  return (S.issues.get(s.id) || []).find((x) => x.key === key) || null;
+}
+
+function patchIssueCard(node, it) {
+  if (!node) return;
+  const kind = node.querySelector('.issue-kind');
+  if (kind) kind.textContent = ISSUE_LABEL[it.kind] || 'ошибка';
+  const time = node.querySelector('.issue-time');
+  if (time) time.textContent = fmtTime(it.t);
+  const count = node.querySelector('.issue-count');
+  if (count) {
+    count.textContent = '×' + it.count;
+    count.classList.toggle('hidden', it.count <= 1);
+  }
+  const line = node.querySelector('.issue-line');
+  if (line) line.textContent = it.line;
+  const stack = node.querySelector('.issue-stack');
+  if (stack) {
+    const text = it.stack.slice(0, 12).join('\n');
+    const was = stack.textContent;
+    if (was !== text) stack.textContent = text;
+    stack.classList.toggle('hidden', !text);
+  }
+  node.className = 'issue-card kind-' + it.kind;
+}
+
+function updateIssuesSub(list) {
+  const sub = $('issuesSub');
+  if (!sub) return;
+  let repeats = 0;
+  for (const it of list) repeats += it.count;
+  sub.textContent = list.length
+    ? `найдено ${list.length} разных ошибок · всего повторов: ${repeats}`
+    : 'ошибок не найдено';
+}
+
+function issuesRenderNow(full = false) {
   const host = $('issuesList');
   if (!host) return;
   const s = current();
-  if (!s) { host.innerHTML = ''; return; }
-  const list = (S.issues.get(s.id) || []).slice().reverse();
-  const sub = $('issuesSub');
-  if (sub) {
-    sub.textContent = list.length
-      ? `найдено ${list.length} разных ошибок · всего повторов: ${list.reduce((a, b) => a + b.count, 0)}`
-      : 'ошибок не найдено';
-  }
-  if (!list.length) {
-    host.innerHTML = '<div class="empty-note">в логах чисто</div>';
+  if (!s) {
+    host.innerHTML = '';
+    ISSUE_NODES.clear();
     return;
   }
-  host.innerHTML = '';
-  for (const it of list) {
-    const card = document.createElement('div');
-    card.className = 'issue-card kind-' + it.kind;
-    card.innerHTML = `
-      <div class="issue-head">
-        <span class="issue-kind">${esc(ISSUE_LABEL[it.kind] || 'ошибка')}</span>
-        <span class="issue-time">${fmtTime(it.t)}</span>
-        ${it.count > 1 ? `<span class="issue-count">×${it.count}</span>` : ''}
-      </div>
-      <div class="issue-line">${esc(it.line)}</div>
-      ${it.stack.length ? `<pre class="issue-stack">${esc(it.stack.slice(0, 12).join('\n'))}</pre>` : ''}
-      <div class="issue-actions">
-        <button class="btn btn-mini issue-copy">Скопировать</button>
-        <button class="btn btn-mini btn-ghost issue-hide">Скрыть</button>
-      </div>`;
-    card.querySelector('.issue-copy').onclick = () => {
-      const text = it.line + (it.stack.length ? '\n' + it.stack.join('\n') : '');
-      navigator.clipboard.writeText(text).then(
-        () => toast('Скопировано', 'ok'),
-        () => toast('Не удалось скопировать', 'err'),
-      );
-    };
-    card.querySelector('.issue-hide').onclick = () => {
-      S.issues.set(s.id, (S.issues.get(s.id) || []).filter((x) => x.key !== it.key));
-      renderIssues();
-    };
-    host.appendChild(card);
+  const list = (S.issues.get(s.id) || []).slice().reverse();   // свежие сверху
+  updateIssuesSub(list);
+  if (!list.length) {
+    host.innerHTML = '<div class="empty-note">в логах чисто</div>';
+    ISSUE_NODES.clear();
+    return;
   }
+
+  const keys = new Set(list.map((i) => i.key));
+  for (const [key, node] of ISSUE_NODES) {
+    if (!keys.has(key)) { node.remove(); ISSUE_NODES.delete(key); }
+  }
+
+  const inOrder = !full
+    && host.childElementCount === list.length
+    && list.every((it, i) => host.children[i] === ISSUE_NODES.get(it.key));
+
+  if (inOrder) {
+    for (const it of list) patchIssueCard(ISSUE_NODES.get(it.key), it);
+    return;
+  }
+
+  /* структура изменилась — собираем заново, но порциями по кадру */
+  const token = ++issuesToken;
+  host.innerHTML = '';
+  ISSUE_NODES.clear();
+  let i = 0;
+  const step = () => {
+    if (token !== issuesToken) return;
+    const frag = document.createDocumentFragment();
+    const until = Math.min(list.length, i + 25);
+    for (; i < until; i += 1) {
+      const it = list[i];
+      const card = issueCardEl(it);
+      patchIssueCard(card, it);
+      ISSUE_NODES.set(it.key, card);
+      frag.appendChild(card);
+    }
+    host.appendChild(frag);
+    if (i < list.length) requestAnimationFrame(step);
+  };
+  step();
 }
 
 /* ═════════════════════ плагины и моды (Modrinth) ═════════════════════ */

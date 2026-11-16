@@ -33,6 +33,8 @@ function normalizeActions(raw) {
     walkMs: num(a.walkMs, 50, 20, 5000),
     jump: !!a.jump,
     jumpMs: num(a.jumpMs, 3000, 500, 600000),
+    spread: a.spread !== false,          // расходиться в разные стороны
+    hop: a.hop !== false,                // подпрыгивать на ходу
     chat: !!a.chat,
     chatText: String(a.chatText || 'нагрузочный тест OmniPanel').slice(0, 240),
     chatMs: num(a.chatMs, 1000, 200, 600000),
@@ -102,8 +104,9 @@ class LoadTest extends EventEmitter {
     this.bots = [];
 
     const enabled = [];
-    if (cfg.actions.walk) enabled.push('ходьба');
-    if (cfg.actions.jump) enabled.push('прогрузка чанков');
+    if (cfg.actions.walk) enabled.push('ходьба' + (cfg.actions.hop ? ' с прыжками' : ''));
+    if (cfg.actions.jump) enabled.push('дальние походы (прогрузка чанков)');
+    if (cfg.actions.spread) enabled.push('расходятся в стороны');
     if (cfg.actions.chat) enabled.push('спам в чат');
     if (cfg.actions.cmd) enabled.push(`команды (${cfg.actions.commands.join(', ')})`);
     if (cfg.actions.swing) enabled.push('взмахи');
@@ -146,6 +149,10 @@ class LoadTest extends EventEmitter {
       name,
       protocol: this.cfg.protocol,
       actions: this.cfg.actions,
+      index: i,
+      total: this.cfg.count,
+      spread: this.cfg.actions.spread,
+      hop: this.cfg.actions.hop,
       onEvent: (type, data) => this.botEvent(slot, type, data),
     });
     slot.bot = bot;
@@ -164,6 +171,10 @@ class LoadTest extends EventEmitter {
       slot.lastError = data.error || 'ошибка';
       this.log(`${name}: ${slot.lastError}`);
       if (/онлайн-режим/.test(slot.lastError)) this.stop('сервер в онлайн-режиме: боты не зайдут');
+      return;
+    }
+    if (type === 'corrected') {
+      this.log(`${name}: сервер поправил позицию — бот подпрыгнул и сменил курс`);
       return;
     }
     if (type === 'kick') {
@@ -200,6 +211,7 @@ class LoadTest extends EventEmitter {
       bots: 0, online: 0, dead: 0,
       packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0,
       chunks: 0, chunksLoaded: 0, chat: 0, cmd: 0, moves: 0, jumps: 0, chatIn: 0,
+      distance: 0, corrections: 0,
     };
     for (const slot of this.bots) {
       if (!slot || !slot.bot) continue;
@@ -217,6 +229,8 @@ class LoadTest extends EventEmitter {
       t.cmd += s.cmd;
       t.moves += s.moves;
       t.jumps += s.jumps;
+      t.distance += s.distance || 0;
+      t.corrections += s.corrections || 0;
       t.chatIn += s.chatIn || 0;
     }
     return t;

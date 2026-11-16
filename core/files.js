@@ -192,26 +192,163 @@ async function rename(root, rel, newName) {
   if (!clean) throw new Error('Пустое имя');
   const dest = path.join(path.dirname(abs), clean);
   resolveSafe(root, relOf(root, dest));           // проверяем, что не вылезли наружу
-  if (fs.existsSync(dest)) throw new Error('Файл с таким именем уже есть');
-  await fsp.rename(abs, dest);
+  if (samePath(dest, abs) && path.resolve(dest) === path.resolve(abs)) {
+    return { ok: true, path: relOf(root, dest), same: true };
+  }
+  if (!samePath(dest, abs) && fs.existsSync(dest)) throw new Error('Файл с таким именем уже есть');
+  try {
+    await relocate(abs, dest, (await fsp.lstat(abs)).isDirectory());
+  } catch (err) {
+    throw moveError(err, clean);
+  }
   return { ok: true, path: relOf(root, dest) };
 }
 
-/** Перенос файла или папки в другую папку (перетаскивание в дереве). */
-async function move(root, from, toDir) {
+/* ─────────────────────────── перенос файлов ─────────────────────────── */
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Пути совпадают? На Windows и macOS регистр не важен. */
+function samePath(a, b) {
+  const x = path.resolve(a);
+  const y = path.resolve(b);
+  return process.platform === 'win32' || process.platform === 'darwin'
+    ? x.toLowerCase() === y.toLowerCase()
+    : x === y;
+}
+
+async function exists(abs) {
+  try { await fsp.lstat(abs); return true; } catch (e) {
+    if (e.code === 'ENOENT') return false;
+    throw e;
+  }
+}
+
+/** Понятный текст вместо кода ошибки файловой системы. */
+function moveError(err, name) {
+  const code = err && err.code;
+  if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+    return new Error(`Файл «${name}» занят другой программой (обычно сервером) — останови сервер и попробуй снова`);
+  }
+  if (code === 'ENOENT') return new Error(`«${name}» не найден — возможно, его уже перенесли`);
+  if (code === 'ENOSPC') return new Error('На диске закончилось место');
+  if (code === 'EISDIR' || code === 'ENOTDIR') return new Error(`«${name}» — это папка, а не файл`);
+  if (code === 'ENAMETOOLONG') return new Error('Слишком длинное имя файла или путь');
+  if (code === 'EXDEV') return new Error('Разные диски: не удалось перенести файл целиком');
+  return new Error(`Не удалось перенести «${name}»: ${err && err.message ? err.message : 'неизвестная ошибка'}`);
+}
+
+/** Сначала переименование (быстро), потом копирование с удалением (между дисками). */
+async function relocate(src, dest, isDir) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await fsp.rename(src, dest);
+      return { copied: false };
+    } catch (err) {
+      lastErr = err;
+      /* EXDEV — другой диск, переименование невозможно: сразу копируем.
+         EBUSY/EPERM — файл занят: даём программе отпустить его и пробуем снова. */
+      if (err.code === 'EXDEV') break;
+      if (!['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(err.code)) throw err;
+      if (attempt < 2) await sleep(150 * (attempt + 1));
+    }
+  }
+  if (lastErr && !['EXDEV', 'EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'].includes(lastErr.code)) {
+    throw lastErr;
+  }
+  /* переносим копированием: работает между дисками, томами и через точки монтирования */
+  try {
+    await fsp.cp(src, dest, {
+      recursive: isDir,
+      force: true,
+      errorOnExist: false,
+      preserveTimestamps: true,
+      dereference: false,
+    });
+    await fsp.rm(src, { recursive: isDir, force: true });
+    return { copied: true };
+  } catch (err) {
+    /* недоделанную копию убираем, чтобы не оставить половину файла */
+    try { await fsp.rm(dest, { recursive: isDir, force: true }); } catch { /* уже нет */ }
+    throw err;
+  }
+}
+
+/**
+ * Перенос файла или папки в другую папку (перетаскивание в дереве).
+ *
+ * Почему не просто rename: на Windows он падает, если файл занят (например, его
+ * держит запущенный сервер) и если папка лежит на другом диске. Поэтому здесь
+ * три попытки переименования, а потом копирование с удалением — так перенос
+ * работает и через диски, и с файлами, которые вот-вот отпустят.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.overwrite] заменить существующий файл с тем же именем
+ */
+async function move(root, from, toDir, opts = {}) {
   const abs = resolveSafe(root, from);
   const destDirAbs = resolveSafe(root, toDir || '');
-  if (path.resolve(abs) === path.resolve(root)) throw new Error('Нельзя перенести корневую папку сервера');
-  const st = await fsp.lstat(abs);
-  const destAbs = path.join(destDirAbs, path.basename(abs));
-  if (path.resolve(destAbs) === path.resolve(abs)) return { ok: true, path: relOf(root, abs), same: true };
-  if (st.isDirectory() && (destDirAbs + path.sep).startsWith(abs + path.sep)) {
+  if (!String(from || '').trim()) throw new Error('Не выбран файл для переноса');
+  if (samePath(abs, path.resolve(root))) throw new Error('Нельзя перенести корневую папку сервера');
+
+  let st;
+  try {
+    st = await fsp.lstat(abs);
+  } catch (err) {
+    throw moveError(err, path.basename(abs));
+  }
+  const isDir = st.isDirectory();
+  const name = path.basename(abs);
+
+  /* куда переносим: папка должна существовать и быть папкой */
+  if (await exists(destDirAbs)) {
+    const dirStat = await fsp.stat(destDirAbs);
+    if (!dirStat.isDirectory()) throw new Error('Переносить можно только в папку');
+  } else {
+    await fsp.mkdir(destDirAbs, { recursive: true });
+  }
+
+  const destAbs = path.join(destDirAbs, name);
+
+  /* уже на месте: на Windows это ещё и смена регистра имени */
+  if (samePath(destAbs, abs)) {
+    if (path.resolve(destAbs) === path.resolve(abs)) {
+      return { ok: true, path: relOf(root, abs), same: true };
+    }
+    const tmp = path.join(path.dirname(abs), `.omnipanel-${Date.now()}-${name}`);
+    try {
+      await fsp.rename(abs, tmp);
+      await fsp.rename(tmp, destAbs);
+    } catch (err) {
+      try { if (await exists(tmp)) await fsp.rename(tmp, abs); } catch { /* вернуть не вышло */ }
+      throw moveError(err, name);
+    }
+    return { ok: true, path: relOf(root, destAbs), renamed: true };
+  }
+
+  /* нельзя перенести папку внутрь себя же */
+  const relToDest = path.relative(abs, destDirAbs);
+  if (isDir && (relToDest === '' || (!relToDest.startsWith('..') && !path.isAbsolute(relToDest)))) {
     throw new Error('Нельзя перенести папку внутрь себя');
   }
-  if (fs.existsSync(destAbs)) throw new Error('В этой папке уже есть «' + path.basename(abs) + '»');
-  await fsp.mkdir(destDirAbs, { recursive: true });
-  await fsp.rename(abs, destAbs);
-  return { ok: true, path: relOf(root, destAbs) };
+
+  if (await exists(destAbs)) {
+    if (!opts.overwrite) throw new Error(`В этой папке уже есть «${name}»`);
+    try {
+      await fsp.rm(destAbs, { recursive: true, force: true });
+    } catch (err) {
+      throw moveError(err, name);
+    }
+  }
+
+  let result;
+  try {
+    result = await relocate(abs, destAbs, isDir);
+  } catch (err) {
+    throw moveError(err, name);
+  }
+  return { ok: true, path: relOf(root, destAbs), copied: !!result.copied };
 }
 
 /** Поиск по именам файлов внутри папки сервера (для быстрого открытия). */

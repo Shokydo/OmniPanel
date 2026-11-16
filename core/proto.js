@@ -199,14 +199,12 @@ class Reader {
       case 'bitflags': {
         const raw = BigInt(this.readType(args.type));
         const out = {};
-        const flags = args.flags || {};
-        let bit = 0n;
-        for (const [name, flag] of Object.entries(flags)) {
-          if (typeof flag === 'object' && flag !== null) {
-            bit = BigInt(flag.bit ?? Object.keys(flags).indexOf(name));
-            out[name] = (raw & (1n << bit)) !== 0n;
-          }
-        }
+        const flags = args.flags || [];
+        /* флаги бывают списком имён (["onGround", ...]) или словарём с номером бита */
+        const list = Array.isArray(flags)
+          ? flags.map((name, i) => [name, i])
+          : Object.entries(flags).map(([name, flag], i) => [name, (flag && typeof flag === 'object' && flag.bit !== undefined) ? flag.bit : i]);
+        for (const [name, bit] of list) out[name] = (raw & (1n << BigInt(bit))) !== 0n;
         return out;
       }
       default:
@@ -363,12 +361,13 @@ class Writer {
       }
       case 'bitflags': {
         const frame = value || {};
+        const flags = args.flags || [];
+        const list = Array.isArray(flags)
+          ? flags.map((name, i) => [name, i])
+          : Object.entries(flags).map(([name, flag], i) => [name, (flag && typeof flag === 'object' && flag.bit !== undefined) ? flag.bit : i]);
         let val = 0n;
-        let idx = 0;
-        for (const [flagName, flag] of Object.entries(args.flags || {})) {
-          const bit = typeof flag === 'object' && flag !== null && flag.bit !== undefined ? flag.bit : idx;
-          if (frame[flagName]) val |= 1n << BigInt(bit);
-          idx += 1;
+        for (const [name, bit] of list) {
+          if (frame[name]) val |= 1n << BigInt(bit);
         }
         return this.writeType(args.type, val);
       }

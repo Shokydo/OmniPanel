@@ -16,8 +16,21 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 
 const P = require('./proto');
+const terrain = require('./terrain');
 
 const MAX_BUF = 16 * 1024 * 1024;
+
+/* ── физика движения ──
+   Сервер (и особенно Paper) выкидывает бота за полёт, если тот «прыгает»
+   по карте рывками, висит в воздухе или двигается быстрее игрока.
+   Поэтому бот считает движение как настоящий клиент: 20 тиков в секунду,
+   гравитация, прыжок с начальной скоростью 0.42, шаг не быстрее спринта. */
+const TICK_MS = 50;               // 20 тиков в секунду — как у клиента игры
+const GRAVITY = 0.08;             // на столько скорость падения растёт за тик
+const JUMP_VY = 0.42;             // с такой скоростью игрок отталкивается от земли
+const SPEED_WALK = 0.2158;        // блоков за тик — 4.32 блока/с
+const SPEED_SPRINT = 0.2806;      // блоков за тик — 5.61 блока/с
+const MAX_STEP = 0.32;            // выше этого сервер начинает ругаться «слишком быстро»
 
 /** Версия игры → версия протокола (для автоподстановки). */
 const VERSION_PROTOCOL = {
@@ -118,10 +131,45 @@ class Bot {
     this.compression = -1;
     this.buffer = Buffer.alloc(0);
     this.pos = { x: 0.5, y: 64, z: 0.5, yaw: 0, pitch: 0, onGround: true };
+    /* физика: скорость, «пол» под ногами, курс и точка похода */
+    this.vel = { y: 0 };
+    this.groundY = null;        // высота, на которой бот стоит (сервер присылает её при входе)
+    this.spawnPos = null;       // где бот появился — оттуда расходимся в стороны
+    this.heading = 0;           // курс в радианах
+    this.sector = null;         // свой сектор расхождения: 0…2π
+    this.waypoint = null;       // дальняя точка похода (прогрузка чанков)
+    this.ticks = 0;
+    this.wantJump = false;
+    this.stuckTicks = 0;
+    this.pauseUntil = 0;
+    this.recentFixes = [];
+    this.collided = false;      // упёрлись в стену — сервер это учитывает при проверке движения
+    this.pendingSync = true;
+    this.teleportHold = 0;      // после телепорта сервер ждёт подтверждения —
+                                // старое положение в это время слать нельзя
+    this.heights = new Map();   // запомненные высоты поверхности: «клетка 2×2» → y
+    this.terrain = new Map();   // рельеф из пакетов чанка: «чанк» → высоты 16×16
+    this.minY = -64;            // низ мира (для разбора карты высот)
+    this.probeAt = 0;           // когда в следующий раз проверять, есть ли под ногами опора
+    this.escapeUntil = 0;       // до какого времени выходим из закутка по прямой
+    this.detourUntil = 0;       // до какого времени обходим препятствие
+    this.detourHeading = 0;     // курс обхода
+    this.stuckCheckAt = 0;      // когда в последний раз проверяли, не застряли ли
+    this.stuckFrom = null;      // откуда считаем пройденное расстояние
+    this.probing = false;       // идёт проверка опоры (падаем и ждём ответа сервера)
+    this.falling = false;       // земля ниже, чем мы думали: падаем до неё
+    this.lastSentAt = 0;
+    this.stepMs = TICK_MS;      // как часто шлём позицию
+    this.index = Number(opts.index) || 0;
+    this.total = Math.max(1, Number(opts.total) || 1);
+    this.spread = opts.spread !== false;      // расходиться в разные стороны
+    this.hop = opts.hop !== false;            // подпрыгивать на ходу
     this.spawned = false;
+    this.playerLoaded = false;  // сообщили серверу, что мир загружен (1.21.4+)
     this.stats = {
       packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0,
       chunks: 0, chunkSet: new Set(), chat: 0, cmd: 0, moves: 0, jumps: 0,
+      corrections: 0, distance: 0,
     };
     this.timers = [];
     this.keepAlives = 0;
@@ -248,6 +296,45 @@ class Bot {
     this.handle(section, name, data);
   }
 
+  /**
+   * «Мир загружен» — с 1.21.4 сервер держит игрока в состоянии «ещё грузится»
+   * и, если клиент не прислал player_loaded, каждые 3 секунды возвращает его
+   * на точку появления. Именно из-за этого боты не могли уйти от спавна,
+   * а сервер писал «moved too quickly». Отправляем один раз после первых чанков.
+   */
+  /** Запоминаем рельеф чанка: по нему бот знает, где земля, и не идёт по воздуху. */
+  rememberTerrain(data) {
+    const info = terrain.analyze(data, this.minY);
+    if (!info) return;
+    this.terrain.set(`${info.x}:${info.z}`, info.terrain);
+    if (this.terrain.size > 4096) {
+      /* старые чанки забываем — далеко они уже не нужны */
+      const first = this.terrain.keys().next().value;
+      this.terrain.delete(first);
+    }
+  }
+
+  /** Высота поверхности (где стоят ноги) в точке; null — рельеф ещё неизвестен. */
+  groundAt(x, z) {
+    const cx = Math.floor(x / 16);
+    const cz = Math.floor(z / 16);
+    const chunk = this.terrain.get(`${cx}:${cz}`);
+    if (!chunk) return null;
+    const lx = Math.floor(x) - cx * 16;
+    const lz = Math.floor(z) - cz * 16;
+    return chunk[lz * 16 + lx];
+  }
+
+  reportTerrainLoaded() {
+    if (this.playerLoaded) return;
+    if (!this.spawned || this.stats.chunks < 8) return;
+    if (P.idOf(this.protocol, 'play', 'toServer', 'player_loaded') === null) {
+      this.playerLoaded = true;   // в этой версии такого пакета нет
+      return;
+    }
+    this.playerLoaded = this.sendPacket('play', 'toServer', 'player_loaded', {});
+  }
+
   readField(section, name, data, fields) {
     try {
       return P.read(this.protocol, section, 'toClient', name, data, fields).params || {};
@@ -344,9 +431,11 @@ class Bot {
 
     /* ── игра ── */
     if (name === 'map_chunk' || name === 'chunk_biomes') {
+      if (name === 'map_chunk') this.rememberTerrain(data);
       const p = this.readField('play', name, data, ['x', 'z']);
       this.stats.chunks += 1;
       if (p.x !== undefined && p.z !== undefined) this.stats.chunkSet.add(`${p.x}:${p.z}`);
+      this.reportTerrainLoaded();
       return;
     }
     if (name === 'unload_chunk') {
@@ -366,17 +455,79 @@ class Bot {
       this.sendPacket('play', 'toServer', 'tick_end', {});
       return;
     }
-    if (name === 'position' || name === 'sync_entity_position') {
-      const p = this.readField('play', name, data, ['x', 'y', 'z', 'yaw', 'pitch', 'teleportId']);
+    if (name === 'position') {
+      /* Только пакет положения самого игрока. sync_entity_position — это движение
+         чужих сущностей (мобов, лодок): принимать его за «нас поправили» нельзя,
+         иначе бота швыряет по всей карте. */
+      const p = this.readField('play', name, data, ['x', 'y', 'z', 'dx', 'dy', 'dz', 'yaw', 'pitch', 'teleportId', 'flags']);
       if (p.x !== undefined) {
+        const was = this.spawned;
+        /* с 1.21.2 сервер может присылать не координаты, а СМЕЩЕНИЕ:
+           биты в flags говорят, что именно относительное. Без этого бот
+           «не соглашается» с телепортом, и сервер повторяет его каждый пакет. */
+        const rel = p.flags && typeof p.flags === 'object' ? p.flags : {};
+        const relX = !!rel.x;
+        const relY = !!rel.y;
+        const relZ = !!rel.z;
+        const relYaw = !!rel.yaw;
+        const relPitch = !!rel.pitch;
+        if (relX) p.x = this.pos.x + Number(p.dx || 0);
+        if (relY) p.y = this.pos.y + Number(p.dy || 0);
+        if (relZ) p.z = this.pos.z + Number(p.dz || 0);
+        if (relYaw) p.yaw = this.pos.yaw + Number(p.yaw || 0);
+        if (relPitch) p.pitch = this.pos.pitch + Number(p.pitch || 0);
+        const dx = Number(p.x) - this.pos.x;
+        const dy = Number(p.y) - this.pos.y;
+        const dz = Number(p.z) - this.pos.z;
+        const moved = Math.hypot(dx, dz);
         this.pos.x = Number(p.x);
         this.pos.y = Number(p.y);
         this.pos.z = Number(p.z);
-        this.pos.yaw = Number(p.yaw) || 0;
+        this.pos.yaw = Number(p.yaw) || this.pos.yaw || 0;
         this.pos.pitch = Number(p.pitch) || 0;
+        /* сервер знает мир лучше нас: его высота — это и есть земля под ногами */
+        this.groundY = this.pos.y;
+        this.vel.y = 0;
+        this.pos.onGround = true;
+        if (!was) {
+          this.spawnPos = { x: this.pos.x, y: this.pos.y, z: this.pos.z };
+        } else if (moved > 0.05 || Math.abs(dy) > 0.05) {
+          /* сервер не согласился с движением: ступенька, стена или провал.
+             Любая такая правка уточняет высоту поверхности в этой клетке. */
+          this.stats.corrections += 1;
+          this.heights.set(this.cellKey(this.pos.x, this.pos.z), this.pos.y);
+          this.probing = false;
+          this.falling = false;
+          this.groundY = this.pos.y;
+          const nowFix = Date.now();
+          this.recentSmall = (this.recentSmall || []).filter((t) => nowFix - t < 1600);
+          if (moved <= 0.7 && Math.abs(dy) <= 1.3 && this.recentSmall.length === 0) {
+            /* первая мелкая правка — скорее всего ступенька: шагаем дальше тем же курсом */
+            this.recentSmall.push(nowFix);
+            this.stepUp = dy > 0.05;
+            this.probeAt = nowFix + 1500;
+          } else {
+            /* мелкая правка повторилась на том же месте — это стена, а не ступенька.
+               Настоящий игрок в таком случае останавливается и обходит. */
+            this.recentSmall.push(nowFix);
+            this.onCorrected();
+          }
+        }
       }
       if (p.teleportId !== undefined) {
+        /* Телепорт от сервера. Пока сервер ждёт подтверждения, он сверяет наше
+           положение с целью ТОЧНО (до последнего знака), а любой шаг в сторону
+           считает «moved too quickly» и телепортирует снова — так бот никогда не
+           сдвигался с места. Поэтому: подтверждаем, отвечаем ровно той же
+           координатой (без округления) и замираем на четверть секунды. */
+        this.teleportHold = Date.now() + 300;
+        this.pauseUntil = Math.max(this.pauseUntil || 0, this.teleportHold);
+        this.recentFixes = [];
+        this.vel.y = 0;
+        this.probing = false;
+        this.falling = false;
         this.sendPacket('play', 'toServer', 'teleport_confirm', { teleportId: p.teleportId });
+        this.sendRawPosition(p.x, p.y, p.z, this.pos.yaw, this.pos.pitch);
       }
       if (!this.spawned) {
         this.spawned = true;
@@ -385,8 +536,10 @@ class Bot {
       return;
     }
     if (name === 'login') {
-      /* «вход в мир»: сообщаем серверу, что мы на месте */
-      if (!this.spawned) this.sendPosition(false);
+      /* «вход в мир». Позицию до первого пакета положения не шлём:
+         мы ещё не знаем, куда сервер поставил бота, — иначе он ругается
+         «moved too quickly» на ровном месте. */
+      this.pendingSync = false;
       return;
     }
     if (name === 'add_resource_pack' || name === 'resource_pack_send') {
@@ -492,7 +645,7 @@ class Bot {
     this.close();
   }
 
-  /* ───────────── действия ───────────── */
+  /* ───────────── действия и движение ───────────── */
 
   every(ms, fn) {
     if (!ms || ms <= 0) return;
@@ -509,28 +662,21 @@ class Bot {
     if (this.started) return;
     this.started = true;
 
-    /* ходьба по кругу: постоянный поток движения */
-    if (a.walk) {
-      let angle = Math.random() * Math.PI * 2;
-      this.every(Number(a.walkMs) || 50, () => {
-        /* шаг за тик — как у настоящего игрока при спринте */
-        angle += 0.06;
-        this.pos.x += Math.cos(angle) * 0.28;
-        this.pos.z += Math.sin(angle) * 0.28;
-        this.pos.yaw = (angle * 180 / Math.PI) % 360;
-        this.sendPosition(true);
-      });
-    }
+    /* куда бот пойдёт: свой сектор круга, чтобы толпа расходилась в стороны */
+    this.sector = (Math.PI * 2 * (this.index % this.total)) / this.total
+      + (Math.random() - 0.5) * ((Math.PI * 2) / this.total) * 0.6;
+    this.heading = this.sector;
 
-    /* «прогрузка чанков»: редкие большие прыжки — сервер обязан выдать новые чанки */
+    /* один тик движения на всё: 20 раз в секунду, как у настоящего клиента */
+    this.stepMs = Math.max(TICK_MS, Math.min(2000, Number(a.walkMs) || TICK_MS));
+    this.every(TICK_MS, () => this.physicsTick());
+
+    /* дальние походы: цель выбираем один раз и идём к ней, пока не дойдём.
+       Раньше цель менялась по таймеру — бот не успевал её достичь и топтался
+       на месте, разворачиваясь вслед за новой точкой. */
     if (a.jump) {
-      this.every(Number(a.jumpMs) || 3000, () => {
-        this.pos.x += (Math.random() - 0.5) * 320;
-        this.pos.z += (Math.random() - 0.5) * 320;
-        this.stats.jumps += 1;
-        this.sendPosition(false);
-        this.onEvent('jump', { name: this.name, x: Math.round(this.pos.x), z: Math.round(this.pos.z) });
-      });
+      this.pickWaypoint();
+      this.every(Number(a.jumpMs) || 3000, () => { if (!this.waypoint) this.pickWaypoint(); });
     }
 
     /* спам в чат */
@@ -545,7 +691,7 @@ class Bot {
     if (a.cmd && Array.isArray(a.commands) && a.commands.length) {
       let i = 0;
       this.every(Number(a.cmdMs) || 1500, () => {
-        const cmd = String(this.actions.commands[i % this.actions.commands.length]).replace(/^\//, '').trim();
+        const cmd = String(this.actions.commands[i % this.actions.commands.length]).replace(/^\/+/, '').trim();
         i += 1;
         if (!cmd) return;
         if (this.sendCommand(cmd)) this.stats.cmd += 1;
@@ -560,14 +706,289 @@ class Bot {
     }
   }
 
+  /**
+   * Один тик движения: курс, шаг, гравитация, прыжок, отправка позиции.
+   * Всё считается как у настоящего игрока, поэтому сервер не видит полёта.
+   */
+  physicsTick() {
+    const a = this.actions;
+    if (this.state !== 'play' || !this.spawned) return;
+    this.ticks += 1;
+    const now = Date.now();
+    if (this.teleportHold && now < this.teleportHold) {
+      /* сервер ещё сверяет наше место после телепорта: стоим как вкопанные */
+      this.lastSentAt = now;
+      return;
+    }
+    if (!this.playerLoaded) {
+      /* Мир ещё не «загрузился» (как экран загрузки у игрока): не двигаемся.
+         Всё, что бот отправит до player_loaded, сервер не засчитывает — а потом
+         видит скачок на десяток блоков и пишет «moved too quickly». */
+      this.lastSentAt = now;
+      return;
+    }
+    const paused = this.pauseUntil && now < this.pauseUntil;
+    const walking = !!(a.walk || a.jump) && !paused;
+    const sprint = !!a.jump && !!this.waypoint;   // в дальний поход — бегом
+
+    if (walking) {
+      if (this.detourUntil && now < this.detourUntil) {
+        /* идём в обход препятствия, не поворачивая обратно к цели */
+        this.heading = this.detourHeading + (Math.random() - 0.5) * 0.02;
+      } else if (this.escapeUntil && now < this.escapeUntil) {
+        /* выходим из закутка: идём прямо, не петляя */
+        this.heading += (Math.random() - 0.5) * 0.004;
+      } else if (a.jump && this.waypoint) {
+        this.steerToWaypoint();
+      } else {
+        this.wander();
+      }
+
+      /* высота поверхности в этой клетке: если сервер её уже показывал — идём по ней */
+      /* смотрим и на шаг вперёд, и дальше: препятствие бывает прямо под носом */
+      const aheadX = this.pos.x + Math.cos(this.heading) * 0.9;
+      const aheadZ = this.pos.z + Math.sin(this.heading) * 0.9;
+      const nearX = this.pos.x + Math.cos(this.heading) * 0.35;
+      const nearZ = this.pos.z + Math.sin(this.heading) * 0.35;
+      const near = this.groundAt(nearX, nearZ);
+      const fromMap = this.groundAt(aheadX, aheadZ);
+      const far = fromMap === null ? this.heights.get(this.cellKey(aheadX, aheadZ)) : fromMap;
+      const known = near === null ? far : (far === null || far === undefined ? near : Math.max(near, far));
+      if (known !== undefined && !this.probing) {
+        if (known - this.pos.y > 1.05) {
+          /* выше, чем можно запрыгнуть — обходим. Обход держим пару секунд,
+             иначе бот тут же разворачивается назад к цели и топчется у стены */
+          this.detourHeading = this.heading + Math.PI * (0.4 + Math.random() * 0.4)
+            * (Math.random() < 0.5 ? 1 : -1);
+          this.detourUntil = now + 900 + Math.random() * 900;
+          this.probeAt = now + 1200;
+        } else if (known < this.pos.y - 0.05) {
+          /* впереди ниже: не телепортируемся вниз, а падаем по-настоящему —
+             резкий скачок высоты сервер принимает за «moved too quickly» */
+          this.groundY = known;
+          if (this.pos.onGround) {
+            this.pos.onGround = false;
+            this.vel.y = 0;
+            this.falling = false;
+          }
+        } else if (known > this.pos.y + 0.05 && this.pos.onGround) {
+          /* впереди выше на блок — запрыгиваем, как игрок, и дальше идём по новой высоте */
+          this.wantJump = true;
+          this.groundY = known;
+        }
+      }
+
+      const speed = Math.min(MAX_STEP, sprint ? SPEED_SPRINT : SPEED_WALK);
+      this.pos.x += Math.cos(this.heading) * speed;
+      this.pos.z += Math.sin(this.heading) * speed;
+      this.pos.yaw = ((this.heading * 180) / Math.PI + 90) % 360;
+      this.stats.distance += speed;
+
+      /* Опора под ногами: если рельеф этой клетки уже известен из чанка — никаких
+         проверок не нужно, сервер и так видит твёрдый блок. Проверяем только там,
+         где рельеф неизвестен: иначе бот без нужды «прыгает в пустоту», и сервер
+         считает его висящим в воздухе. */
+      const haveTerrain = this.groundAt(this.pos.x, this.pos.z) !== null;
+      if (!haveTerrain && this.pos.onGround && !this.probing && now >= this.probeAt) {
+        this.probing = true;
+        this.probeStartY = this.pos.y;
+        this.pos.onGround = false;
+        this.vel.y = 0;
+        this.probeAt = now + 1800 + Math.random() * 1200;
+      }
+
+      /* Застряли? Если за пять секунд почти не сдвинулись с места — значит упёрлись
+       в угол или ходим по кругу. Настоящий игрок в такой ситуации разворачивается. */
+    if (walking && now >= this.stuckCheckAt) {
+      if (!this.stuckFrom) {
+        this.stuckFrom = { x: this.pos.x, z: this.pos.z, at: now };
+        this.stuckCheckAt = now + 5000;
+      } else if (Math.hypot(this.pos.x - this.stuckFrom.x, this.pos.z - this.stuckFrom.z) < 2) {
+        this.heading += Math.PI * (0.5 + Math.random());
+        this.escapeUntil = now + 1500;
+        this.pauseUntil = Math.max(this.pauseUntil || 0, now + 300);
+        if (this.waypoint) this.pickWaypoint();
+        this.stuckFrom = { x: this.pos.x, z: this.pos.z, at: now };
+        this.stuckCheckAt = now + 5000;
+      } else {
+        this.stuckFrom = { x: this.pos.x, z: this.pos.z, at: now };
+        this.stuckCheckAt = now + 5000;
+      }
+    }
+
+    /* прыжки на ходу: изредка, как настоящий игрок (и заодно проверка опоры) */
+      const fixesRecently = this.recentFixes && this.recentFixes.some((t) => now - t < 3000);
+      if (this.hop && this.pos.onGround && !fixesRecently && !this.probing) {
+        const chance = sprint ? 0.014 : 0.006;
+        if (Math.random() < chance) this.wantJump = true;
+      }
+    }
+
+    /* прыжок: только стоя на земле, с настоящей скоростью отталкивания */
+    if (this.wantJump && this.pos.onGround) {
+      this.vel.y = JUMP_VY;
+      this.pos.onGround = false;
+      this.wantJump = false;
+      this.probing = false;
+      this.stats.jumps += 1;
+      this.onEvent('jump', { name: this.name, x: Math.round(this.pos.x), z: Math.round(this.pos.z) });
+    }
+
+    /* гравитация: настоящее падение вниз — сервер такое принимает,
+       в отличие от висения в воздухе, за которое он и кикает */
+    if (!this.pos.onGround || this.vel.y !== 0) {
+      /* порядок как в игре: сначала шаг по текущей скорости, затем гравитация и трение */
+      this.pos.y += this.vel.y;
+      this.vel.y = (this.vel.y - GRAVITY) * 0.98;
+      const ground = this.groundY === null ? this.pos.y : this.groundY;
+      if (!this.falling && this.pos.y <= ground) {
+        /* приземлились на известную высоту */
+        this.pos.y = ground;
+        this.vel.y = 0;
+        this.pos.onGround = true;
+        if (this.probing) {
+          /* опора оказалась на месте — проверка закончена */
+          this.probing = false;
+          this.heights.set(this.cellKey(this.pos.x, this.pos.z), this.pos.y);
+        }
+      } else {
+        this.pos.onGround = false;
+        if (this.probing && this.probeStartY - this.pos.y > 0.5) {
+          /* под известной высотой ничего нет: земля ниже — падаем до неё,
+             пока сервер своей правкой не скажет, где поверхность */
+          this.probing = false;
+          this.falling = true;
+        }
+      }
+    } else {
+      /* стоим на земле: подтягиваем высоту только на ступеньку, а не на пропасть */
+      if (this.groundY === null) {
+        this.pos.onGround = true;
+      } else if (Math.abs(this.groundY - this.pos.y) <= 0.6) {
+        this.pos.y = this.groundY;
+        this.pos.onGround = true;
+      } else {
+        /* земля сильно ниже — надо падать, а не мгновенно оказываться внизу */
+        this.pos.onGround = false;
+        this.vel.y = 0;
+      }
+    }
+
+    /* шлём позицию не чаще выбранного шага; стоя на месте — раз в секунду,
+       чтобы не забивать канал пустыми пакетами */
+    const active = walking || !this.pos.onGround || this.pendingSync;
+    const interval = active ? this.stepMs : 1000;
+    if (!this.lastSentAt || now - this.lastSentAt >= interval) {
+      this.lastSentAt = now;
+      this.collided = false;
+      this.pendingSync = false;
+      this.sendPosition(true);
+    }
+  }
+
+  /** Ключ клетки 2×2 блока — по нему запоминаем высоту поверхности. */
+  cellKey(x, z) {
+    return `${Math.floor(x / 2)}:${Math.floor(z / 2)}`;
+  }
+
+  /** Спокойная ходьба: курс медленно гуляет внутри своего сектора. */
+  wander() {
+    this.heading += (Math.random() - 0.5) * 0.02;
+    if (!this.spread) return;
+    /* если бот ушёл из своего сектора — плавно возвращаем курс */
+    const diff = ((this.sector - this.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    if (Math.abs(diff) > 0.9) this.heading += Math.sign(diff) * 0.02;
+  }
+
+  /** Дальняя точка похода: свой сектор, расстояние 120–380 блоков. */
+  pickWaypoint() {
+    const from = this.spawnPos || { x: this.pos.x, z: this.pos.z };
+    const dir = this.spread
+      ? this.sector + (Math.random() - 0.5) * 0.5
+      : Math.random() * Math.PI * 2;
+    const dist = 120 + Math.random() * 260;
+    this.waypoint = {
+      x: from.x + Math.cos(dir) * dist,
+      z: from.z + Math.sin(dir) * dist,
+    };
+  }
+
+  /** Курс на выбранную точку; дошли — берём следующую. */
+  steerToWaypoint() {
+    const w = this.waypoint;
+    if (!w) return;
+    const dx = w.x - this.pos.x;
+    const dz = w.z - this.pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 8) { this.pickWaypoint(); return; }
+    const want = Math.atan2(dz, dx);
+    let diff = ((want - this.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    /* поворачиваем плавно, не «телепортом» курса */
+    this.heading += Math.max(-0.25, Math.min(0.25, diff));
+  }
+
+  /**
+   * Сервер поправил позицию: значит, бот куда-то влез или провалился.
+   * Подпрыгиваем и меняем курс, как поступил бы игрок.
+   */
+  /**
+   * Сервер не согласился с движением: впереди блок, обрыв или бот провалился.
+   *
+   * Главное правило — не долбиться в стену. Настоящий игрок в такой ситуации
+   * останавливается и обходит, а бот, который продолжает шагать и прыгать в
+   * стену, получает от сервера «floating too long» и кик за полёт.
+   * Поэтому: разворот в сторону, короткая остановка (стоим как обычный игрок,
+   * без прыжков), потом идём в новом направлении.
+   */
+  onCorrected() {
+    const now = Date.now();
+    this.collided = true;
+    this.pendingSync = true;
+    this.recentFixes = (this.recentFixes || []).filter((t) => now - t < 3000);
+    this.recentFixes.push(now);
+
+    if (this.recentFixes.length >= 3) {
+      /* колбасит: три правки за три секунды — разворачиваемся и уходим прочь,
+         откуда пришли. Там точно было свободно. */
+      this.pauseUntil = now + 1200;
+      this.heading += Math.PI * (0.85 + Math.random() * 0.3);
+      this.escapeUntil = now + 3000;
+      this.recentFixes = [];
+    } else {
+      /* одна правка — короткая заминка и небольшой поворот: цель не теряем */
+      this.pauseUntil = Math.max(this.pauseUntil || 0, now + 150);
+      this.heading += Math.PI * (0.15 + Math.random() * 0.25) * (Math.random() < 0.5 ? 1 : -1);
+      if (!this.escapeUntil || this.escapeUntil < now) this.escapeUntil = now + 1200;
+    }
+    /* прыгать в застрявшем состоянии нельзя — именно из-за этого кикало */
+    this.stuckTicks = 0;
+    this.wantJump = false;
+    if (this.waypoint) this.pickWaypoint();
+    if (this.stats.corrections === 1) {
+      this.onEvent('corrected', { name: this.name, x: Math.round(this.pos.x), z: Math.round(this.pos.z) });
+    }
+  }
+
+  /** Позиция «как есть», без округления — так отвечают на телепорт. */
+  sendRawPosition(x, y, z, yaw, pitch) {
+    this.stats.moves += 1;
+    this.sendPacket('play', 'toServer', 'position_look', {
+      x: Number(x), y: Number(y), z: Number(z),
+      onGround: true,
+      flags: { onGround: true, hasHorizontalCollision: false },
+      yaw: Number(yaw) || 0,
+      pitch: Number(pitch) || 0,
+    });
+  }
+
   sendPosition(withLook) {
     this.stats.moves += 1;
     const values = {
       x: Number(this.pos.x.toFixed(4)),
       y: Number(this.pos.y.toFixed(4)),
       z: Number(this.pos.z.toFixed(4)),
-      onGround: true,
-      flags: { onGround: true },
+      onGround: !!this.pos.onGround,
+      flags: { onGround: !!this.pos.onGround, hasHorizontalCollision: !!this.collided },
     };
     if (withLook) {
       values.yaw = this.pos.yaw;

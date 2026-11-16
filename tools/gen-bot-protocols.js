@@ -65,8 +65,8 @@ const NEED = {
     toServer: [
       'teleport_confirm', 'position', 'position_look', 'look', 'flying', 'chat', 'chat_message',
       'chat_command', 'settings', 'client_information', 'custom_payload', 'keep_alive', 'arm_animation',
-      'chunk_batch_received', 'tick_end', 'pong', 'client_command', 'resource_pack_receive', 'entity_action',
-      'configuration_acknowledged', 'select_known_packs',
+      'chunk_batch_received', 'tick_end', 'player_loaded', 'pong', 'client_command', 'resource_pack_receive',
+      'entity_action', 'configuration_acknowledged', 'select_known_packs',
     ],
     toClient: [
       'keep_alive', 'login', 'position', 'map_chunk', 'chat', 'system_chat', 'player_chat', 'kick_disconnect',
