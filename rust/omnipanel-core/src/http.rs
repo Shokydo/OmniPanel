@@ -512,9 +512,32 @@ impl PanelServer {
             file = self.ui_dir.join("index.html");
             rel = "index.html";
         }
+        /* папки интерфейса нет рядом с программой — вместо пустого 404
+           показываем понятную страницу: так человек сразу видит, что делать */
+        if rel == "index.html" && !file.exists() {
+            return Some(Response::binary(200, "text/html; charset=utf-8", missing_ui_page().into_bytes()));
+        }
         let bytes = std::fs::read(&file).ok()?;
         Some(Response::binary(200, mime_of(Path::new(rel)), bytes))
     }
+}
+
+/// Страница «нет папки ui» — на русском и без подсказок в интерфейсе панели.
+fn missing_ui_page() -> String {
+    r#"<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<title>OmniPanel</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#0b0b0d;color:#e8e8ea;font:15px/1.6 "Segoe UI",system-ui,sans-serif}
+.box{max-width:34rem;padding:2rem;border:1px solid #2a2a2e;border-radius:14px;background:#131316}
+h1{margin:0 0 .8rem;font-size:1.15rem;letter-spacing:.02em}
+code{background:#1c1c20;padding:.15rem .4rem;border-radius:6px}
+p{margin:.6rem 0;color:#b9b9c0}
+</style></head><body><div class="box">
+<h1>Не хватает папки с интерфейсом</h1>
+<p>Рядом с программой должна лежать папка <code>ui</code> — в ней сам интерфейс панели.</p>
+<p>Распакуй архив целиком: папка <code>ui</code> идёт вместе с <code>OmniPanel.exe</code>.</p>
+</div></body></html>"#
+        .to_string()
 }
 
 fn broadcast(listeners: &Listeners, event: &str, payload: &str) {

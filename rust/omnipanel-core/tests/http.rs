@@ -384,3 +384,31 @@ fn бэкапы_по_http() {
     assert!(removed.contains("true"), "не удалилось: {removed}");
     assert!(!std::path::Path::new(&file).exists());
 }
+
+#[test]
+fn без_папки_интерфейса_понятная_страница() {
+    /* панель без интерфейса не молчит: она объясняет, чего не хватает */
+    let dir = std::env::temp_dir().join(format!("omnipanel-http-noui-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let mut info = AppInfo::default();
+    info.data_dir = dir.clone();
+    info.config_path = dir.join("servers.json");
+    let app = Arc::new(App::new(info));
+    let server = std::sync::Arc::new(PanelServer::new(Arc::clone(&app), dir.join("нет-ui")));
+    let port = {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let serving = std::sync::Arc::clone(&server);
+    std::thread::spawn(move || {
+        let _ = serving.serve(port);
+    });
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (status, body) = request(port, "GET", "/", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("папки с интерфейсом"), "страница: {body}");
+    assert!(body.contains("ui"), "нет упоминания папки ui");
+    let _ = fs::remove_dir_all(&dir);
+}
