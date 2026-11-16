@@ -6,8 +6,11 @@
 #   ./rust/собрать.sh run      — запустить панель (интерфейс откроется по адресу из вывода)
 #
 # Если Rust не установлен, скрипт скачает его сам (rustc, cargo и стандартную
-# библиотеку 1.85.1) в ~/toolchain — без прав администратора и без сети после
-# первой загрузки.
+# библиотеку 1.91.0) в ~/toolchain — без прав администратора.
+#
+# 1.91.0 — не прихоть: HTTPS-клиент `ureq` (GitHub, GitLab, обновления) требует
+# свежий rustc. Интернет нужен только на первую загрузку Rust и один раз для
+# скачивания библиотек (`Cargo.lock` уже лежит в репозитории).
 
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -15,18 +18,18 @@ ROOT=${OMNI_RUST_HOME:-$HOME/toolchain}
 export PATH="$ROOT/rust/bin:$PATH"
 export CARGO_HOME="$ROOT/cargo"
 export CARGO_TARGET_DIR="$ROOT/work"
-export CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-true}
+export CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-false}
 
 install_rust() {
-  echo "Rust не найден — скачиваю 1.85.1 в $ROOT"
+  echo "Rust не найден — скачиваю 1.91.0 в $ROOT"
   mkdir -p "$ROOT/dl"
   cd "$ROOT/dl"
   for crate in rustc rust-std cargo; do
     curl -sSL -o "$crate.tar.xz" \
-      "https://static.rust-lang.org/dist/$crate-1.85.1-x86_64-unknown-linux-gnu.tar.xz"
+      "https://static.rust-lang.org/dist/$crate-1.91.0-x86_64-unknown-linux-gnu.tar.xz"
     tar -xf "$crate.tar.xz"
-    (cd "$crate-1.85.1-x86_64-unknown-linux-gnu" && ./install.sh --prefix="$ROOT/rust" --disable-ldconfig >/dev/null)
-    rm -rf "$crate-1.85.1-x86_64-unknown-linux-gnu" "$crate.tar.xz"
+    (cd "$crate-1.91.0-x86_64-unknown-linux-gnu" && ./install.sh --prefix="$ROOT/rust" --disable-ldconfig >/dev/null)
+    rm -rf "$crate-1.91.0-x86_64-unknown-linux-gnu" "$crate.tar.xz"
   done
   cd "$HERE"
 }

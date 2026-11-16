@@ -11,6 +11,8 @@
 use crate::b64;
 use crate::files::{kind_of, Entry, FileError, Files, READ_LIMIT, WRITE_LIMIT};
 use crate::ports;
+use crate::sync::{self, Options, Provider, Sync};
+use crate::update::Updater;
 use crate::window::{WindowBridge, WindowCommand};
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
@@ -129,6 +131,34 @@ pub const READY_CHANNELS: &[&str] = &[
     "bans:ban",
     "tps:history",
     "tps:clear",
+    "gh:account",
+    "gh:login",
+    "gh:logout",
+    "gh:verify",
+    "gh:check",
+    "gh:push",
+    "gh:pull",
+    "gh:status",
+    "gh:forget",
+    "gh:repos",
+    "gh:createRepo",
+    "gh:download",
+    "gh:openExternal",
+    "gh:oauthClientId",
+    "gh:setOauthClientId",
+    "gh:deviceStart",
+    "gh:devicePoll",
+    "gl:account",
+    "gl:check",
+    "gl:projects",
+    "gl:save",
+    "upd:config",
+    "upd:save",
+    "upd:check",
+    "upd:apply",
+    "upd:auto",
+    "upd:downloadFull",
+    "upd:revealBackups",
 ];
 
 impl App {
@@ -211,6 +241,9 @@ impl App {
             "win" => self.win(action, args),
             "app" => self.app(action, args),
             "path" => self.path(action, args),
+            "gh" => self.gh(action, args),
+            "gl" => self.gl(action, args),
+            "upd" => self.upd(action, args),
             _ => Err(format!(
                 "команда «{}» ещё не перенесена в Rust — она появится в следующем шаге",
                 channel
@@ -864,6 +897,234 @@ impl App {
             "getStartMode" => Ok(Value::str("tray")),
             "setStartMode" => Ok(args.first().cloned().unwrap_or(Value::str("tray"))),
             other => Err(not_migrated("win", other)),
+        }
+    }
+
+
+    /* ───────────── gh:* и gl:* — синхронизация сервера ───────────── */
+
+    /// Настройки синхронизации панели: токены, аккаунт, адреса API.
+    fn sync_store(&self) -> Sync {
+        Sync::new(&self.info.data_dir)
+    }
+
+    /// Настройки обновлений: канал лежит в panel.json, рядом с данными панели.
+    fn updater(&self) -> Updater {
+        let mut updater = Updater::new(&self.info.data_dir, &self.info.app_dir, &self.info.version);
+        updater.token = self.sync_store().github_token();
+        updater
+    }
+
+    /// Сервер и его настройки синхронизации из `servers.json` (поле `sync`).
+    fn sync_options(&self, id: &str) -> Result<(ServerConfig, Options), String> {
+        let server = self
+            .manager
+            .find(id)
+            .ok_or_else(|| "Сервер не найден".to_string())?;
+        let mut opts = Options {
+            dir: PathBuf::from(server.work_dir()),
+            repo: String::new(),
+            branch: "main".to_string(),
+            token: String::new(),
+            scope: "all".to_string(),
+            mode: "archive".to_string(),
+            provider: Provider::GitHub,
+            cleanup: true,
+            state_file: self.info.data_dir.join("sync").join(format!(
+                "{}.json",
+                server.id.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>()
+            )),
+            message: format!("OmniPanel: {} — {}", server.name, sync::iso_now()),
+            split_mb: sync::SPLIT_MB,
+            logs: Vec::new(),
+        };
+        let sync_cfg = server
+            .extra
+            .iter()
+            .find(|(key, _)| key == "sync")
+            .map(|(_, value)| value.clone())
+            .unwrap_or(Value::Null);
+        let flag = |cfg: &Value, key: &str, default: bool| cfg.get(key).map(|v| v.as_bool()).unwrap_or(default);
+        let cfg = &sync_cfg;
+        if cfg.get("enabled").map(|v| v.as_bool()).unwrap_or(false) && cfg.get("repo").map(|v| !v.text().trim().is_empty()).unwrap_or(false) {
+            let store = self.sync_store();
+            let provider = Provider::parse(&cfg.get("provider").map(|v| v.text()).unwrap_or_default());
+            let own_token = cfg.get("token").map(|v| v.text()).unwrap_or_default();
+            let token = if own_token.trim().is_empty() {
+                match provider {
+                    Provider::GitLab => store.gitlab_token(),
+                    Provider::GitHub => store.github_token(),
+                }
+            } else {
+                own_token.trim().to_string()
+            };
+            opts.repo = cfg.get("repo").map(|v| v.text()).unwrap_or_default();
+            opts.branch = sync::norm_branch(&cfg.get("branch").map(|v| v.text()).unwrap_or_default());
+            opts.token = token;
+            opts.provider = provider;
+            opts.scope = {
+                let scope = cfg.get("scope").map(|v| v.text()).unwrap_or_default();
+                if scope.is_empty() { "all".to_string() } else { scope }
+            };
+            opts.mode = {
+                let mode = cfg.get("mode").map(|v| v.text()).unwrap_or_default();
+                if mode.is_empty() { "archive".to_string() } else { mode }
+            };
+            /* по умолчанию части архива убираются из хранилища после распаковки */
+            opts.cleanup = !flag(cfg, "keepParts", false);
+        }
+        Ok((server, opts))
+    }
+
+    fn gh(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let store = self.sync_store();
+        match action {
+            "account" => Ok(store.account()),
+            "login" => Ok(store.login(&text(args, 0))),
+            "logout" => Ok(store.logout()),
+            "verify" => Ok(store.verify(args.first().unwrap_or(&Value::Null))),
+            "repos" => Ok(store.repos(&text(args, 0))),
+            "createRepo" => Ok(store.create_repo(&text(args, 0), args.get(1).map(|v| v.as_bool()).unwrap_or(true))),
+            "oauthClientId" => Ok(Value::str(store.oauth_client_id())),
+            "setOauthClientId" => Ok(store.set_oauth_client_id(&text(args, 0))),
+            "deviceStart" => Ok(store.device_start()),
+            "devicePoll" => Ok(store.device_poll(&text(args, 0))),
+            "openExternal" => {
+                let url = text(args, 0);
+                if !url.to_lowercase().starts_with("https://") {
+                    return Ok(Value::Bool(false));
+                }
+                match open_in_system(&url) {
+                    Ok(_) => Ok(Value::Bool(true)),
+                    Err(_) => Ok(Value::Bool(false)),
+                }
+            }
+            "download" => {
+                let cfg = args.first().cloned().unwrap_or(Value::Null);
+                let dir = cfg.get("dir").map(|v| v.text()).unwrap_or_default();
+                if dir.trim().is_empty() {
+                    return Ok(sync::error_json("Не выбрана папка, куда скачать сервер"));
+                }
+                let own_token = cfg.get("token").map(|v| v.text()).unwrap_or_default();
+                let token = if own_token.trim().is_empty() { store.github_token() } else { own_token };
+                Ok(sync::download_repo(
+                    &store,
+                    &cfg.get("repo").map(|v| v.text()).unwrap_or_default(),
+                    &cfg.get("branch").map(|v| v.text()).unwrap_or_default(),
+                    &PathBuf::from(dir),
+                    &token,
+                ))
+            }
+            "status" => Ok(sync::status(&self.sync_options(&text(args, 0))?.1.state_file)),
+            "forget" => {
+                let (_, opts) = self.sync_options(&text(args, 0))?;
+                Ok(sync::forget(&opts.state_file))
+            }
+            "check" => {
+                let (_, opts) = self.sync_options(&text(args, 0))?;
+                if opts.repo.is_empty() {
+                    return Ok(sync::error_json("Синхронизация не настроена"));
+                }
+                Ok(sync::check(&store, &opts))
+            }
+            "push" => {
+                let (server, mut opts) = self.sync_options(&text(args, 0))?;
+                if opts.repo.is_empty() {
+                    return Ok(sync::error_json("Синхронизация не настроена"));
+                }
+                let who = opts.provider.name().to_string();
+                self.note(&server.id, &format!("{}: отправляю изменения…", who));
+                let result = sync::push(&store, &mut opts);
+                self.note_push(&server.id, &who, &result);
+                Ok(result)
+            }
+            "pull" => {
+                let (server, mut opts) = self.sync_options(&text(args, 0))?;
+                if opts.repo.is_empty() {
+                    return Ok(sync::error_json("Синхронизация не настроена"));
+                }
+                let state = self.manager.state(&server.id);
+                if matches!(state, ServerState::Running | ServerState::Stopping) {
+                    return Ok(sync::error_json("Сначала останови сервер — файлы мира заняты"));
+                }
+                let who = opts.provider.name().to_string();
+                self.note(&server.id, &format!("{}: забираю сервер…", who));
+                let result = sync::pull(&store, &mut opts);
+                self.note_push(&server.id, &who, &result);
+                Ok(result)
+            }
+            other => Err(not_migrated("gh", other)),
+        }
+    }
+
+    /// Строка в лог сервера: шаги синхронизации видны в его консоли.
+    fn note(&self, id: &str, text: &str) {
+        self.manager.note(id, text.to_string());
+    }
+
+    /// Итог синхронизации — одной строкой в лог сервера.
+    fn note_push(&self, id: &str, who: &str, result: &Value) {
+        let ok = result.get("ok").map(|v| v.as_bool()).unwrap_or(false);
+        if !ok {
+            let message = result.get("error").map(|v| v.text()).unwrap_or_default();
+            self.note(id, &format!("{}: {}", who, message));
+            return;
+        }
+        if result.get("upToDate").map(|v| v.as_bool()).unwrap_or(false) {
+            self.note(id, &format!("{}: всё уже актуально", who));
+            return;
+        }
+        let downloaded = result.get("downloaded").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+        let uploaded = result.get("uploaded").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+        let parts = result.get("parts").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64;
+        let size = result.get("size").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if downloaded > 0 {
+            self.note(id, &format!("{}: распаковано файлов {}", who, downloaded));
+        } else if parts > 0 {
+            self.note(id, &format!("{}: архив {} МБ, частей {}", who, sync::megabytes(size as u64), parts));
+        } else if uploaded > 0 {
+            self.note(id, &format!("{}: отправлено файлов {}", who, uploaded));
+        }
+    }
+
+    fn gl(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let store = self.sync_store();
+        match action {
+            "account" => Ok(store.gitlab_account()),
+            "save" => Ok(store.gitlab_save(&text(args, 0))),
+            "projects" => Ok(store.gitlab_projects(&text(args, 0))),
+            "check" => Ok(store.gitlab_check(args.first().unwrap_or(&Value::Null))),
+            other => Err(not_migrated("gl", other)),
+        }
+    }
+
+    /* ───────────── upd:* — обновления ───────────── */
+
+    fn upd(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        let updater = self.updater();
+        match action {
+            "config" => Ok(updater.config()),
+            "save" => Ok(updater.save(args.first().unwrap_or(&Value::Null))),
+            "check" => Ok(updater.check()),
+            "apply" => Ok(updater.apply()),
+            "auto" => {
+                /* пока серверы работают, обновление ждёт: иначе мир оборвётся */
+                let running = self
+                    .manager
+                    .servers()
+                    .iter()
+                    .any(|server| matches!(self.manager.state(&server.id), ServerState::Running | ServerState::Stopping));
+                Ok(updater.auto(running))
+            }
+            "downloadFull" => Ok(updater.download_full()),
+            "revealBackups" => {
+                let result = updater.reveal_backups();
+                if let Some(path) = result.get("path") {
+                    let _ = open_in_system(&path.text());
+                }
+                Ok(result)
+            }
+            other => Err(not_migrated("upd", other)),
         }
     }
 

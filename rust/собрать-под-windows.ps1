@@ -42,6 +42,20 @@ if (-not $cargo) {
 rustc --version
 cargo --version
 
+# HTTPS-клиент панели (GitHub, GitLab, обновления) требует rustc 1.91 или новее
+$verText = (& rustc --version) -replace '^rustc ', '' -replace ' .*$', ''
+$verParts = $verText.Split('.')
+$verMajor = [int]$verParts[0]
+$verMinor = [int]$verParts[1]
+if ($verMajor -lt 1 -or ($verMajor -eq 1 -and $verMinor -lt 91)) {
+  Write-Host "Rust $verText старый — панели нужен 1.91 или новее" -ForegroundColor Yellow
+  if (Get-Command rustup -ErrorAction SilentlyContinue) {
+    rustup update stable
+  } else {
+    throw "Обновите Rust: https://rustup.rs (нужен 1.91 или новее)"
+  }
+}
+
 # ── 2. Сборка ──────────────────────────────────────────────────────────────
 # если в проекте уже есть окно на Tauri — собираем его, а не консольную панель
 $tauri = Join-Path $Root "src-tauri"

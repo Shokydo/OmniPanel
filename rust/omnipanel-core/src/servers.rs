@@ -488,6 +488,12 @@ impl Manager {
 
     /* ───────────── запуск и остановка ───────────── */
 
+    /// Строка в лог сервера от самой панели (синхронизация, обновления).
+    /// Пишется и в лог, и в события — интерфейс увидит её сразу.
+    pub fn note(&self, id: &str, text: impl Into<String>) {
+        self.log(id, "system", text);
+    }
+
     fn log(&self, id: &str, kind: &str, text: impl Into<String>) {
         let line = LogLine {
             kind: kind.to_string(),

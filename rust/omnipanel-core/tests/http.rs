@@ -191,3 +191,76 @@ fn история_tps_отдаётся_даже_для_нового_сервер
     assert_eq!(status, 200);
     assert_eq!(body, "[]", "история пустая, но формат правильный: {body}");
 }
+
+#[test]
+fn синхронизация_и_обновления_по_http() {
+    /* сервер-заглушка вместо настоящего GitHub: адреса берём из переменных среды */
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let fake = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let read = match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                buffer.extend_from_slice(&chunk[..read]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buffer).to_string();
+            let path = head.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("/");
+            let (status, body) = if path.contains("/gh/user") && !path.contains("/repos") {
+                (200, r#"{"login":"тестер","name":"Тест","avatar_url":""}"#.to_string())
+            } else if path.contains("/gl/user") {
+                (200, r#"{"username":"гитлабовец"}"#.to_string())
+            } else {
+                (404, r#"{"message":"Not Found"}"#.to_string())
+            };
+            let head = format!(
+                "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                status,
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    std::env::set_var("OMNI_GITHUB_API", format!("http://127.0.0.1:{}/gh", fake));
+    std::env::set_var("OMNI_GITLAB_API", format!("http://127.0.0.1:{}/gl", fake));
+    std::env::set_var("OMNI_GITHUB_OAUTH", format!("http://127.0.0.1:{}/gh", fake));
+    std::env::set_var("OMNI_UPDATE_RAW", format!("http://127.0.0.1:{}/raw", fake));
+
+    let panel = start_panel();
+
+    /* аккаунт GitHub и вход по токену */
+    let (status, body) = request(panel.port, "GET", "/api/gh/account", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"hasToken\":false"), "нет аккаунта: {body}");
+    let (_, body) = request(panel.port, "POST", "/api/gh/login", r#"{"token":"test-token"}"#);
+    assert!(body.contains("\"ok\":true"), "вход не удался: {body}");
+    assert!(body.contains("тестер"), "имя аккаунта не пришло: {body}");
+    let (_, body) = request(panel.port, "GET", "/api/gh/account", "");
+    assert!(body.contains("\"hasToken\":true"), "аккаунт не сохранился: {body}");
+    assert!(body.contains("••••••••"), "токен наружу отдавать нельзя: {body}");
+
+    /* GitLab: свой токен */
+    let (_, body) = request(panel.port, "POST", "/api/gl/save", r#"{"token":"gl-token"}"#);
+    assert!(body.contains("\"ok\":true"), "{body}");
+    let (_, body) = request(panel.port, "POST", "/api/gl/check", r#"{"repo":""}"#);
+    assert!(body.contains("гитлабовец"), "GitLab не ответил: {body}");
+
+    /* обновления: настройки канала и пустой канал */
+    let (_, body) = request(panel.port, "GET", "/api/upd/config", "");
+    assert!(body.contains("Shokydo/OmniPanel"), "канал по умолчанию: {body}");
+    let (_, body) = request(panel.port, "POST", "/api/upd/save", r#"{"branch":"мир"}"#);
+    assert!(body.contains("мир"), "ветка не сохранилась: {body}");
+    let (_, body) = request(panel.port, "POST", "/api/upd/check", "");
+    assert!(body.contains("\"ok\":false"), "пустой канал должен давать понятный отказ: {body}");
+    assert!(body.contains("не нашлось"), "текст отказа: {body}");
+}

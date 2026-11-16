@@ -6,14 +6,20 @@
 
 pub mod app;
 pub mod b64;
+pub mod deflate;
 pub mod files;
 pub mod json;
+pub mod net;
 pub mod players;
 pub mod ports;
 pub mod props;
 pub mod props_schema;
 pub mod servers;
+pub mod sha1;
+pub mod sha256;
 pub mod http;
+pub mod sync;
+pub mod update;
 pub mod window;
 pub mod zip;
 

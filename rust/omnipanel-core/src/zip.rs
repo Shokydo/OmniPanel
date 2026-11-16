@@ -457,3 +457,169 @@ impl ZipEntry {
         self.crc
     }
 }
+
+/// Один файл для упаковки: путь внутри архива и содержимое.
+pub struct NewEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+fn put16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn put32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Собирает ZIP-архив из готовых файлов.
+///
+/// Нужен синхронизации: сервер уходит в хранилище одним архивом, а не
+/// тысячей файлов — так GitHub не отвечает 422 на больших мирах.
+/// Сжатие своё (`deflate`), а если файл не сжимается — кладём как есть.
+pub fn create(entries: &[NewEntry]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut central: Vec<u8> = Vec::new();
+    /* 1980-01-01 00:00 — фиксированная дата: архив от этого не зависит */
+    let (dos_time, dos_date) = (0u16, 0x0021u16);
+
+    for entry in entries {
+        let name = entry.name.replace('\\', "/");
+        let (packed, method) = crate::deflate::compress_best(&entry.data);
+        let crc = crc32(&entry.data);
+        let offset = out.len() as u32;
+        let flags = if name.is_ascii() { 0u16 } else { 0x0800u16 };
+
+        put32(&mut out, 0x0403_4b50);
+        put16(&mut out, 20);
+        put16(&mut out, flags);
+        put16(&mut out, method);
+        put16(&mut out, dos_time);
+        put16(&mut out, dos_date);
+        put32(&mut out, crc);
+        put32(&mut out, packed.len() as u32);
+        put32(&mut out, entry.data.len() as u32);
+        put16(&mut out, name.len() as u16);
+        put16(&mut out, 0);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&packed);
+
+        put32(&mut central, 0x0201_4b50);
+        put16(&mut central, 20);
+        put16(&mut central, 20);
+        put16(&mut central, flags);
+        put16(&mut central, method);
+        put16(&mut central, dos_time);
+        put16(&mut central, dos_date);
+        put32(&mut central, crc);
+        put32(&mut central, packed.len() as u32);
+        put32(&mut central, entry.data.len() as u32);
+        put16(&mut central, name.len() as u16);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put32(&mut central, 0);
+        put32(&mut central, offset);
+        central.extend_from_slice(name.as_bytes());
+    }
+
+    let cd_offset = out.len() as u32;
+    let count = entries.len() as u16;
+    out.extend_from_slice(&central);
+    put32(&mut out, 0x0605_4b50);
+    put16(&mut out, 0);
+    put16(&mut out, 0);
+    put16(&mut out, count);
+    put16(&mut out, count);
+    put32(&mut out, central.len() as u32);
+    put32(&mut out, cd_offset);
+    put16(&mut out, 0);
+    out
+}
+
+/// Файл на диске, который нужно положить в архив.
+pub struct InputFile {
+    /// Путь внутри архива (всегда через `/`).
+    pub name: String,
+    /// Где файл лежит на самом деле.
+    pub path: std::path::PathBuf,
+}
+
+/// Собирает архив сразу в файл, читая исходники по одному.
+///
+/// Большой сервер (гигабайты) в память целиком не влезает, поэтому
+/// упаковываем потоком: в памяти живёт один файл и оглавление архива.
+/// Возвращает размер готового архива.
+pub fn create_from_files(dest: &std::path::Path, files: &[InputFile]) -> Result<u64, String> {
+    use std::io::Write;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("не создать папку архива: {}", e))?;
+    }
+    let handle = std::fs::File::create(dest).map_err(|e| format!("не создать архив: {}", e))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, handle);
+    let mut central: Vec<u8> = Vec::new();
+    let mut written = 0u64;
+    let (dos_time, dos_date) = (0u16, 0x0021u16);
+
+    for file in files {
+        let name = file.name.replace('\\', "/");
+        let data = std::fs::read(&file.path)
+            .map_err(|e| format!("не прочитать {}: {}", name, e))?;
+        let (packed, method) = crate::deflate::compress_best(&data);
+        let crc = crc32(&data);
+        let offset = written as u32;
+        let flags = if name.is_ascii() { 0u16 } else { 0x0800u16 };
+
+        let mut header = Vec::with_capacity(30 + name.len());
+        put32(&mut header, 0x0403_4b50);
+        put16(&mut header, 20);
+        put16(&mut header, flags);
+        put16(&mut header, method);
+        put16(&mut header, dos_time);
+        put16(&mut header, dos_date);
+        put32(&mut header, crc);
+        put32(&mut header, packed.len() as u32);
+        put32(&mut header, data.len() as u32);
+        put16(&mut header, name.len() as u16);
+        put16(&mut header, 0);
+        header.extend_from_slice(name.as_bytes());
+        out.write_all(&header).map_err(|e| format!("не записать архив: {}", e))?;
+        out.write_all(&packed).map_err(|e| format!("не записать архив: {}", e))?;
+        written += (header.len() + packed.len()) as u64;
+
+        put32(&mut central, 0x0201_4b50);
+        put16(&mut central, 20);
+        put16(&mut central, 20);
+        put16(&mut central, flags);
+        put16(&mut central, method);
+        put16(&mut central, dos_time);
+        put16(&mut central, dos_date);
+        put32(&mut central, crc);
+        put32(&mut central, packed.len() as u32);
+        put32(&mut central, data.len() as u32);
+        put16(&mut central, name.len() as u16);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put16(&mut central, 0);
+        put32(&mut central, 0);
+        put32(&mut central, offset);
+        central.extend_from_slice(name.as_bytes());
+    }
+
+    let cd_offset = written as u32;
+    out.write_all(&central).map_err(|e| format!("не записать оглавление архива: {}", e))?;
+    let mut tail = Vec::with_capacity(22);
+    put32(&mut tail, 0x0605_4b50);
+    put16(&mut tail, 0);
+    put16(&mut tail, 0);
+    put16(&mut tail, files.len() as u16);
+    put16(&mut tail, files.len() as u16);
+    put32(&mut tail, central.len() as u32);
+    put32(&mut tail, cd_offset);
+    put16(&mut tail, 0);
+    out.write_all(&tail).map_err(|e| format!("не записать конец архива: {}", e))?;
+    out.flush().map_err(|e| format!("не дописать архив: {}", e))?;
+    Ok(written + central.len() as u64 + tail.len() as u64)
+}

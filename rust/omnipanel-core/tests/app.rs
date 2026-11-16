@@ -37,7 +37,7 @@ fn список_каналов_совпадает_с_мостом() {
 fn неперенесённый_канал_отвечает_по_русски() {
     let dir = temp_dir("notmigrated");
     let app = app_with_servers(&dir);
-    let err = app.invoke("gh:push", &args(&["srv"])).unwrap_err();
+    let err = app.invoke("addons:list", &args(&["srv"])).unwrap_err();
     assert!(err.contains("ещё не перенесена в Rust"), "ошибка: {err}");
     let err = app.invoke("servers:прыжок", &[]).unwrap_err();
     assert!(err.contains("servers:прыжок"), "в ошибке видно, что именно не готово: {err}");

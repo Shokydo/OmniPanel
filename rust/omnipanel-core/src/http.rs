@@ -213,6 +213,52 @@ impl PanelServer {
                 "server:editor",
                 vec![Value::Str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
             ),
+            /* ── синхронизация сервера ── */
+            ("GET", "/api/gh/account") => ("gh:account", vec![]),
+            ("POST", "/api/gh/login") => ("gh:login", vec![Value::str(body_json.get("token").map(|v| v.text()).unwrap_or_default())]),
+            ("POST", "/api/gh/logout") => ("gh:logout", vec![]),
+            ("GET", "/api/gh/oauthClientId") => ("gh:oauthClientId", vec![]),
+            ("POST", "/api/gh/setOauthClientId") => (
+                "gh:setOauthClientId",
+                vec![Value::str(body_json.get("id").map(|v| v.text()).unwrap_or_default())],
+            ),
+            ("POST", "/api/gh/deviceStart") => ("gh:deviceStart", vec![]),
+            ("POST", "/api/gh/devicePoll") => (
+                "gh:devicePoll",
+                vec![Value::str(body_json.get("deviceCode").map(|v| v.text()).unwrap_or_default())],
+            ),
+            ("POST", "/api/gh/openExternal") => (
+                "gh:openExternal",
+                vec![Value::str(body_json.get("url").map(|v| v.text()).unwrap_or_default())],
+            ),
+            ("GET", "/api/gh/repos") => ("gh:repos", vec![Value::str(arg("q"))]),
+            ("POST", "/api/gh/createRepo") => (
+                "gh:createRepo",
+                vec![
+                    Value::str(body_json.get("name").map(|v| v.text()).unwrap_or_default()),
+                    Value::Bool(body_json.get("private").map(|v| v.as_bool()).unwrap_or(true)),
+                ],
+            ),
+            ("GET", "/api/gh/verify") => ("gh:verify", vec![Value::str(arg("id"))]),
+            ("POST", "/api/gh/verify") => ("gh:verify", vec![body_json.clone()]),
+            ("POST", "/api/gh/download") => ("gh:download", vec![body_json.clone()]),
+            ("GET", "/api/gh/status") => ("gh:status", vec![Value::str(arg("id"))]),
+            ("POST", "/api/gh/forget") => ("gh:forget", vec![Value::str(arg("id"))]),
+            ("POST", "/api/gh/check") => ("gh:check", vec![Value::str(arg("id"))]),
+            ("POST", "/api/gh/push") => ("gh:push", vec![Value::str(arg("id"))]),
+            ("POST", "/api/gh/pull") => ("gh:pull", vec![Value::str(arg("id"))]),
+            ("GET", "/api/gl/account") => ("gl:account", vec![]),
+            ("POST", "/api/gl/save") => ("gl:save", vec![Value::str(body_json.get("token").map(|v| v.text()).unwrap_or_default())]),
+            ("GET", "/api/gl/projects") => ("gl:projects", vec![Value::str(arg("q"))]),
+            ("POST", "/api/gl/check") => ("gl:check", vec![body_json.clone()]),
+            /* ── обновления ── */
+            ("GET", "/api/upd/config") => ("upd:config", vec![]),
+            ("POST", "/api/upd/save") => ("upd:save", vec![body_json.clone()]),
+            ("POST", "/api/upd/check") => ("upd:check", vec![]),
+            ("POST", "/api/upd/apply") => ("upd:apply", vec![]),
+            ("POST", "/api/upd/auto") => ("upd:auto", vec![]),
+            ("POST", "/api/upd/downloadFull") => ("upd:downloadFull", vec![]),
+            ("POST", "/api/upd/revealBackups") => ("upd:revealBackups", vec![]),
             _ => {
                 /* пути вида /api/servers/<id>/... и /api/files/<действие> */
                 if let Some(rest) = path.strip_prefix("/api/servers/") {
