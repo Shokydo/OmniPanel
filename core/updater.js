@@ -322,8 +322,12 @@ async function check(opts = {}) {
       .map((f) => f.code)[0];
     if (withSha) code.sha256 = withSha.sha256;
   }
-  const full = latest.full || (found.find((f) => f.full) || {}).full || null;
-  const setup = latest.setup || (found.find((f) => f.setup) || {}).setup || null;
+  /* Установщик и полную сборку берём только у ТОЙ ЖЕ версии, что признана свежей.
+     Иначе панель с новым кодом предлагала бы «полную сборку» из старого релиза —
+     то есть откат на предыдущую версию. */
+  const same = found.filter((f) => compareVersions(f.version, latest.version) === 0);
+  const full = latest.full || (same.map((f) => f.full).find(Boolean) || null);
+  const setup = latest.setup || (same.map((f) => f.setup).find(Boolean) || null);
 
   return {
     ok: true,
