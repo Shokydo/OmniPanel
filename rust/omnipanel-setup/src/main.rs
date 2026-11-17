@@ -17,29 +17,222 @@ use omnipanel_core::zip;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/* ───────────── окна Windows своими руками, без PowerShell ───────────── */
+///
+/// Раньше окно мастера рисовал PowerShell-скрипт. Если PowerShell на машине
+/// недоступен или сценарий падает, человек оставался без выбора папки — и
+/// установщик молча ставил панель куда захотел. Теперь на этот случай есть
+/// обычные окна Windows: выбор папки (shell32) и вопрос «Запустить?» (user32).
+#[cfg(windows)]
+mod win {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    type Handle = *mut core::ffi::c_void;
+
+    #[repr(C)]
+    struct BrowseInfoW {
+        owner: Handle,
+        root: *const core::ffi::c_void,
+        display_name: *mut u16,
+        title: *const u16,
+        flags: u32,
+        callback: Option<extern "system" fn(Handle, u32, usize, isize) -> i32>,
+        callback_data: isize,
+        image: i32,
+    }
+
+    const BIF_RETURNONLYFSDIRS: u32 = 0x0001;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x0040;
+    const BIF_EDITBOX: u32 = 0x0010;
+    const BFFM_INITIALIZED: u32 = 0x0001;
+    const BFFM_SETSELECTIONW: u32 = 0x0467;
+    const MAX_PATH_LONG: usize = 1024;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(info: *mut BrowseInfoW) -> *mut core::ffi::c_void;
+        fn SHGetPathFromIDListW(pidl: *const core::ffi::c_void, path: *mut u16) -> i32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *mut core::ffi::c_void, flags: u32) -> i32;
+        fn CoTaskMemFree(ptr: *mut core::ffi::c_void);
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendMessageW(hwnd: Handle, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn MessageBoxW(hwnd: Handle, text: *const u16, caption: *const u16, utype: u32) -> i32;
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    extern "system" fn browse_callback(hwnd: Handle, msg: u32, _lp: usize, data: isize) -> i32 {
+        if msg == BFFM_INITIALIZED && data != 0 {
+            unsafe {
+                SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data);
+            }
+        }
+        0
+    }
+
+    /// Обычное окно Windows «выбери папку». Возвращает путь или None, если отменили.
+    pub fn pick_folder(start: &Path) -> Option<PathBuf> {
+        /* диалогу нужен COM: без него BIF_NEWDIALOGSTYLE не открывается */
+        unsafe {
+            CoInitializeEx(std::ptr::null_mut(), 0x2);
+        }
+        let title = wide("Куда установить OmniPanel");
+        let mut start_wide = wide(&start.display().to_string());
+        let mut buffer = [0u16; MAX_PATH_LONG];
+        let mut info = BrowseInfoW {
+            owner: std::ptr::null_mut(),
+            root: std::ptr::null(),
+            display_name: buffer.as_mut_ptr(),
+            title: title.as_ptr(),
+            flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
+            callback: Some(browse_callback),
+            callback_data: start_wide.as_mut_ptr() as isize,
+            image: 0,
+        };
+        unsafe {
+            let pidl = SHBrowseForFolderW(&mut info);
+            if pidl.is_null() {
+                return None;
+            }
+            let ok = SHGetPathFromIDListW(pidl, buffer.as_mut_ptr());
+            CoTaskMemFree(pidl);
+            if ok == 0 {
+                return None;
+            }
+        }
+        let len = buffer.iter().position(|c| *c == 0).unwrap_or(0);
+        if len == 0 {
+            return None;
+        }
+        Some(PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
+    }
+
+    /// Вопрос с кнопками «Да / Нет».
+    pub fn ask(text: &str) -> bool {
+        let body = wide(text);
+        let caption = wide("OmniPanel");
+        const MB_YESNO: u32 = 0x0004;
+        const MB_ICONQUESTION: u32 = 0x20;
+        const IDYES: i32 = 6;
+        let answer = unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                body.as_ptr(),
+                caption.as_ptr(),
+                MB_YESNO | MB_ICONQUESTION,
+            )
+        };
+        answer == IDYES
+    }
+}
+
+/// Установка обычными окнами Windows: выбрать папку → поставить → предложить запуск.
+#[cfg(windows)]
+fn native_install(reason: &str) -> Result<(), String> {
+    log_line(&format!("перехожу на окна Windows: {}", reason));
+    let start = default_dir();
+
+    /* мастер не открылся — говорим причину прямо на экране, без журнала */
+    if !reason.is_empty() {
+        msgbox(&format!(
+            "Мастер установки не открылся.\n\nПричина: {}\n\nСейчас выберу папку обычным окном Windows.",
+            reason
+        ));
+    }
+
+    let Some(dir) = win::pick_folder(&start) else {
+        log_line("папку не выбрали — установка отменена");
+        return Ok(());
+    };
+    log_line(&format!("выбрана папка: {}", dir.display()));
+
+    match install_into(&dir, true, false) {
+        Ok(()) => {
+            let text = format!(
+                "Панель установлена в:\n{}\n\nЗапустить её сейчас?",
+                dir.display()
+            );
+            if win::ask(&text) {
+                if let Err(err) = launch(&app_exe(&dir), &dir) {
+                    let _ = err;
+                    log_line("не удалось запустить панель после установки");
+                    msgbox(&format!(
+                        "Панель установлена, но запустить её не удалось.\n\nОткрой вручную:\n{}",
+                        app_exe(&dir).display()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Err(err) => {
+            log_line(&format!("установка не удалась: {}", err));
+            msgbox(&format!(
+                "OmniPanel не удалось установить в:\n{}\n\n{}\n\nЖурнал: {}",
+                dir.display(),
+                err,
+                log_path().display()
+            ));
+            Err(err)
+        }
+    }
+}
+
 /// Версия сборки — из Cargo.toml, её пишет скрипт сборки перед компиляцией.
 fn setup_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Журнал установки во временной папке: если окно не открылось или установка
-/// сорвалась, по нему видно, на каком шаге это случилось.
+/// Куда писать журнал: временная папка, папка рядом с установщиком и
+/// %LOCALAPPDATA%. Раньше журнала могло не быть вовсе — писали только в Temp.
+pub fn log_paths() -> Vec<PathBuf> {
+    let mut paths = vec![std::env::temp_dir().join("omnipanel-setup.log")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("OmniPanel-установка.log"));
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        paths.push(PathBuf::from(local).join("OmniPanel-setup.log"));
+    }
+    paths
+}
+
+/// Первый журнал, который реально получилось создать (его и показываем людям).
 pub fn log_path() -> PathBuf {
-    std::env::temp_dir().join("omnipanel-setup.log")
+    log_paths()
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| std::env::temp_dir().join("omnipanel-setup.log"))
 }
 
 pub fn log_line(text: &str) {
+    use std::io::Write;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "[{}] {}", stamp, text);
+    let mut written = false;
+    for path in log_paths() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            if writeln!(file, "[{}] {}", stamp, text).is_ok() {
+                written = true;
+            }
+        }
+    }
+    if !written {
+        eprintln!("[{}] {}", stamp, text);
     }
 }
 
@@ -76,7 +269,10 @@ const TRAILER_LEN: u64 = 16;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
-    let _ = std::fs::remove_file(log_path());
+    /* журналы прошлого запуска убираем: нужен только свежий */
+    for path in log_paths() {
+        let _ = std::fs::remove_file(path);
+    }
     log_line(&format!(
         "OmniPanel установщик {} — запуск: {:?}",
         setup_version(),
@@ -487,30 +683,11 @@ fn wizard() -> Result<(), String> {
             }
         }
         let _ = std::fs::remove_file(&script);
-
-        /* Окно не открылось: не оставляем человека ни с чем. Ставим панель в
-           папку по умолчанию, запускаем и говорим, где журнал. */
-        log_line(&format!("мастер не открылся ({}) — ставлю без окна", last));
-        msgbox(&format!(
-            "Окно установки не открылось.\n\nПоставлю панель в папку по умолчанию:\n{}\n\nЖурнал: {}",
-            dir.display(),
-            log_path().display()
-        ));
-        match install_into(&dir, true, true) {
-            Ok(()) => {
-                log_line("панель установлена без окна и запущена");
-                Ok(())
-            }
-            Err(err) => {
-                log_line(&format!("установка без окна не удалась: {}", err));
-                msgbox(&format!(
-                    "OmniPanel не установился.\n\n{}\n\nЖурнал: {}",
-                    err,
-                    log_path().display()
-                ));
-                Err(err)
-            }
-        }
+        log_line(&format!("мастер через PowerShell не открылся: {}", last));
+        /* PowerShell недоступен или сценарий упал — работаем обычными окнами
+           Windows: выбор папки и вопрос о запуске. Пользователь всё равно
+           выбирает, куда ставить. */
+        native_install(&last)
     }
     #[cfg(not(windows))]
     install_into(&default_dir(), true, true)
@@ -538,13 +715,6 @@ fn install_and_run() -> Result<(), String> {
     /* Внутри есть панель — всегда показываем мастер: человек сам говорит,
        куда ставить. Раньше при уже установленной панели установщик молча
        запускал старую версию и ничего не обновлял. */
-    match payload_offset(&exe) {
-        Ok((offset, size)) => log_line(&format!(
-            "панель внутри есть: {} байт со смещения {}",
-            size, offset
-        )),
-        Err(err) => log_line(&format!("панели внутри нет: {}", err)),
-    }
     if payload_offset(&exe).is_ok() {
         return wizard();
     }

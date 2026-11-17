@@ -119,14 +119,14 @@ dependencies = [
 
 [[package]]
 name = "omnipanel-core"
-version = "1.31.0"
+version = "1.33.0"
 dependencies = [
  "ureq",
 ]
 
 [[package]]
 name = "omnipanel-setup"
-version = "1.31.0"
+version = "1.33.0"
 dependencies = [
  "omnipanel-core",
 ]
