@@ -422,3 +422,107 @@ fn обновление_и_удаление_сервера() {
     assert!(manager.servers().is_empty());
     assert!(!manager.remove("x"), "второй раз удалять нечего");
 }
+
+/* ───────── почему консоль молчала и почему сервер «не запускался» ───────── */
+
+#[test]
+fn у_строки_журнала_есть_уровень_и_время() {
+    /* Интерфейс красит строку по уровню (system / stdout / stderr) и печатает
+       время. Раньше событие несло только текст — строки приходили одинаково
+       серыми, а страница вообще их не получала. */
+    let dir = temp_dir("level");
+    let server = script(
+        &dir,
+        "both.sh",
+        "echo 'обычная строка'\necho 'ошибка в поток ошибок' >&2\nsleep 2\n",
+    );
+    let manager = Manager::new();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    manager.subscribe(move |e| sink.lock().unwrap().push(e));
+
+    let mut cfg = ServerConfig::new("lvl", "Уровни", server);
+    cfg.cwd = dir.to_string_lossy().to_string();
+    manager.add(cfg);
+    manager.start("lvl").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let seen = events.lock().unwrap().clone();
+        if seen.iter().any(|e| e.text.contains("ошибка в поток ошибок")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    manager.kill("lvl");
+    let collected = events.lock().unwrap().clone();
+
+    let system = collected.iter().find(|e| e.text.starts_with("Запуск:")).expect("строка запуска");
+    assert_eq!(system.level, "system", "у строки запуска свой уровень");
+    let out = collected.iter().find(|e| e.text == "обычная строка").expect("строка stdout");
+    assert_eq!(out.level, "stdout");
+    assert!(out.at > 0, "у строки есть время");
+    let err = collected.iter().find(|e| e.text.contains("ошибка в поток ошибок")).expect("строка stderr");
+    assert_eq!(err.level, "stderr", "ошибки видны отдельно");
+    let running = collected
+        .iter()
+        .find(|e| e.kind == EventKind::State && e.text == "running")
+        .expect("состояние running");
+    assert!(running.pid.is_some(), "в состоянии есть номер процесса");
+    assert!(running.started_at.is_some(), "в состоянии есть время запуска");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tps_приходит_своим_событием_а_не_состоянием() {
+    /* Раньше «tps 19.9» уходило как состояние сервера — плашка состояния
+       показывала «tps 19.9» вместо «работает». */
+    let dir = temp_dir("tps");
+    let server = script(&dir, "tps.sh", "echo 'TPS from last 1m, 5m, 15m: 19.9, 20.0, 20.0'\nsleep 2\n");
+    let manager = Manager::new();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    manager.subscribe(move |e| sink.lock().unwrap().push(e));
+
+    let mut cfg = ServerConfig::new("tps", "TPS", server);
+    cfg.cwd = dir.to_string_lossy().to_string();
+    manager.add(cfg);
+    manager.start("tps").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if events.lock().unwrap().iter().any(|e| e.kind == EventKind::Tps) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    manager.kill("tps");
+    let collected = events.lock().unwrap().clone();
+    let tps = collected.iter().find(|e| e.kind == EventKind::Tps).expect("событие TPS");
+    assert!(tps.text.trim().parse::<f64>().is_ok(), "в событии само значение: {}", tps.text);
+    assert!(
+        !collected
+            .iter()
+            .any(|e| e.kind == EventKind::State && e.text.starts_with("tps ")),
+        "TPS больше не приходит как состояние"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn запуск_с_несуществующей_папкой_объясняется_по_русски() {
+    /* Самая частая причина «сервер не запускается» после переноса панели на
+       другой диск: рабочей папки по старому пути больше нет. Раньше система
+       отвечала невнятной ошибкой, и в консоли (которая не обновлялась) не
+       было вообще ничего. */
+    let manager = Manager::new();
+    let mut cfg = ServerConfig::new("gone", "Нет папки", "java -jar server.jar nogui");
+    cfg.cwd = "/нет/такой/папки".to_string();
+    manager.add(cfg);
+
+    let error = manager.start("gone").unwrap_err();
+    assert!(error.contains("Рабочая папка не найдена"), "понятная причина: {error}");
+    assert_eq!(manager.state("gone"), ServerState::Stopped);
+    let logs = manager.logs("gone");
+    assert!(logs.iter().any(|l| l.contains("Рабочая папка не найдена")), "причина в журнале: {logs:?}");
+}

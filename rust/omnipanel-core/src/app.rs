@@ -527,8 +527,22 @@ impl App {
                 Ok(Value::Bool(true))
             }
             "logs" => {
-                let lines = self.manager.logs(&id);
-                Ok(Value::Arr(lines.into_iter().map(Value::Str).collect()))
+                /* История отдаётся в том же виде, что и живые строки:
+                   { t, m, s }. Раньше это были просто строки, и интерфейс
+                   показывал «undefined» вместо времени и текста. */
+                let lines = self.manager.log_lines(&id);
+                Ok(Value::Arr(
+                    lines
+                        .into_iter()
+                        .map(|line| {
+                            Value::obj(vec![
+                                ("t", Value::from(line.at)),
+                                ("m", Value::str(&line.text)),
+                                ("s", Value::str(line.kind_str())),
+                            ])
+                        })
+                        .collect(),
+                ))
             }
             "clearLogs" => {
                 self.manager.clear_logs(&id);

@@ -52,21 +52,75 @@ impl PanelServer {
 
         /* события серверов уходят в открытые страницы: лог, состояние, выход */
         let sink = Arc::clone(&listeners);
+        let panel = Arc::clone(&app);
         app.manager().subscribe(move |event| {
-            let kind = match event.kind {
-                crate::servers::EventKind::Log => "log",
-                crate::servers::EventKind::State => "state",
-                crate::servers::EventKind::Exit => "state",
-                crate::servers::EventKind::Error => "log",
-            };
-            let payload = Value::obj(vec![
-                ("id", Value::str(&event.id)),
-                ("line", Value::str(&event.text)),
-                ("state", Value::str(&event.text)),
-                ("at", Value::from(event.at)),
-            ])
-            .to_json();
-            broadcast(&sink, kind, &payload);
+            /* Формат событий — тот, который ждёт интерфейс.
+               Раньше в строке журнала уходило { line, state, at }, а страница
+               читает { entry: { t, m, s } }: строка журнала приходила как
+               undefined, обработчик падал, и консоль не обновлялась вовсе. */
+            use crate::servers::EventKind;
+            match event.kind {
+                EventKind::Log | EventKind::Error => {
+                    let payload = Value::obj(vec![
+                        ("id", Value::str(&event.id)),
+                        (
+                            "entry",
+                            Value::obj(vec![
+                                ("t", Value::from(event.at)),
+                                ("m", Value::str(&event.text)),
+                                (
+                                    "s",
+                                    Value::str(if event.level.is_empty() {
+                                        "stdout".to_string()
+                                    } else {
+                                        event.level.clone()
+                                    }),
+                                ),
+                            ]),
+                        ),
+                    ])
+                    .to_json();
+                    broadcast(&sink, "log", &payload);
+                }
+                EventKind::State | EventKind::Exit => {
+                    let state = if matches!(event.kind, EventKind::Exit) {
+                        "stopped".to_string()
+                    } else {
+                        event.text.clone()
+                    };
+                    let payload = Value::obj(vec![
+                        ("id", Value::str(&event.id)),
+                        ("state", Value::str(state)),
+                        (
+                            "pid",
+                            event.pid.map(|p| Value::from(p as u64)).unwrap_or(Value::Null),
+                        ),
+                        (
+                            "startedAt",
+                            event.started_at.map(Value::from).unwrap_or(Value::Null),
+                        ),
+                        ("at", Value::from(event.at)),
+                    ])
+                    .to_json();
+                    broadcast(&sink, "state", &payload);
+                }
+                EventKind::Tps => {
+                    let value: f64 = event.text.trim().parse().unwrap_or(0.0);
+                    let history: Vec<Value> = panel
+                        .manager()
+                        .tps_history(&event.id)
+                        .iter()
+                        .map(|point| point.to_json())
+                        .collect();
+                    let payload = Value::obj(vec![
+                        ("id", Value::str(&event.id)),
+                        ("tps", Value::Num(value)),
+                        ("history", Value::Arr(history)),
+                    ])
+                    .to_json();
+                    broadcast(&sink, "tps", &payload);
+                }
+            }
         });
 
         /* события панели (поиск серверов, шаги синхронизации, перенос папки)

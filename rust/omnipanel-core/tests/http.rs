@@ -660,3 +660,118 @@ fn страница_узнаёт_о_проверке_обновлений_при
     assert!(text.contains("event: upd:state"), "нет события проверки: {text}");
     assert!(text.contains("1.38.0"), "версия не передана: {text}");
 }
+
+/* ───────── консоль: строки журнала в том виде, в каком их ждёт страница ───────── */
+
+/// Открывает поток событий и собирает всё, что придёт за отведённое время.
+fn collect_events(port: u16, millis: u64) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(400)))
+        .unwrap();
+    stream
+        .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while std::time::Instant::now() < deadline {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(_) => {}
+        }
+    }
+    String::from_utf8_lossy(&buffer).to_string()
+}
+
+#[test]
+fn строки_журнала_приходят_в_том_виде_что_ждёт_страница() {
+    /* Интерфейс читает { id, entry: { t, m, s } }. Раньше ядро отправляло
+       { id, line, state, at } — entry был undefined, обработчик падал на
+       entry.m, и консоль не обновлялась вообще. */
+    let panel = start_panel();
+    let work = panel.dir.join("сервер");
+    fs::create_dir_all(&work).unwrap();
+    let script = work.join("run.sh");
+    fs::write(&script, "#!/bin/sh\necho 'Done (1.0s)!'\nsleep 5\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+    let id = server_with_dir(panel.port, &work);
+    /* сервер, который печатает строку и живёт дальше */
+    let cfg = format!(
+        r#"{{"name":"Тест","command":"{}","cwd":"{}"}}"#,
+        script.display(),
+        work.display()
+    );
+    request(panel.port, "PUT", &format!("/api/servers/{id}"), &cfg);
+
+    let stream = std::thread::spawn(move || collect_events(panel.port, 3000));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (_, body) = request(panel.port, "POST", &format!("/api/servers/{id}/start"), "");
+    assert!(body.contains("running"), "сервер не запустился: {body}");
+    let text = stream.join().unwrap();
+
+    assert!(text.contains("event: log"), "строк журнала нет вовсе: {text}");
+    assert!(text.contains("\"entry\":{"), "нет поля entry в строке журнала: {text}");
+    assert!(text.contains("\"m\":\"Запуск:"), "нет текста строки: {text}");
+    assert!(text.contains("\"s\":\"system\""), "нет уровня строки: {text}");
+    assert!(text.contains("Done (1.0s)!"), "вывод сервера не дошёл: {text}");
+    assert!(text.contains("event: state"), "нет события состояния: {text}");
+    assert!(!text.contains("\"line\":"), "остался старый формат: {text}");
+}
+
+#[test]
+fn история_журнала_состоит_из_записей_а_не_из_строк() {
+    /* Раньше /api/servers/<id>/logs отдавал массив строк — интерфейс рисовал
+       «undefined» вместо времени и текста. */
+    let panel = start_panel();
+    let work = panel.dir.join("сервер");
+    fs::create_dir_all(&work).unwrap();
+    let id = server_with_dir(panel.port, &work);
+    panel
+        .app
+        .invoke("server:logs", &[])
+        .err(); /* канал есть, аргументов не хватает — это не ошибка теста */
+
+    /* кладём строку в журнал тем же путём, что и запуск: через сообщение в никуда */
+    let (_, body) = request(panel.port, "GET", &format!("/api/servers/{id}/logs"), "");
+    assert_eq!(body.trim(), "[]", "журнал нового сервера пуст: {body}");
+
+    /* стартуем сервер, который сразу печатает, и читаем историю снова */
+    let script = work.join("run.sh");
+    fs::write(&script, "#!/bin/sh\necho 'строка истории'\nsleep 3\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).unwrap();
+    }
+    let cfg = format!(
+        r#"{{"name":"Тест","command":"{}","cwd":"{}"}}"#,
+        script.display(),
+        work.display()
+    );
+    let (_, _) = request(panel.port, "PUT", &format!("/api/servers/{id}"), &cfg);
+    request(panel.port, "POST", &format!("/api/servers/{id}/start"), "");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut body = String::new();
+    while std::time::Instant::now() < deadline {
+        let (_, answer) = request(panel.port, "GET", &format!("/api/servers/{id}/logs"), "");
+        body = answer;
+        if body.contains("строка истории") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(body.contains("\"m\":\"строка истории\""), "нет записи журнала: {body}");
+    assert!(body.contains("\"s\":\"stdout\""), "нет уровня строки: {body}");
+    assert!(!body.contains("\"["), "журнал всё ещё массив строк: {body}");
+}

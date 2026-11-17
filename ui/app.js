@@ -4143,20 +4143,43 @@ async function startWithPortCheck(id) {
   return true;
 }
 
+/** Показать причину, по которой запуск не удался: молча терять её нельзя. */
+function startFailure(res) {
+  if (res && res.ok === false && res.error) {
+    toast(`Не удалось запустить: ${res.error}`, 'err', 9000);
+    return true;
+  }
+  return false;
+}
+
 async function doStart(id) {
   if (!(await startWithPortCheck(id))) return;
   Sound.play('start');
-  await API.start(id);
+  let res = null;
+  try {
+    res = await API.start(id);
+  } catch (err) {
+    toast(`Не удалось запустить: ${err && err.message ? err.message : err}`, 'err', 9000);
+    return;
+  }
+  startFailure(res);
   setTimeout(refresh, 120);
 }
 async function doStop(id) {
   Sound.play('stop');
-  await API.stop(id);
+  await API.stop(id).catch((err) => toast(`Не удалось остановить: ${err && err.message ? err.message : err}`, 'err'));
   setTimeout(refresh, 120);
 }
 async function doRestart(id) {
   Sound.play('start');
-  await API.restart(id);
+  let res = null;
+  try {
+    res = await API.restart(id);
+  } catch (err) {
+    toast(`Не удалось перезапустить: ${err && err.message ? err.message : err}`, 'err', 9000);
+    return;
+  }
+  startFailure(res);
   setTimeout(refresh, 200);
 }
 

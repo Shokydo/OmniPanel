@@ -233,6 +233,8 @@ pub enum EventKind {
     State,
     Exit,
     Error,
+    /// Новое значение TPS: в интерфейсе у него своя подписка, а не «состояние».
+    Tps,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +243,12 @@ pub struct Event {
     pub kind: EventKind,
     pub text: String,
     pub at: u64,
+    /// Уровень строки журнала: `stdout`, `stderr`, `system`, `input`.
+    /// Интерфейс красит строку по нему — без уровня все строки серые.
+    pub level: String,
+    /// Для событий состояния: номер процесса и время запуска.
+    pub pid: Option<u32>,
+    pub started_at: Option<u64>,
 }
 
 type Handler = Arc<dyn Fn(Event) + Send + Sync>;
@@ -331,11 +339,28 @@ impl Manager {
     }
 
     fn emit(&self, id: &str, kind: EventKind, text: impl Into<String>) {
+        self.emit_with(id, kind, text, "", None, None);
+    }
+
+    /// Событие с подробностями: уровень строки, номер процесса, время запуска.
+    /// Всё это уже известно в момент отправки — берём без повторных замков.
+    fn emit_with(
+        &self,
+        id: &str,
+        kind: EventKind,
+        text: impl Into<String>,
+        level: &str,
+        pid: Option<u32>,
+        started_at: Option<u64>,
+    ) {
         let event = Event {
             id: id.to_string(),
             kind,
             text: text.into(),
             at: (self.inner.clock)(),
+            level: level.to_string(),
+            pid,
+            started_at,
         };
         for handler in self.inner.handlers.lock().unwrap().iter() {
             handler(event.clone());
@@ -525,15 +550,20 @@ impl Manager {
             }
             r.log.push(line.clone());
         }
-        self.emit(id, EventKind::Log, format!("{}", line.text));
-        let _ = line.kind_str();
+        let level = line.kind_str();
+        let text = line.text.clone();
+        self.emit_with(id, EventKind::Log, text, level, None, None);
     }
 
     fn set_state(&self, id: &str, state: ServerState) {
+        let mut pid = None;
+        let mut started_at = None;
         if let Some(rt) = self.inner.runtimes.lock().unwrap().get_mut(id) {
             rt.state = state;
+            pid = rt.pid;
+            started_at = rt.started_at;
         }
-        self.emit(id, EventKind::State, state.as_str());
+        self.emit_with(id, EventKind::State, state.as_str(), "", pid, started_at);
     }
 
     /// Запуск сервера. Ошибка настройки возвращается текстом, а не паникой.
@@ -559,6 +589,16 @@ impl Manager {
             r.encoding = None;
             r.tps = None;
             r.tps_history.clear();
+        }
+
+        /* Папки нет — говорим об этом до запуска: иначе система ответит
+           невнятным «не удалось запустить сервер» и причина останется загадкой. */
+        let work_dir = cfg.work_dir();
+        if !work_dir.trim().is_empty() && !std::path::Path::new(&work_dir).is_dir() {
+            let text = format!("Рабочая папка не найдена: {}", work_dir);
+            self.log(id, "system", &text);
+            self.set_state(id, ServerState::Stopped);
+            return Err(text);
         }
 
         let (program, args) = cfg.shell_command();
@@ -614,7 +654,14 @@ impl Manager {
             r.stdin = stdin;
             r.state = ServerState::Running;
         }
-        self.emit(id, EventKind::State, "running");
+        self.emit_with(
+            id,
+            EventKind::State,
+            "running",
+            "",
+            Some(pid),
+            Some((self.inner.clock)()),
+        );
 
         /* оба потока читаем одинаково — через один тип, иначе не собрать в один вектор */
         let mut readers: Vec<Box<dyn Read + Send>> = Vec::new();
@@ -691,7 +738,9 @@ impl Manager {
                 }
             }
             drop(rt);
-            self.emit(id, EventKind::State, format!("tps {}", value));
+            /* у TPS своя подписка в интерфейсе: раньше он приходил как
+               «состояние» и портил состояние сервера строкой «tps 19.9» */
+            self.emit(id, EventKind::Tps, format!("{}", value));
         }
     }
 

@@ -210,6 +210,36 @@ pub fn until_human(entry: &BanEntry) -> String {
     }
 }
 
+/// Первое число из куска строки: ` 19.9, 20.0` → 19.9.
+///
+/// Раньше здесь брались все цифры, точки и запятые подряд, и «19.9,» не
+/// превращалось в число: TPS с Paper (`TPS from last 1m, 5m, 15m: 19.9, …`)
+/// не читался никогда, график оставался пустым.
+fn first_number(text: &str) -> Option<f32> {
+    let mut number = String::new();
+    for symbol in text.trim_start().chars() {
+        if symbol.is_ascii_digit() || symbol == '.' {
+            number.push(symbol);
+        } else if symbol == ',' {
+            /* запятая — разделитель между значениями или десятичная (русская
+               запись): десятичную видно по тому, что после неё идут цифры без
+               другого разделителя */
+            let rest: String = text.trim_start().chars().skip(number.len() + 1).collect();
+            if number.is_empty() || rest.starts_with(|c: char| !c.is_ascii_digit()) {
+                break;
+            }
+            if number.contains('.') {
+                break;
+            }
+            number.push('.');
+        } else {
+            break;
+        }
+    }
+    let cleaned = number.trim_end_matches('.').to_string();
+    cleaned.parse().ok()
+}
+
 /// Первые числа TPS из строки сервера.
 ///
 /// Понимает Paper/Spigot (`TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0`),
@@ -219,32 +249,16 @@ pub fn parse_tps(line: &str) -> Option<f32> {
     if let Some(at) = lower.find("tps from last") {
         let tail = &line[at..];
         if let Some(colon) = tail.find(':') {
-            let numbers = &tail[colon + 1..];
-            let first: String = numbers
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
-                .collect();
-            return first.replace(',', ".").parse().ok();
+            return first_number(&tail[colon + 1..]);
         }
     }
     if let Some(at) = lower.find("mean tps:") {
-        let tail = &line[at + 9..];
-        let first: String = tail
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
-            .collect();
-        return first.replace(',', ".").parse().ok();
+        return first_number(&line[at + 9..]);
     }
     if lower.contains(" tps") {
         let trimmed = line.trim();
-        let first: String = trimmed
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
-            .collect();
-        if !first.is_empty() {
-            return first.replace(',', ".").parse().ok();
+        if trimmed.starts_with(|c: char| c.is_ascii_digit()) {
+            return first_number(trimmed);
         }
     }
     None

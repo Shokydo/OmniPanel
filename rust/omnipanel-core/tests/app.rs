@@ -194,7 +194,12 @@ fn запуск_и_логи_через_каналы() {
     let mut logs = Vec::new();
     while std::time::Instant::now() < deadline {
         let value = app.invoke("server:logs", &args(&[&id])).unwrap();
-        logs = value.as_arr().iter().map(|v| v.text()).collect();
+        /* история — такие же записи, как живые строки: { t, m, s } */
+        logs = value
+            .as_arr()
+            .iter()
+            .map(|v| v.get("m").map(|m| m.text()).unwrap_or_default())
+            .collect();
         if logs.iter().any(|l| l.contains("эхо: say привет")) {
             break;
         }
