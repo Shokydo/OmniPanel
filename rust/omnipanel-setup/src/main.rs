@@ -401,23 +401,8 @@ fn main() {
                 "панель там уже стоит: {}",
                 if app_exe(&dir).exists() { "да" } else { "нет" }
             ));
-            for shell in ["powershell", "pwsh"] {
-                let check = std::process::Command::new(shell)
-                    .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
-                    .output();
-                let verdict = match check {
-                    Ok(out) if out.status.success() => "есть",
-                    Ok(out) => {
-                        log_line(&format!("{}: код {:?}", shell, out.status.code()));
-                        "запускается с ошибкой"
-                    }
-                    Err(err) => {
-                        log_line(&format!("{}: {}", shell, err));
-                        "не найдена"
-                    }
-                };
-                lines.push(format!("{}: {}", shell, verdict));
-            }
+            /* PowerShell больше не нужен: окно, ярлыки и выбор папки — свои */
+            lines.push("PowerShell: не нужен".to_string());
             lines.push(String::new());
             lines.push(format!("Журнал: {}", log_path().display()));
             let report = lines.join("\n");
@@ -759,41 +744,38 @@ fn uninstall() -> Result<(), String> {
     forget_install();
     #[cfg(windows)]
     {
-        let script = "$s=(New-Object -ComObject WScript.Shell); \
-             foreach($p in @([Environment]::GetFolderPath('Desktop')+'\\OmniPanel.lnk', \
-             [Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')) {{ \
-             if (Test-Path $p) {{ Remove-Item $p -Force }} }}";
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .status();
+        let removed = omnipanel_core::shortcut::remove("OmniPanel.lnk");
+        log_line(&format!("ярлыков удалено: {}", removed));
     }
     Ok(())
 }
 
-/// Ярлыки на рабочем столе и в меню «Пуск» — через PowerShell, он есть всегда.
+/// Ярлыки на рабочем столе и в меню «Пуск» — своим кодом, без PowerShell.
+///
+/// Раньше их создавал PowerShell (`WScript.Shell`), и при установке мигало его
+/// окно. Теперь файл .lnk собирается по спецификации MS-SHLLINK (модуль
+/// `shortcut` ядра) — окно не появляется вовсе.
 #[cfg(windows)]
 pub fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
+    use omnipanel_core::shortcut;
     let exe = app_exe(dir);
-    /* меню «Пуск» — всегда, рабочий стол — если переключатель включён */
-    let targets = if desktop {
-        "@([Environment]::GetFolderPath('Desktop')+'\\OmniPanel.lnk', [Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')"
-    } else {
-        "@([Environment]::GetFolderPath('Programs')+'\\OmniPanel.lnk')"
-    };
-    let script = format!(
-        "$s=(New-Object -ComObject WScript.Shell); \
-         foreach($p in {}) {{ \
-         $l=$s.CreateShortcut($p); $l.TargetPath='{}'; $l.WorkingDirectory='{}'; \
-         $l.IconLocation='{},0'; $l.Save() }}",
-        targets,
-        exe.display(),
-        dir.display(),
-        exe.display()
-    );
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-        .status()
-        .map_err(|e| format!("не удалось создать ярлыки: {}", e))?;
+    let mut made = 0;
+
+    if desktop {
+        if let Some(desk) = shortcut::desktop_dir() {
+            shortcut::create(&desk.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
+            made += 1;
+        }
+    }
+    if let Some(programs) = shortcut::programs_dir() {
+        let folder = programs.join("OmniPanel");
+        shortcut::create(&folder.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
+        made += 1;
+    }
+    if made == 0 {
+        return Err("не найти папку рабочего стола и меню «Пуск»".to_string());
+    }
+    log_line(&format!("ярлыков создано: {}", made));
     Ok(())
 }
 
