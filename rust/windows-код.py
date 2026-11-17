@@ -22,6 +22,14 @@ import re
 import subprocess
 import sys
 
+# вывод в консоль Windows — в UTF-8: иначе кириллица в отчёте роняет скрипт
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
 ENV_WRAPPER = ROOT / "rustenv.sh"
 # чего ждём на Linux: в стандартной библиотеке нет std::os::windows::*
@@ -65,6 +73,10 @@ def real_errors(text):
 
 
 def main():
+    if sys.platform == "win32":
+        # на Windows код и так собирается по-настоящему — кросс-проверка не нужна
+        print("windows-код: не требуется (мы уже на Windows)")
+        return 0
     failed = False
     for crate, args in TARGETS:
         print(f"── {crate} ──")
