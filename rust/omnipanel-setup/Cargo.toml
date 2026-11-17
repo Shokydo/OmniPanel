@@ -1,6 +1,6 @@
 [package]
 name = "omnipanel-setup"
-version = "1.35.0"
+version = "1.36.0"
 edition = "2021"
 description = "Установщик OmniPanel на Rust: один exe с панелью внутри"
 
@@ -18,3 +18,8 @@ eframe = { version = "0.33", default-features = false, features = [
     "wayland",
 ] }
 omnipanel-core = { path = "../omnipanel-core" }
+
+# Иконка и сведения о файле для установщика и деинсталлятора: без секции
+# ресурсов Windows показывает у exe стандартный значок.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

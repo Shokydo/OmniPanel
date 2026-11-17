@@ -154,6 +154,10 @@ body.no-fx .wc { transition: none; }
 .btn-danger:hover { background: var(--inv-bg); border-color: var(--inv-bg); color: var(--inv-fg); }
 
 /* эффект от клика прямо на экране */
+/* частицы и след за курсором: один canvas над панелью, мышь не ловит */
+.fx-canvas { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
+body.no-fx .fx-canvas { display: none; }
+
 .fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 900; overflow: hidden; }
 .cfx {
   position: absolute; display: block; pointer-events: none;

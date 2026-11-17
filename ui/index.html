@@ -1280,6 +1280,41 @@
           </div>
 
           <div class="field">
+            <span class="lbl">Частицы на фоне</span>
+            <div id="ambientGrid" class="chip-grid">
+              <button class="chip" data-ambient="snow">Снег</button>
+              <button class="chip" data-ambient="stars">Звёзды</button>
+              <button class="chip" data-ambient="dust">Пыль</button>
+              <button class="chip" data-ambient="sticks">Палочки</button>
+              <button class="chip" data-ambient="off">Без частиц</button>
+            </div>
+            <div class="fx-grid">
+              <label class="fx-item"><span>Плотность</span><input id="fxDensity" type="range" min="30" max="200" value="100" /><b id="fxDensityVal">100%</b></label>
+              <label class="fx-item"><span>Видимость</span><input id="fxAmbientOp" type="range" min="5" max="100" value="80" /><b id="fxAmbientOpVal">80%</b></label>
+              <label class="fx-item"><span>Размер</span><input id="fxSize" type="range" min="60" max="220" value="100" /><b id="fxSizeVal">100%</b></label>
+              <label class="fx-item"><span>Цвет частиц</span><input id="fxAmbientColor" type="color" value="#e8e8ea" /><button id="fxAmbientColorReset" class="btn btn-mini btn-ghost">как в теме</button></label>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="lbl">След за курсором</span>
+            <label class="check"><input id="pTrail" type="checkbox" /><span>След за курсором</span></label>
+            <div id="trailGrid" class="chip-grid">
+              <button class="chip" data-trail="sparks">Искры</button>
+              <button class="chip" data-trail="line">Линия</button>
+              <button class="chip" data-trail="brush">Кисть</button>
+              <button class="chip" data-trail="glow">Свечение</button>
+              <button class="chip" data-trail="off">Без следа</button>
+            </div>
+            <div class="fx-grid">
+              <label class="fx-item"><span>Размер кисти</span><input id="fxTrailSize" type="range" min="40" max="300" value="60" /><b id="fxTrailSizeVal">60%</b></label>
+              <label class="fx-item"><span>Длина следа</span><input id="fxTrailLen" type="range" min="40" max="300" value="40" /><b id="fxTrailLenVal">40%</b></label>
+              <label class="fx-item"><span>Видимость</span><input id="fxTrailOp" type="range" min="5" max="100" value="35" /><b id="fxTrailOpVal">35%</b></label>
+              <label class="fx-item"><span>Цвет следа</span><input id="fxTrailColor" type="color" value="#8ab4ff" /><button id="fxTrailColorReset" class="btn btn-mini btn-ghost">как в теме</button></label>
+            </div>
+          </div>
+
+          <div class="field">
             <span class="lbl">Анимации</span>
             <label class="check"><input id="pFx" type="checkbox" /><span>Эффекты интерфейса</span></label>
             <label class="check"><input id="pColors" type="checkbox" /><span>Цветные уровни в консоли</span></label>

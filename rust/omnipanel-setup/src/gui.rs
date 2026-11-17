@@ -17,8 +17,9 @@ use eframe::egui;
 use egui::{Color32, FontId, RichText, Stroke};
 
 use crate::{
-    app_exe, check_dir, default_dir, free_space_note, launch, log_line, payload_offset,
-    remember_install, setup_version, shortcuts, stop_running_panel, unpack,
+    app_exe, check_dir, default_dir, free_space_note, install_target, launch, log_line,
+    payload_offset, remember_install, setup_version, shortcuts, stop_running_panel,
+    uninstall_from, unpack, UNINSTALL_EXE,
 };
 
 /* ───────────────────────── чёрно-белая палитра ───────────────────────── */
@@ -148,6 +149,10 @@ enum Screen {
     Done,
     AlreadyInstalled,
     Failed,
+    /// Подтверждение удаления (кнопка «Удалить» или Uninstall.exe).
+    UninstallAsk,
+    Uninstalling,
+    Uninstalled,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -163,9 +168,14 @@ enum Msg {
     Ok(usize, String),
     Fail(usize, String),
     Finished(Result<(), String>),
+    /// Итог удаления: что именно убрали (или почему не вышло).
+    Uninstalled(Result<String, String>),
 }
 
 struct Setup {
+    /// Что человек выбрал в окне папки. Папка установки может быть на уровень
+    /// глубже: выбрали `D:\` — панель встанет в `D:\OmniPanel`.
+    chosen: PathBuf,
     dir: PathBuf,
     picking: bool,
     pick_dir: PathBuf,
@@ -178,23 +188,36 @@ struct Setup {
     error: Option<String>,
     dir_note: String,
     spinner: usize,
+    /// При удалении стереть ещё и серверы, миры и настройки.
+    remove_data: bool,
+    uninstall_note: Option<String>,
 }
 
 impl Setup {
     fn new() -> Self {
-        let dir = default_dir();
+        Self::with_dir(default_dir(), None)
+    }
+
+    /// Окно деинсталлятора: та же логика, но сразу экран удаления.
+    fn uninstall_mode(dir: PathBuf) -> Self {
+        Self::with_dir(dir, Some(Screen::UninstallAsk))
+    }
+
+    fn with_dir(chosen: PathBuf, screen: Option<Screen>) -> Self {
+        let dir = install_target(&chosen);
         let installed = app_exe(&dir).exists();
         Self {
+            chosen,
             pick_dir: dir.clone(),
             pick_input: dir.display().to_string(),
             pick_dirs: Vec::new(),
             pick_error: None,
             picking: false,
-            screen: if installed {
+            screen: screen.unwrap_or(if installed {
                 Screen::AlreadyInstalled
             } else {
                 Screen::Offer
-            },
+            }),
             steps: STEPS
                 .iter()
                 .map(|name| (StepState::Waiting, (*name).to_string()))
@@ -203,6 +226,8 @@ impl Setup {
             error: None,
             dir_note: free_space_note(&dir),
             spinner: 0,
+            remove_data: false,
+            uninstall_note: None,
             dir,
         }
     }
@@ -286,6 +311,27 @@ impl Setup {
         });
     }
 
+    /* ───────────────────────── удаление ───────────────────────── */
+
+    fn start_uninstall(&mut self) {
+        self.screen = Screen::Uninstalling;
+        self.uninstall_note = None;
+        self.steps = STEPS
+            .iter()
+            .map(|name| (StepState::Waiting, (*name).to_string()))
+            .collect();
+        let dir = self.dir.clone();
+        let keep_data = !self.remove_data;
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        log_line(&format!("окно: удаляю панель из {}", dir.display()));
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Begin(0));
+            let result = uninstall_from(&dir, keep_data);
+            let _ = tx.send(Msg::Uninstalled(result));
+        });
+    }
+
     fn pump(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.rx else { return };
         let mut finished = false;
@@ -308,6 +354,19 @@ impl Setup {
                         item.1 = format!("{} — {note}", STEPS[step]);
                     }
                 }
+                Msg::Uninstalled(result) => {
+                    finished = true;
+                    /* после удаления папки панели файла Uninstall.exe уже нет:
+                       кнопка «Закрыть» просто закрывает окно */
+                    match result {
+                        Ok(note) => self.uninstall_note = Some(note),
+                        Err(error) => {
+                            log_line(&format!("окно: удаление не удалось — {}", error));
+                            self.uninstall_note = Some(error);
+                        }
+                    }
+                    self.screen = Screen::Uninstalled;
+                }
                 Msg::Finished(result) => {
                     finished = true;
                     match result {
@@ -324,7 +383,7 @@ impl Setup {
         if finished {
             self.rx = None;
         }
-        if self.screen == Screen::Installing {
+        if self.screen == Screen::Installing || self.screen == Screen::Uninstalling {
             self.spinner = self.spinner.wrapping_add(1);
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -456,6 +515,20 @@ impl Setup {
                 self.pick_open();
             }
         });
+        if self.chosen != self.dir {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(mono(format!(
+                    "  {:<LABEL$}",
+                    "Выбрано:"
+                )));
+                ui.label(mono_color(
+                    format!("{}", self.chosen.display()),
+                    DIM,
+                ));
+                ui.label(mono_color("— папка OmniPanel создастся внутри", DIM2));
+            });
+        }
     }
 
     /* ───────────── выбор папки внутри окна ───────────── */
@@ -604,11 +677,17 @@ impl Setup {
             self.pick_goto(path);
         }
         if choose {
-            /* и папку внутри неё: путь в поле — это папка установки целиком */
-            self.dir = self.pick_dir.clone();
+            self.chosen = self.pick_dir.clone();
+            /* выбрали корень диска — панель встанет в папку OmniPanel внутри */
+            self.dir = install_target(&self.chosen);
             self.pick_input = self.dir.display().to_string();
             self.picking = false;
             self.refresh_note();
+            log_line(&format!(
+                "выбрано: {} → панель встанет в {}",
+                self.chosen.display(),
+                self.dir.display()
+            ));
         }
         if cancel {
             self.picking = false;
@@ -701,6 +780,11 @@ impl Setup {
         self.blank(ui, 8.0);
         self.key_value(ui, "Папка:", &self.dir.display().to_string());
         self.key_value(ui, "Запуск:", &app_exe(&self.dir).display().to_string());
+        self.key_value(
+            ui,
+            "Удаление:",
+            &self.dir.join(UNINSTALL_EXE).display().to_string(),
+        );
         self.blank(ui, 10.0);
         self.steps_block(ui);
         self.blank(ui, 14.0);
@@ -759,6 +843,9 @@ impl Setup {
             if self.button(ui, "Другая папка", false, true).clicked() {
                 self.pick_open();
             }
+            if self.button(ui, "Удалить", false, true).clicked() {
+                self.screen = Screen::UninstallAsk;
+            }
             if self.button(ui, "Закрыть", false, true).clicked() {
                 self.close(ctx);
             }
@@ -766,6 +853,79 @@ impl Setup {
         if !self.picking && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.close(ctx);
         }
+    }
+
+    fn uninstall_ask(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        self.blank(ui, 10.0);
+        self.strong_line(ui, "  Удалить OmniPanel?");
+        self.blank(ui, 8.0);
+        self.key_value(ui, "Удаляю из:", &self.dir.display().to_string());
+        self.blank(ui, 10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if self
+                .button(ui, if self.remove_data { "[x]" } else { "[ ]" }, false, true)
+                .clicked()
+            {
+                self.remove_data = !self.remove_data;
+            }
+            ui.label(mono_color("удалить ещё серверы, миры и настройки", TEXT));
+        });
+        self.blank(ui, 10.0);
+        self.body_line(ui, "  Файлы панели и ярлыки убираются в любом случае.");
+        if !self.remove_data {
+            self.body_line(ui, "  Серверы и миры останутся в папке OmniPanelData —");
+            self.body_line(ui, "  их можно будет вернуть, поставив панель заново.");
+        }
+        self.blank(ui, 14.0);
+        self.rule(ui);
+        self.blank(ui, 10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if self.button(ui, "Удалить", true, true).clicked() {
+                self.start_uninstall();
+            }
+            if self.button(ui, "Отмена", false, true).clicked() {
+                /* вернуться туда, откуда пришли */
+                self.screen = if app_exe(&self.dir).exists() {
+                    Screen::AlreadyInstalled
+                } else {
+                    Screen::Offer
+                };
+            }
+        });
+    }
+
+    fn uninstalling(&mut self, ui: &mut egui::Ui) {
+        self.blank(ui, 10.0);
+        self.key_value(ui, "Удаляю из:", &self.dir.display().to_string());
+        self.blank(ui, 14.0);
+        self.steps_block(ui);
+        self.blank(ui, 14.0);
+        self.rule(ui);
+        self.blank(ui, 10.0);
+        ui.label(mono_color("  Секунду…", DIM));
+    }
+
+    fn uninstalled(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.blank(ui, 10.0);
+        self.strong_line(ui, "  Удалено.");
+        self.blank(ui, 8.0);
+        if let Some(note) = &self.uninstall_note {
+            self.body_line(ui, &format!("  {}", note));
+            self.blank(ui, 6.0);
+        }
+        self.body_line(ui, "  Ярлыки убраны, запись в реестре стёрта.");
+        self.body_line(ui, "  Папка панели удалена, Uninstall.exe доудалится сам.");
+        self.blank(ui, 14.0);
+        self.rule(ui);
+        self.blank(ui, 10.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if self.button(ui, "Закрыть", true, true).clicked() {
+                self.close(ctx);
+            }
+        });
     }
 
     fn failed(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -818,6 +978,9 @@ impl eframe::App for Setup {
                     Screen::Done => self.done(ui, ctx),
                     Screen::AlreadyInstalled => self.already(ui, ctx),
                     Screen::Failed => self.failed(ui, ctx),
+                    Screen::UninstallAsk => self.uninstall_ask(ui, ctx),
+                    Screen::Uninstalling => self.uninstalling(ui),
+                    Screen::Uninstalled => self.uninstalled(ui, ctx),
                 });
             });
 
@@ -827,10 +990,24 @@ impl eframe::App for Setup {
 
 /* ───────────────────────── запуск окна ───────────────────────── */
 
+/// Окно деинсталлятора: тот же дизайн, но сразу вопрос об удалении.
+pub fn run_uninstall(dir: PathBuf) -> eframe::Result {
+    run_window(format!("OmniPanel — удаление"), move || {
+        Setup::uninstall_mode(dir.clone())
+    })
+}
+
 pub fn run() -> eframe::Result {
+    run_window(format!("OmniPanel {} — установка", setup_version()), Setup::new)
+}
+
+fn run_window<F>(title: String, make: F) -> eframe::Result
+where
+    F: Fn() -> Setup + 'static,
+{
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(format!("OmniPanel {} — установка", setup_version()))
+            .with_title(title)
             .with_inner_size([880.0, 620.0])
             .with_min_inner_size([720.0, 520.0]),
         centered: true,
@@ -838,11 +1015,11 @@ pub fn run() -> eframe::Result {
     };
 
     eframe::run_native(
-        "OmniPanel — установка",
+        "OmniPanel",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             install_style(&cc.egui_ctx);
-            Ok(Box::new(Setup::new()))
+            Ok(Box::new(make()))
         }),
     )
 }

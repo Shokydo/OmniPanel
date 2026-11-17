@@ -21,7 +21,7 @@ on:
       version:
         description: 'Версия сборки (например 1.27.0)'
         required: false
-        default: '1.35.0'
+        default: '1.36.0'
       release:
         description: 'Опубликовать релиз с установщиком'
         type: boolean
@@ -78,11 +78,15 @@ jobs:
         working-directory: rust/omnipanel-core
         run: cargo test --release
 
+      - name: Проверить эффекты панели
+        shell: pwsh
+        run: node ui/fx-test.js
+
       - name: Собрать окно, портативную версию и установщик
         shell: pwsh
         run: |
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.35.0" }
+          if (-not $version) { $version = "1.36.0" }
           # PowerShell 7 читает UTF-8 без вопросов; у скрипта к тому же есть BOM,
           # чтобы он работал и в Windows PowerShell 5.1 на вашей машине
           pwsh -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z
@@ -108,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.35.0" }
+          if (-not $version) { $version = "1.36.0" }
           $tag = "v$version"
           # gh на Windows теряет кириллицу в имени ассета — грузим под латинским
           $setup = "dist/OmniPanel-Setup-$version.exe"

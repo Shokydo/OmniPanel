@@ -164,6 +164,59 @@ mod win {
     }
 }
 
+/// Итоговая папка установки по выбору человека.
+///
+/// Выбрали корень диска (`D:\`) — панель кладётся в новую папку `OmniPanel`
+/// внутри него: иначе файлы панели рассыпались бы по корню диска. Выбрали
+/// конкретную папку — ставим ровно в неё, как человек и просил.
+///
+/// Проверка корня идёт по тексту пути, а не через `Path::parent`: так правило
+/// одинаково работает и проверяется тестами на любой системе.
+pub fn install_target(chosen: &Path) -> PathBuf {
+    let text = chosen.display().to_string();
+    if text.trim().is_empty() {
+        return chosen.to_path_buf();
+    }
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    let letters: Vec<char> = trimmed.chars().collect();
+    /* «D:» и «D:\» — корень диска; «\», «/», "" — корень файловой системы */
+    if letters.len() == 2 && letters[1] == ':' && letters[0].is_ascii_alphabetic() {
+        return PathBuf::from(format!("{}{}OmniPanel", trimmed, std::path::MAIN_SEPARATOR));
+    }
+    if letters.is_empty() {
+        /* «/», «\», «\\» — корень файловой системы */
+        return chosen.join("OmniPanel");
+    }
+    /* обычная папка: ставим ровно туда, куда показал человек */
+    chosen.to_path_buf()
+}
+
+/// Имя файла деинсталлятора рядом с панелью.
+pub const UNINSTALL_EXE: &str = "Uninstall.exe";
+
+/// Кладёт рядом с панелью свой деинсталлятор: `Uninstall.exe`.
+///
+/// Это копия установщика без встроенной панели: она умеет только удалять и
+/// занимает меньше. Нужна, чтобы панель можно было убрать без установщика —
+/// скачанный `OmniPanel-Setup-….exe` люди обычно удаляют сразу.
+pub fn write_uninstaller(dir: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let head_len = match payload_offset(&exe) {
+        Ok((offset, _)) => offset as usize,
+        Err(_) => std::fs::metadata(&exe).map(|m| m.len() as usize).unwrap_or(0),
+    };
+    let bytes = std::fs::read(&exe).map_err(|e| format!("не прочитать установщик: {}", e))?;
+    let target = dir.join(UNINSTALL_EXE);
+    std::fs::write(&target, &bytes[..head_len.min(bytes.len())])
+        .map_err(|e| format!("не записать {}: {}", target.display(), e))?;
+    log_line(&format!(
+        "деинсталлятор записан: {} ({} КБ)",
+        target.display(),
+        head_len / 1024
+    ));
+    Ok(())
+}
+
 /// Свободное место — короткой строкой для окна установщика.
 pub fn free_space_note(dir: &Path) -> String {
     #[cfg(windows)]
@@ -344,6 +397,30 @@ fn main() {
         args
     ));
 
+    /* этот же exe работает деинсталлятором: так «Uninstall.exe» рядом с
+       панелью — маленькая копия установщика без встроенной панели */
+    if is_uninstaller(&command) {
+        let dir = args
+            .iter()
+            .skip(1)
+            .find(|arg| !arg.starts_with("--"))
+            .map(PathBuf::from)
+            .unwrap_or_else(default_dir);
+        log_line(&format!("режим удаления, папка {}", dir.display()));
+        match gui::run_uninstall(dir) {
+            Ok(()) => {}
+            Err(err) => {
+                let reason = format!("окно удаления не открылось: {}", err);
+                log_line(&reason);
+                match uninstall_from(&default_dir(), true) {
+                    Ok(note) => msgbox(&format!("OmniPanel удалён: {}", note)),
+                    Err(err) => fail(&format!("{}\n{}", reason, err)),
+                }
+            }
+        }
+        return;
+    }
+
     match command {
         "--append" => {
             /* используется сборкой: дописать архив к готовому exe */
@@ -372,9 +449,18 @@ fn main() {
                 Err(err) => fail(&err),
             }
         }
-        "--uninstall" => match uninstall() {
-            Ok(()) => println!("OmniPanel удалён"),
-            Err(err) => fail(&err),
+        "--uninstall" => {
+            /* папку можно передать аргументом, иначе берём запомненную */
+            let dir = args
+                .get(2)
+                .filter(|arg| !arg.starts_with("--"))
+                .map(PathBuf::from)
+                .unwrap_or_else(default_dir);
+            let keep_data = args.iter().any(|a| a == "--keep-data");
+            match uninstall_from(&dir, keep_data) {
+                Ok(note) => println!("OmniPanel удалён: {}", note),
+                Err(err) => fail(&err),
+            }
         },
         "--default-dir" => println!("{}", default_dir().display()),
         /* диагностика: если окно не открывается, видно, что установщик видит */
@@ -444,6 +530,18 @@ fn main() {
             }
         }
     }
+}
+
+/// Запущен ли этот exe как деинсталлятор: по имени файла или по флагу.
+fn is_uninstaller(command: &str) -> bool {
+    if command == "--uninstall-window" {
+        return true;
+    }
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    name.starts_with("uninstall") || name.starts_with("удал")
 }
 
 fn fail(message: &str) -> ! {
@@ -667,6 +765,10 @@ pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> 
     let count = unpack(&exe, dir)?;
     log_line(&format!("распаковано файлов: {} → {}", count, dir.display()));
     shortcuts(dir, desktop)?;
+    if let Err(err) = write_uninstaller(dir) {
+        /* без деинсталлятора панель работает — это замечание, не провал */
+        log_line(&format!("деинсталлятор не записался: {}", err));
+    }
     remember_install(dir);
     println!("распаковано файлов: {}", count);
     if run {
@@ -722,61 +824,114 @@ pub fn launch(exe: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn uninstall() -> Result<(), String> {
-    let dir = default_dir();
+/// Удаляет панель из папки.
+///
+/// `keep_data` — оставить серверы, миры и настройки (папка `OmniPanelData`),
+/// чтобы после новой установки всё было на месте. Себя деинсталлятор удалить
+/// не может: Windows не даёт стирать работающий файл — поэтому он уходит
+/// следом, через отдельный `cmd` без окна.
+pub fn uninstall_from(dir: &Path, keep_data: bool) -> Result<String, String> {
     if !dir.exists() {
-        return Err("панель не установлена".to_string());
+        return Err(format!(
+            "папка {} не найдена — возможно, панель уже удалена",
+            dir.display()
+        ));
     }
-    /* панель может работать — закрываем её, иначе Windows не даст удалить файлы */
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "omnipanel-core.exe", "/F"])
-            .status();
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "omnipanel.exe", "/F"])
-            .status();
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "OmniPanel.exe", "/F"])
-            .status();
-    }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("не удалить {}: {}", dir.display(), e))?;
-    forget_install();
+    stop_running_panel();
+    log_line(&format!(
+        "удаляю панель из {} (данные {})",
+        dir.display(),
+        if keep_data { "оставляю" } else { "тоже удаляю" }
+    ));
+
     #[cfg(windows)]
     {
         let removed = omnipanel_core::shortcut::remove("OmniPanel.lnk");
         log_line(&format!("ярлыков удалено: {}", removed));
     }
-    Ok(())
-}
+    forget_install();
 
-/// Ярлыки на рабочем столе и в меню «Пуск» — своим кодом, без PowerShell.
-///
-/// Раньше их создавал PowerShell (`WScript.Shell`), и при установке мигало его
-/// окно. Теперь файл .lnk собирается по спецификации MS-SHLLINK (модуль
-/// `shortcut` ядра) — окно не появляется вовсе.
-#[cfg(windows)]
-pub fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
-    use omnipanel_core::shortcut;
-    let exe = app_exe(dir);
-    let mut made = 0;
-
-    if desktop {
-        if let Some(desk) = shortcut::desktop_dir() {
-            shortcut::create(&desk.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
-            made += 1;
+    let me = std::env::current_exe().ok();
+    let mut self_path: Option<PathBuf> = None;
+    let mut data_kept = false;
+    let mut removed = 0usize;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("не прочитать {}: {}", dir.display(), e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        /* данные серверов: папка рядом с панелью */
+        if keep_data && (name == "omnipaneldata" || name == "localpaneldata") {
+            data_kept = true;
+            continue;
+        }
+        /* сам деинсталлятор трогать нельзя — он ещё работает */
+        if let Some(current) = &me {
+            if same_path(&path, current) {
+                self_path = Some(path);
+                continue;
+            }
+        }
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) => return Err(format!("не удалить {}: {}", path.display(), err)),
         }
     }
-    if let Some(programs) = shortcut::programs_dir() {
-        let folder = programs.join("OmniPanel");
-        shortcut::create(&folder.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
-        made += 1;
+    log_line(&format!("удалено файлов и папок: {}", removed));
+    schedule_self_cleanup(self_path.as_deref(), dir, data_kept);
+
+    let mut note = format!("удалено объектов: {}", removed);
+    if data_kept {
+        note.push_str(&format!(
+            "; серверы и настройки остались в {}",
+            dir.join("OmniPanelData").display()
+        ));
     }
-    if made == 0 {
-        return Err("не найти папку рабочего стола и меню «Пуск»".to_string());
+    Ok(note)
+}
+
+/// Один и тот же ли это путь (на Windows регистр не важен).
+fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// Просит cmd доудалить деинсталлятор и опустевшую папку после выхода.
+fn schedule_self_cleanup(self_path: Option<&Path>, dir: &Path, keep_dir: bool) {
+    let Some(me) = self_path else { return };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        /* пауза нужна, чтобы процесс завершился и отпустил файл */
+        let mut script = format!("ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", me.display());
+        if !keep_dir {
+            script.push_str(&format!(" & rmdir \"{}\"", dir.display()));
+        }
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", &script]).creation_flags(CREATE_NO_WINDOW);
+        match command.spawn() {
+            Ok(_) => log_line("деинсталлятор доудалит себя сам"),
+            Err(err) => log_line(&format!("не удалось запустить самоудаление: {}", err)),
+        }
     }
-    log_line(&format!("ярлыков создано: {}", made));
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        let _ = keep_dir;
+        let _ = std::fs::remove_file(me);
+        let _ = std::fs::remove_dir(dir);
+    }
 }
 
 #[cfg(not(windows))]
@@ -938,5 +1093,73 @@ mod tests {
     fn свободное_место_описывается_строкой() {
         let note = free_space_note(&std::env::temp_dir());
         assert!(!note.is_empty());
+    }
+
+    #[test]
+    fn корень_диска_получает_папку_панели() {
+        /* выбрали D:\ — панель встанет в D:\OmniPanel, а не в корень диска */
+        let target = install_target(Path::new("D:\\"));
+        assert!(target.ends_with("OmniPanel"), "{target:?}");
+        assert!(target.display().to_string().starts_with("D:"), "{target:?}");
+        /* «D:» без слэша — тот же корень */
+        let bare = install_target(Path::new("D:"));
+        assert!(bare.display().to_string().starts_with("D:"), "{bare:?}");
+        assert!(bare.ends_with("OmniPanel"), "{bare:?}");
+        /* корень файловой системы */
+        assert_eq!(install_target(Path::new("/")), PathBuf::from("/OmniPanel"));
+        /* выбрали конкретную папку — ставим ровно в неё, без подпапок */
+        assert_eq!(
+            install_target(Path::new("D:\\Игры\\Моя панель")),
+            PathBuf::from("D:\\Игры\\Моя панель")
+        );
+        assert_eq!(install_target(Path::new("")), PathBuf::from(""));
+    }
+
+    #[test]
+    fn деинсталлятор_кладётся_рядом_с_панелью() {
+        let dir = temp("деинсталлятор");
+        write_uninstaller(&dir).expect("деинсталлятор не записался");
+        let file = dir.join(UNINSTALL_EXE);
+        assert!(file.exists(), "нет {}", file.display());
+        assert!(std::fs::metadata(&file).unwrap().len() > 1024, "файл подозрительно мал");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn удаление_оставляет_серверы_если_просили() {
+        let dir = temp("удаление-с-данными");
+        std::fs::write(dir.join("OmniPanel.exe"), b"MZ").unwrap();
+        std::fs::write(dir.join("Uninstall.exe"), b"MZ").unwrap();
+        let data = dir.join("OmniPanelData");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("servers.json"), "[]").unwrap();
+
+        let note = uninstall_from(&dir, true).expect("удаление сорвалось");
+        assert!(!dir.join("OmniPanel.exe").exists(), "панель осталась");
+        assert!(data.join("servers.json").exists(), "данные серверов пропали");
+        assert!(note.contains("остались"), "нет предупреждения о данных: {note}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn удаление_подчистую_убирает_всё() {
+        let dir = temp("удаление-подчистую");
+        std::fs::write(dir.join("OmniPanel.exe"), b"MZ").unwrap();
+        let data = dir.join("OmniPanelData");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("servers.json"), "[]").unwrap();
+
+        uninstall_from(&dir, false).expect("удаление сорвалось");
+        assert!(!dir.join("OmniPanel.exe").exists());
+        assert!(!data.exists(), "данные должны были удалиться");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn удаление_несуществующей_папки_объясняется() {
+        let dir = std::env::temp_dir().join("omnipanel-нет-такой-папки");
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = uninstall_from(&dir, true).unwrap_err();
+        assert!(err.contains("не найдена"), "{err}");
     }
 }

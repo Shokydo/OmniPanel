@@ -4,7 +4,7 @@
 [![Лицензия](https://img.shields.io/badge/лицензия-MIT-000000?style=for-the-badge)](LICENSE)
 [![Платформа](https://img.shields.io/badge/Windows-10%2F11-000000?style=for-the-badge)](#)
 
-## ⚡ Версия 1.35.0 — панель уже на Rust
+## ⚡ Версия 1.36.0 — панель уже на Rust
 
 Та же панель, переписанная на **Tauri + Rust**: одно окно, без Node.js и Electron.
 
@@ -14,9 +14,9 @@
 - 133 команды интерфейса, живые логи, трей, аддоны, бэкапы 7z/LZMA2, GitLab и GitHub, тестовые боты — всё на месте;
 - код ядра — [`rust/omnipanel-core`](rust/omnipanel-core), окно — [`src-tauri`](src-tauri), интерфейс — тот же [`ui`](ui).
 
-Скачать: **[OmniPanel-Setup-1.35.0.exe](https://github.com/Shokydo/OmniPanel/releases/download/v1.35.0/OmniPanel-Setup-1.35.0.exe)** — установщик показывает своё тёмное окно (нарисовано в самом exe, без PowerShell): папку можно выбрать списком, кнопкой «Выбрать папку» или вписать вручную, проверяются права и место на диске, панель ставится ровно туда, а после — «Запустить панель» и «Открыть папку».
+Скачать: **[OmniPanel-Setup-1.36.0.exe](https://github.com/Shokydo/OmniPanel/releases/download/v1.36.0/OmniPanel-Setup-1.36.0.exe)** — установщик показывает своё тёмное окно (нарисовано в самом exe, без PowerShell): папку можно выбрать списком, кнопкой «Выбрать папку» или вписать вручную — выбрали корень диска `D:\`, панель встанет в `D:\OmniPanel`; проверяются права и место на диске, рядом кладётся `Uninstall.exe`, а после установки — «Запустить панель» и «Открыть папку». У установщика своя иконка.
 Портативная сборка (без установки) — в [Actions → «Сборка под Windows»](https://github.com/Shokydo/OmniPanel/actions/workflows/build-windows.yml) → артефакт `OmniPanel-win64`.
-Собрать самому: `powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version 1.35.0 -With7z`
+Собрать самому: `powershell -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version 1.36.0 -With7z`
 
 Ниже — описание панели и установка версии 1.26.0 на Electron; она остаётся рабочей, её канал обновлений не тронут.
 

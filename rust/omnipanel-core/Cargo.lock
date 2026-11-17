@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "omnipanel-core"
-version = "1.34.0"
+version = "1.36.0"
 dependencies = [
  "lnk",
  "ureq",
