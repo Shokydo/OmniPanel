@@ -74,6 +74,8 @@ const httpApi = {
   async updCheck() { return post('/api/upd/check'); },
   async updApply() { return post('/api/upd/apply'); },
   async updDownloadFull() { return post('/api/upd/downloadFull'); },
+  /* что вышло из прошлого обновления установщиком */
+  async updLastResult() { return (await fetch('/api/upd/lastResult')).json(); },
   async updRevealBackups() { return post('/api/upd/revealBackups'); },
 
   /* GitHub: те же адреса, что у Rust-ядра */
@@ -5841,7 +5843,7 @@ function openPrefs() {
   buildThemePresets();
   buildWallRecent();
   applyPrefs();
-  if (API.updConfig) updLoad();
+  if (API.updConfig) { updLoad(); updReportLast(); }
   setPrefsCat(prefsCat);
   $('prefsModal').classList.remove('hidden');
   Sound.play('nav');
@@ -6957,6 +6959,33 @@ async function updLoad() {
   }
   updRenderState(UPD.last);
   if (!cfg.repo) $('updState').textContent = 'укажи репозиторий обновлений';
+}
+
+/**
+ * Итог прошлого обновления: установщик пишет его рядом с данными панели.
+ * Раньше панель закрывалась, не поднималась, и причина не была видна нигде.
+ */
+async function updReportLast() {
+  if (!API.updLastResult) return null;
+  const res = await API.updLastResult().catch(() => null);
+  if (!res || !res.known) return null;
+  if (res.failed) {
+    toast(`Прошлое обновление не встало: ${res.error}`, 'err', 15000);
+    if ($('updState')) {
+      $('updState').textContent = `прошлое обновление не встало: ${res.error}`;
+      $('updState').classList.add('err');
+    }
+    return res;
+  }
+  if (res.version && res.version !== res.current) {
+    notify({
+      title: 'Обновление установилось',
+      text: `Панель ${res.current}: прошлое обновление до ${res.version} не сменило файлы.`,
+      kind: 'err',
+      ms: 15000,
+    });
+  }
+  return res;
 }
 
 async function updCheckFlow() {

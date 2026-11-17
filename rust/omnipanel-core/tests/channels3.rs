@@ -169,7 +169,7 @@ fn все_каналы_новых_модулей_объявлены() {
         assert!(READY_CHANNELS.contains(&channel), "канала нет в списке: {channel}");
     }
     /* 56 + 28 (синхронизация и обновления) + 13 (поиск, диалоги, иконки, автозапуск) + 6 (обои, окна вопросов, уведомления) + 6 (бэкапы) + 5 (нагрузка) + 6 (аддоны) = 133 */
-    assert_eq!(READY_CHANNELS.len(), 134, "каналов в Rust: {:?}", READY_CHANNELS.len());
+    assert_eq!(READY_CHANNELS.len(), 135, "каналов в Rust: {:?}", READY_CHANNELS.len());
     let mut unique: Vec<&str> = READY_CHANNELS.to_vec();
     unique.sort_unstable();
     unique.dedup();

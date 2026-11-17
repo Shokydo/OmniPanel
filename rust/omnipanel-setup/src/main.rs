@@ -504,9 +504,31 @@ fn main() {
             let dir = args.get(2).map(PathBuf::from).unwrap_or_else(default_dir);
             let run = !args.iter().any(|a| a == "--no-run");
             let desktop = !args.iter().any(|a| a == "--no-desktop");
-            match install_into(&dir, desktop, run) {
+            let kill = !args.iter().any(|a| a == "--no-kill");
+            let wait_pid = arg_value(&args, "--wait-pid").and_then(|v| v.parse::<u32>().ok());
+            log_line(&format!(
+                "обновление в {} (ждать pid: {:?}, закрывать самим: {})",
+                dir.display(),
+                wait_pid,
+                kill
+            ));
+            let options = InstallOptions {
+                desktop,
+                run,
+                wait_pid,
+                kill,
+            };
+            match install_with(&dir, &options) {
                 Ok(()) => println!("OmniPanel установлен в {}", dir.display()),
                 Err(err) => fail(&err),
+            }
+        }
+        /* итог прошлого обновления: панель показывает его человеку */
+        "--update-result" => {
+            let dir = args.get(2).map(PathBuf::from).unwrap_or_else(default_dir);
+            match std::fs::read_to_string(update_result_path(&dir)) {
+                Ok(text) => println!("{}", text.trim_end()),
+                Err(_) => println!("нет"),
             }
         }
         _ => {
@@ -532,6 +554,12 @@ fn main() {
             }
         }
     }
+}
+
+/// Значение флага вида `--wait-pid 1234`.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    let at = args.iter().position(|arg| arg == flag)?;
+    args.get(at + 1).cloned()
 }
 
 /// Запущен ли этот exe как деинсталлятор: по имени файла или по флагу.
@@ -737,12 +765,19 @@ fn forget_install() {
 
 /// Закрывает уже запущенную панель: иначе Windows не даст перезаписать её файлы
 /// («файл занят другим процессом») и обновление срывалось бы.
+///
+/// Важно: без `/T`. При обновлении установщик запускает **сама панель**, то есть
+/// он — её дочерний процесс. `taskkill /T` закрывал вместе с панелью и
+/// установщик: тот не успевал распаковать файлы, ничего не запускалось, и
+/// версия оставалась старой.
 pub fn stop_running_panel() {
     #[cfg(windows)]
     {
+        /* Установщик зовётся omnipanel-setup.exe, поэтому под эти фильтры по
+           имени он не попадает — себя не убьёт. */
         for name in ["OmniPanel.exe", "omnipanel-core.exe", "omnipanel.exe"] {
             let mut command = std::process::Command::new("taskkill");
-            command.args(["/IM", name, "/F", "/T"]);
+            command.args(["/IM", name, "/F"]);
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
@@ -753,27 +788,158 @@ pub fn stop_running_panel() {
     }
 }
 
-/// Установка в выбранную папку — этим пользуется мастер установки.
 pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> {
+    install_with(
+        dir,
+        &InstallOptions {
+            desktop,
+            run,
+            wait_pid: None,
+            kill: true,
+        },
+    )
+}
+
+/// Как ставить: папка, ярлыки, запуск и кого ждать.
+#[derive(Debug, Clone, Default)]
+pub struct InstallOptions {
+    pub desktop: bool,
+    pub run: bool,
+    /// Номер процесса панели, которая запустила обновление: ждём её выхода.
+    pub wait_pid: Option<u32>,
+    /// Закрывать ли запущенные панели самим (обновление просит не закрывать).
+    pub kill: bool,
+}
+
+/// Установка с подробностями: ожидание панели, повторы, итог в файл.
+pub fn install_with(dir: &Path, options: &InstallOptions) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    /* панель может быть запущена — закрываем её перед распаковкой */
-    if app_exe(dir).exists() {
-        println!("панель уже стоит в {} — обновляю", dir.display());
+    let result = install_steps(&exe, dir, options);
+    /* Итог обновления пишем рядом с данными панели: если установка сорвалась,
+       панель при следующем запуске скажет об этом человеку, а не промолчит. */
+    write_update_result(dir, &result);
+    result.map(|_| ())
+}
+
+fn install_steps(exe: &Path, dir: &Path, options: &InstallOptions) -> Result<usize, String> {
+    /* Панель, запустившая обновление, закрывается сама — ждём этого, чтобы не
+       переписывать файлы под работающим процессом. */
+    if let Some(pid) = options.wait_pid {
+        let waited = wait_for_exit(pid, std::time::Duration::from_secs(90));
+        log_line(&format!(
+            "панель (pid {}) {}",
+            pid,
+            if waited { "закрылась" } else { "не закрылась за 90 с — продолжаем" }
+        ));
+    }
+    if options.kill && app_exe(dir).exists() {
+        log_line(&format!("панель уже стоит в {} — обновляю", dir.display()));
         stop_running_panel();
     }
-    let count = unpack(&exe, dir)?;
+
+    let count = unpack_with_retries(exe, dir)?;
     log_line(&format!("распаковано файлов: {} → {}", count, dir.display()));
-    shortcuts(dir, desktop)?;
+    if let Err(err) = shortcuts(dir, options.desktop) {
+        /* без ярлыка панель работает — это замечание, не провал */
+        log_line(&format!("ярлыки не создались: {}", err));
+    }
     if let Err(err) = write_uninstaller(dir) {
-        /* без деинсталлятора панель работает — это замечание, не провал */
         log_line(&format!("деинсталлятор не записался: {}", err));
     }
     remember_install(dir);
     println!("распаковано файлов: {}", count);
-    if run {
-        launch(&app_exe(dir), dir)?;
+    if options.run {
+        let panel = app_exe(dir);
+        let mut last = String::new();
+        /* файлы могли только-только освободиться — пробуем поднять панель
+           несколько раз, а не сдаёмся с первого раза */
+        for attempt in 0..5 {
+            match launch(&panel, dir) {
+                Ok(()) => {
+                    log_line(&format!("панель запущена: {}", panel.display()));
+                    return Ok(count);
+                }
+                Err(err) => last = err,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            log_line(&format!("попытка запуска {} не удалась: {}", attempt + 1, last));
+        }
+        return Err(format!("панель установлена, но не запустилась: {}", last));
     }
-    Ok(())
+    Ok(count)
+}
+
+/// Распаковка с повторами: сразу после закрытия панели Windows может ещё
+/// держать файлы, и первый заход упирается в «файл занят».
+pub fn unpack_with_retries(exe: &Path, dest: &Path) -> Result<usize, String> {
+    let mut last = String::new();
+    for attempt in 0..6 {
+        match unpack(exe, dest) {
+            Ok(count) => return Ok(count),
+            Err(err) => last = err,
+        }
+        log_line(&format!("распаковка, попытка {}: {}", attempt + 1, last));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(last)
+}
+
+/// Ждём, пока панель закроется сама: её номер передаёт она сама флагом
+/// `--wait-pid`. Так обновление не гоняется с закрытием окна.
+pub fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !process_alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+/// Живой ли процесс с таким номером.
+pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = std::process::Command::new("tasklist");
+        command.args(["/FI", &format!("PID eq {}", pid), "/NH"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        match command.output() {
+            /* строка с номером процесса есть — значит он ещё живёт */
+            Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    }
+}
+
+/// Файл с итогом последнего обновления: панель читает его при запуске.
+pub fn update_result_path(dir: &Path) -> PathBuf {
+    dir.join("OmniPanelData").join("updates").join("last-update.txt")
+}
+
+fn write_update_result(dir: &Path, result: &Result<usize, String>) {
+    let path = update_result_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    /* формат простой: первое слово — итог, дальше версия и число файлов
+       либо причина сбоя одной строкой */
+    let text = match result {
+        Ok(count) => format!("ok {} {}\n", setup_version(), count),
+        Err(err) => format!("error {}\n", err.replace('\n', " ")),
+    };
+    let _ = std::fs::write(path, text);
 }
 
 /// Окно установщика: раскрывается, только если внутри есть панель.
@@ -1099,6 +1265,71 @@ mod tests {
         let err = payload_offset(&exe).unwrap_err();
         assert!(err.contains("повреждена"), "ошибка: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn обновление_из_панели_ставит_файлы_и_пишет_итог() {
+        /* Обновление из панели: установщик — её дочерний процесс, поэтому
+           закрывать панель вместе с деревом процессов нельзя (он убивал сам
+           себя). Теперь он ждёт номер процесса и только потом ставит файлы. */
+        let dir = temp("update");
+        let exe = dir.join("setup.exe");
+        std::fs::write(&exe, "MZ установщик").unwrap();
+        let archive = dir.join("panel.zip");
+        let data = tiny_zip(&[("omnipanel-core", "новая панель"), ("ui/index.html", "<html>2</html>")]);
+        std::fs::write(&archive, &data).unwrap();
+        append_payload(&exe, &archive).unwrap();
+
+        let target = dir.join("панель");
+        std::fs::create_dir_all(target.join("OmniPanelData")).unwrap();
+        let options = InstallOptions {
+            desktop: false,
+            run: false,
+            wait_pid: None,
+            kill: false,
+        };
+        let count = install_steps(&exe, &target, &options).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(std::fs::read_to_string(target.join("omnipanel-core")).unwrap(), "новая панель");
+
+        /* итог обновления записан рядом с данными панели */
+        write_update_result(&target, &Ok(count));
+        let text = std::fs::read_to_string(update_result_path(&target)).unwrap();
+        assert!(text.starts_with("ok "), "итог: {text}");
+        assert!(text.contains('2'), "число файлов: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn сорванное_обновление_оставляет_причину_в_файле() {
+        let dir = temp("update-fail");
+        let target = dir.join("панель");
+        std::fs::create_dir_all(&target).unwrap();
+        let broken = dir.join("битый.exe");
+        std::fs::write(&broken, "MZ без панели").unwrap();
+
+        let options = InstallOptions {
+            desktop: false,
+            run: false,
+            wait_pid: None,
+            kill: false,
+        };
+        let result = install_steps(&broken, &target, &options);
+        assert!(result.is_err(), "битый установщик не должен «получиться»");
+        write_update_result(&target, &result);
+        let text = std::fs::read_to_string(update_result_path(&target)).unwrap();
+        assert!(text.starts_with("error "), "нет причины: {text}");
+        assert!(text.contains("панел"), "причина не описана: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ожидание_завершённого_процесса_не_висит() {
+        /* номер заведомо несуществующего процесса — ждать нечего */
+        let started = std::time::Instant::now();
+        assert!(wait_for_exit(999_999, std::time::Duration::from_secs(5)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!process_alive(0));
     }
 
     #[test]

@@ -532,6 +532,7 @@ impl PanelServer {
             ("POST", "/api/upd/apply") => ("upd:apply", vec![]),
             ("POST", "/api/upd/auto") => ("upd:auto", vec![]),
             ("POST", "/api/upd/downloadFull") => ("upd:downloadFull", vec![]),
+            ("GET", "/api/upd/lastResult") => ("upd:lastResult", vec![]),
             ("POST", "/api/upd/revealBackups") => ("upd:revealBackups", vec![]),
             _ => {
                 /* пути вида /api/servers/<id>/... и /api/files/<действие> */

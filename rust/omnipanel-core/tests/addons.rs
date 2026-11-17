@@ -85,7 +85,7 @@ fn каналы_аддонов_объявлены() {
     ] {
         assert!(READY_CHANNELS.contains(&channel), "канала нет: {channel}");
     }
-    assert_eq!(READY_CHANNELS.len(), 134, "каналов в Rust: {}", READY_CHANNELS.len());
+    assert_eq!(READY_CHANNELS.len(), 135, "каналов в Rust: {}", READY_CHANNELS.len());
 }
 
 #[test]

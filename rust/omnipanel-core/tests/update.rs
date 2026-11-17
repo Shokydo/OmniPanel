@@ -461,6 +461,55 @@ fn новая_сборка_без_архива_кода_сама_не_стави
 }
 
 #[test]
+fn обновление_просит_установщик_дождаться_панели() {
+    /* Установщик запускает сама панель — он её дочерний процесс. Раньше он
+       закрывал панель вместе с деревом процессов, то есть убивал и сам себя:
+       файлы не заменялись, панель не поднималась. Теперь он получает наш
+       номер и ждёт выхода, а закрывать нас силой не должен. */
+    let app = app_dir("upd-args-app");
+    let args = update::setup_args(&app, 4242);
+    assert!(args.iter().any(|a| a == "--install-dir"), "{:?}", args);
+    assert!(args.iter().any(|a| a == &app.display().to_string()), "{:?}", args);
+    assert!(args.iter().any(|a| a == "--no-kill"), "просим не закрывать силой: {:?}", args);
+    let at = args.iter().position(|a| a == "--wait-pid").expect("нет --wait-pid");
+    assert_eq!(args.get(at + 1).map(|v| v.as_str()), Some("4242"));
+    /* папка идёт сразу за флагом: путь с пробелами не разваливается */
+    let at = args.iter().position(|a| a == "--install-dir").unwrap();
+    assert_eq!(args.get(at + 1).map(|v| v.as_str()), Some(app.display().to_string().as_str()));
+}
+
+#[test]
+fn итог_прошлого_обновления_читается() {
+    let data = temp_dir("upd-last");
+    let app = app_dir("upd-last-app");
+    let updater = Updater::new(&data, &app, "1.42.0");
+
+    /* установщик ещё ничего не писал */
+    let none = updater.last_result();
+    assert_eq!(none.get("known").map(|v| v.as_bool()), Some(false), "{}", none.to_json());
+
+    /* удачное обновление */
+    let dir = data.join("updates");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("last-update.txt"), "ok 1.42.0 137\n").unwrap();
+    let ok = updater.last_result();
+    assert_eq!(ok.get("known").map(|v| v.as_bool()), Some(true), "{}", ok.to_json());
+    assert_eq!(ok.get("version").and_then(|v| v.as_str()), Some("1.42.0"));
+    assert_eq!(ok.get("files").and_then(|v| v.as_f64()), Some(137.0));
+    assert!(ok.get("failed").is_none(), "{}", ok.to_json());
+
+    /* сорванное обновление: причина видна человеку */
+    std::fs::write(dir.join("last-update.txt"), "error файл занят другим процессом\n").unwrap();
+    let bad = updater.last_result();
+    assert_eq!(bad.get("failed").map(|v| v.as_bool()), Some(true), "{}", bad.to_json());
+    assert_eq!(
+        bad.get("error").and_then(|v| v.as_str()),
+        Some("файл занят другим процессом")
+    );
+    assert_eq!(bad.get("current").and_then(|v| v.as_str()), Some("1.42.0"));
+}
+
+#[test]
 fn тихая_проверка_не_мешает_работающим_серверам() {
     /* Есть архив кода и автоустановка включена, но сервер работает —
        обновление ждёт, файлы панели не трогаем. */

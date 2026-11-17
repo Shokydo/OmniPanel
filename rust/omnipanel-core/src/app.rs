@@ -210,6 +210,7 @@ pub const READY_CHANNELS: &[&str] = &[
     "upd:check",
     "upd:apply",
     "upd:auto",
+    "upd:lastResult",
     "upd:downloadFull",
     "upd:revealBackups",
     "scan:roots",
@@ -1507,7 +1508,9 @@ impl App {
                 if via_setup.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
                     let window = self.window();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        /* установщик ждёт наш номер процесса, поэтому
+                           выходим сразу: он заменит файлы и поднимет панель */
+                        std::thread::sleep(std::time::Duration::from_millis(400));
                         window.request(WindowCommand::Quit);
                     });
                     return Ok(via_setup);
@@ -1524,6 +1527,7 @@ impl App {
                     .any(|server| matches!(self.manager.state(&server.id), ServerState::Running | ServerState::Stopping));
                 Ok(updater.auto(running))
             }
+            "lastResult" => Ok(updater.last_result()),
             "downloadFull" => Ok(updater.download_full()),
             "revealBackups" => {
                 let result = updater.reveal_backups();

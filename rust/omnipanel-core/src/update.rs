@@ -704,6 +704,64 @@ impl Updater {
         }
     }
 
+    /// Что вышло из прошлого обновления установщиком.
+    ///
+    /// Установщик пишет итог рядом с данными панели. Если он сорвался, человек
+    /// должен это увидеть: раньше панель закрывалась, не поднималась, и никто
+    /// не знал почему.
+    pub fn last_result(&self) -> Value {
+        let path = self.data_dir.join("updates").join("last-update.txt");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut lines = text.lines();
+        let head = lines.next().unwrap_or("").trim();
+        if head.is_empty() {
+            /* установщик ещё не отчитывался — сказать нечего */
+            return Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("known", Value::Bool(false)),
+            ]);
+        }
+        /* Первое слово — итог (`ok`/`error`), остальное — версия, число файлов
+           или причина сбоя. Причина может занимать несколько строк. */
+        let status = head.split_whitespace().next().unwrap_or("").to_string();
+        let mut detail = head[status.len()..].trim().to_string();
+        for line in lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if !detail.is_empty() {
+                detail.push(' ');
+            }
+            detail.push_str(line);
+        }
+        if status == "ok" {
+            let mut parts = detail.split_whitespace();
+            let version = parts.next().unwrap_or("").to_string();
+            let files: u64 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+            Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("known", Value::Bool(true)),
+                ("version", Value::str(version)),
+                ("files", Value::from(files)),
+                ("current", Value::str(&self.current)),
+            ])
+        } else {
+            let reason = if detail.is_empty() {
+                "установщик не сообщил причину".to_string()
+            } else {
+                detail
+            };
+            Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("known", Value::Bool(true)),
+                ("failed", Value::Bool(true)),
+                ("error", Value::str(reason)),
+                ("current", Value::str(&self.current)),
+            ])
+        }
+    }
+
     /// Папка с копиями панели перед обновлениями.
     pub fn reveal_backups(&self) -> Value {
         let dir = self.backups_dir();
@@ -759,17 +817,33 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Запускает скачанный установщик на нашу папку — отдельным процессом, чтобы он
 /// пережил закрытие панели. Без прав администратора: ставим туда же, где стоим.
+/// Аргументы установщика при обновлении из панели.
+///
+/// Установщик запускает сама панель, значит он — её дочерний процесс. Раньше
+/// панель просила «не убивай меня», но установщик этого не слушал и закрывал
+/// панель вместе со всем деревом процессов (`taskkill /T`) — то есть убивал
+/// сам себя и не успевал распаковать файлы. Отсюда «перезапускаюсь →
+/// выключается → старая версия». Теперь передаём свой номер: установщик
+/// дождётся выхода панели и только потом заменит файлы.
+pub fn setup_args(app_dir: &Path, pid: u32) -> Vec<String> {
+    vec![
+        "--install-dir".to_string(),
+        app_dir.display().to_string(),
+        "--no-desktop".to_string(),
+        "--no-kill".to_string(),
+        "--wait-pid".to_string(),
+        pid.to_string(),
+    ]
+}
+
 fn launch_setup(setup: &Path, app_dir: &Path) -> Result<(), String> {
     if !setup.exists() {
         return Err("установщик не скачался".to_string());
     }
     let mut command = std::process::Command::new(setup);
-    command
-        .arg("--install-dir")
-        .arg(app_dir)
-        .arg("--no-desktop")
-        /* панель закроется сама — установщику не нужно её убивать */
-        .arg("--no-kill");
+    for arg in setup_args(app_dir, std::process::id()) {
+        command.arg(arg);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
