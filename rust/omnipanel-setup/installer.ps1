@@ -10,8 +10,20 @@
 param(
   [Parameter(Mandatory = $true)][string]$SetupExe,
   [string]$Version = "",
-  [string]$DefaultDir = ""
+  [string]$DefaultDir = "",
+  [string]$LogFile = ""
 )
+
+# ── журнал: всё, что делает мастер, пишется рядом с журналом установщика ────
+function Note-Log([string]$text) {
+  if (-not $LogFile) { return }
+  try {
+    $line = '[' + (Get-Date -Format 'HH:mm:ss') + '] мастер: ' + $text + "`r`n"
+    [System.IO.File]::AppendAllText($LogFile, $line, (New-Object System.Text.UTF8Encoding($false)))
+  } catch { }
+}
+
+Note-Log "старт мастера (версия $Version, папка по умолчанию $DefaultDir)"
 
 $ErrorActionPreference = 'Stop'
 
@@ -132,7 +144,7 @@ $sep = New-Object System.Windows.Forms.Panel
 $sep.Location = New-Object System.Drawing.Point(24, 80)
 $sep.Size = New-Object System.Drawing.Size(772, 1)
 $sep.BackColor = $C.line
-$sep.Anchor = 'Top,Left,Right'
+$sep.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($sep)
 
 # папка установки
@@ -147,25 +159,25 @@ $pathBox.BackColor = $C.panel
 $pathBox.ForeColor = $C.text
 $pathBox.BorderStyle = 'FixedSingle'
 $pathBox.Font = $fontTiny
-$pathBox.Anchor = 'Top,Left,Right'
+$pathBox.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($pathBox)
 
 $browse = New-Button 572, 116 112, 28 'Обзор…'
-$browse.Anchor = 'Top,Right'
+$browse.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($browse)
 
 $reset = New-Button 692, 116 104, 28 'По умолчанию'
-$reset.Anchor = 'Top,Right'
+$reset.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($reset)
 
 $note = New-Label 24, 150, 772, 18 '' $fontTiny $C.muted
-$note.Anchor = 'Top,Left,Right'
+$note.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($note)
 
 # переключатель ярлыка — только переключатели, не флажки
 $script:desktop = $true
 $toggle = New-Button 24, 180 320, 30 'Ярлык на рабочем столе: вкл'
-$toggle.Anchor = 'Top,Left'
+$toggle.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
 $form.Controls.Add($toggle)
 $toggle.add_Click({
   $script:desktop = -not $script:desktop
@@ -179,7 +191,7 @@ $toggle.add_Click({
 })
 
 $hint = New-Label 360, 186, 436, 20 'Права администратора не нужны' $fontTiny $C.muted
-$hint.Anchor = 'Top,Right'
+$hint.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($hint)
 
 # журнал
@@ -193,7 +205,7 @@ $log.BackColor = $C.panel
 $log.ForeColor = $C.muted
 $log.BorderStyle = 'FixedSingle'
 $log.Font = $fontTiny
-$log.Anchor = 'Top,Bottom,Left,Right'
+$log.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($log)
 
 # ход установки
@@ -202,30 +214,30 @@ $bar.Location = New-Object System.Drawing.Point(24, 530)
 $bar.Size = New-Object System.Drawing.Size(300, 18)
 $bar.Style = 'Marquee'
 $bar.MarqueeAnimationSpeed = 0
-$bar.Anchor = 'Bottom,Left'
+$bar.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
 $form.Controls.Add($bar)
 
 # кнопки
 $install = New-Button 526, 528 130, 34 'Установить'
 $install.BackColor = $C.acc
 $install.ForeColor = [System.Drawing.Color]::Black
-$install.Anchor = 'Bottom,Right'
+$install.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($install)
 
 $openDir = New-Button 400, 528 118, 34 'Открыть папку'
 $openDir.Visible = $false
-$openDir.Anchor = 'Bottom,Right'
+$openDir.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($openDir)
 
 $launch = New-Button 526, 528 130, 34 'Запустить'
 $launch.Visible = $false
 $launch.BackColor = $C.acc
 $launch.ForeColor = [System.Drawing.Color]::Black
-$launch.Anchor = 'Bottom,Right'
+$launch.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($launch)
 
 $close = New-Button 664, 528 132, 34 'Отмена'
-$close.Anchor = 'Bottom,Right'
+$close.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
 $form.Controls.Add($close)
 
 $close.add_Click({ $form.Close() })
@@ -340,6 +352,7 @@ $install.add_Click({
 
   Set-Busy $true
   $dest = $dir.TrimEnd('\')
+  Note-Log "установка в $dest"
   $update = Test-Path -LiteralPath (Join-Path $dest 'OmniPanel.exe')
   if ($update) {
     Write-Log "Здесь уже стоит панель — обновляю её до $Version."
@@ -354,6 +367,7 @@ $install.add_Click({
 
   try {
     $proc = Start-Process -FilePath $SetupExe -ArgumentList $setupArgs -Wait -PassThru -WindowStyle Hidden
+    Note-Log "установщик вернул код $($proc.ExitCode)"
     if ($proc.ExitCode -eq 0) {
       Write-Log 'Готово: файлы на месте.'
       Write-Log "Папка: $dest"
@@ -382,4 +396,15 @@ if (Test-Path -LiteralPath (Join-Path $DefaultDir 'OmniPanel.exe')) {
 }
 Update-Note
 
-[void]$form.ShowDialog()
+try {
+  Note-Log 'окно готово, показываю'
+  [void]$form.ShowDialog()
+  Note-Log 'окно закрыто'
+} catch {
+  Note-Log ("ошибка окна: " + $_.Exception.Message)
+  [System.Windows.Forms.MessageBox]::Show(
+    "Мастер установки не смог открыться:`r`n" + $_.Exception.Message + "`r`n`r`nЖурнал: " + $LogFile,
+    'OmniPanel'
+  ) | Out-Null
+  exit 1
+}

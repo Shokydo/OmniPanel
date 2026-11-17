@@ -1,6 +1,6 @@
 [package]
 name = "omnipanel-setup"
-version = "1.31.0"
+version = "1.32.0"
 edition = "2021"
 description = "Установщик OmniPanel на Rust: один exe с панелью внутри"
 

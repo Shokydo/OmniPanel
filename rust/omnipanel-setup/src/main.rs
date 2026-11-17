@@ -22,6 +22,53 @@ fn setup_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Журнал установки во временной папке: если окно не открылось или установка
+/// сорвалась, по нему видно, на каком шаге это случилось.
+pub fn log_path() -> PathBuf {
+    std::env::temp_dir().join("omnipanel-setup.log")
+}
+
+pub fn log_line(text: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "[{}] {}", stamp, text);
+    }
+}
+
+/// Своё окно с сообщением: системный MessageBox. Ошибка установщика не должна
+/// исчезать молча — раньше установщик выходил без единого слова.
+#[cfg(windows)]
+pub fn msgbox(text: &str) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut core::ffi::c_void,
+            text: *const u16,
+            caption: *const u16,
+            utype: u32,
+        ) -> i32;
+    }
+    let body: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "OmniPanel".encode_utf16().chain(std::iter::once(0)).collect();
+    const MB_ICONWARNING: u32 = 0x30;
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), body.as_ptr(), caption.as_ptr(), MB_ICONWARNING);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn msgbox(text: &str) {
+    eprintln!("{}", text);
+}
+
 /// Метка встроенного архива.
 const TRAILER_MAGIC: &[u8; 8] = b"OMNIUPD1";
 const TRAILER_LEN: u64 = 16;
@@ -29,6 +76,12 @@ const TRAILER_LEN: u64 = 16;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let _ = std::fs::remove_file(log_path());
+    log_line(&format!(
+        "OmniPanel установщик {} — запуск: {:?}",
+        setup_version(),
+        args
+    ));
 
     match command {
         "--append" => {
@@ -63,14 +116,61 @@ fn main() {
             Err(err) => fail(&err),
         },
         "--default-dir" => println!("{}", default_dir().display()),
+        /* диагностика: если окно не открывается, видно, что установщик видит */
+        "--diagnose" => {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let dir = default_dir();
+            let mut lines: Vec<String> = Vec::new();
+            lines.push(format!("OmniPanel установщик {}", setup_version()));
+            lines.push(format!("файл: {}", exe.display()));
+            match payload_offset(&exe) {
+                Ok((offset, size)) => {
+                    let text = format!("панель внутри: {} байт со смещения {}", size, offset);
+                    log_line(&text);
+                    lines.push(text);
+                }
+                Err(err) => {
+                    let text = format!("панель внутри НЕ найдена: {}", err);
+                    log_line(&text);
+                    lines.push(text);
+                }
+            }
+            lines.push(format!("папка по умолчанию: {}", dir.display()));
+            lines.push(format!(
+                "панель там уже стоит: {}",
+                if app_exe(&dir).exists() { "да" } else { "нет" }
+            ));
+            for shell in ["powershell", "pwsh"] {
+                let check = std::process::Command::new(shell)
+                    .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
+                    .output();
+                let verdict = match check {
+                    Ok(out) if out.status.success() => "есть",
+                    Ok(out) => {
+                        log_line(&format!("{}: код {:?}", shell, out.status.code()));
+                        "запускается с ошибкой"
+                    }
+                    Err(err) => {
+                        log_line(&format!("{}: {}", shell, err));
+                        "не найдена"
+                    }
+                };
+                lines.push(format!("{}: {}", shell, verdict));
+            }
+            lines.push(String::new());
+            lines.push(format!("Журнал: {}", log_path().display()));
+            let report = lines.join("\n");
+            log_line(&report.replace('\n', " | "));
+            println!("{}", report);
+            #[cfg(windows)]
+            msgbox(&report);
+        }
         /* мастер установки передаёт папку, выбранную человеком */
         "--install-dir" => {
             let dir = args.get(2).map(PathBuf::from).unwrap_or_else(default_dir);
             let run = !args.iter().any(|a| a == "--no-run");
             let desktop = !args.iter().any(|a| a == "--no-desktop");
-            /* --no-kill: панель закрывает себя сама (автообновление) */
-            let kill = !args.iter().any(|a| a == "--no-kill");
-            match install_into(&dir, desktop, run, kill) {
+            match install_into(&dir, desktop, run) {
                 Ok(()) => println!("OmniPanel установлен в {}", dir.display()),
                 Err(err) => fail(&err),
             }
@@ -84,19 +184,13 @@ fn main() {
 
 fn fail(message: &str) -> ! {
     eprintln!("Ошибка: {}", message);
+    log_line(&format!("ошибка: {}", message));
     #[cfg(windows)]
     {
-        /* окна у установщика нет, поэтому показываем сообщение системой */
-        let _ = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "[System.Windows.Forms.MessageBox]::Show('{}','OmniPanel')",
-                    message.replace('\'', " ")
-                ),
-            ])
-            .status();
+        msgbox(&format!("{}\n\nЖурнал: {}", message, log_path().display()));
+        if log_path().exists() {
+            let _ = std::process::Command::new("notepad").arg(log_path()).spawn();
+        }
     }
     std::process::exit(1);
 }
@@ -298,37 +392,16 @@ fn stop_running_panel() {
     }
 }
 
-/// Одна попытка распаковки: при занятом файле возвращает ошибку, и мы пробуем ещё.
-fn try_unpack(exe: &Path, dir: &Path) -> Result<usize, String> {
-    unpack(exe, dir)
-}
-
 /// Установка в выбранную папку — этим пользуется мастер установки.
-pub fn install_into(dir: &Path, desktop: bool, run: bool, kill: bool) -> Result<(), String> {
+pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     /* панель может быть запущена — закрываем её перед распаковкой */
     if app_exe(dir).exists() {
         println!("панель уже стоит в {} — обновляю", dir.display());
-        if kill {
-            stop_running_panel();
-        } else {
-            /* при автообновлении панель закрывается сама: ждём, пока Windows
-               отпустит exe, иначе распаковка упадёт на «файл занят» */
-            for _ in 0..40 {
-                if try_unpack(&exe, dir).is_ok() {
-                    shortcuts(dir, desktop)?;
-                    remember_install(dir);
-                    if run {
-                        launch(&app_exe(dir), dir)?;
-                    }
-                    return Ok(());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            return Err("панель не закрылась — обновление отменено".to_string());
-        }
+        stop_running_panel();
     }
     let count = unpack(&exe, dir)?;
+    log_line(&format!("распаковано файлов: {} → {}", count, dir.display()));
     shortcuts(dir, desktop)?;
     remember_install(dir);
     println!("распаковано файлов: {}", count);
@@ -341,42 +414,108 @@ pub fn install_into(dir: &Path, desktop: bool, run: bool, kill: bool) -> Result<
 /// Окно установщика: раскрывается, только если внутри есть панель.
 fn wizard() -> Result<(), String> {
     #[cfg(windows)]
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    #[cfg(windows)]
     {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let script = std::env::temp_dir().join("omnipanel-install.ps1");
-        /* UTF-8 с BOM: Windows PowerShell 5.1 иначе читает файл как cp1251 */
+        /* UTF-8 с BOM: Windows PowerShell 5.1 иначе читает файл как cp1251 и
+           падает на кириллице в тексте окна */
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(include_str!("../installer.ps1").as_bytes());
         std::fs::write(&script, &bytes).map_err(|e| format!("не создать мастер: {}", e))?;
-        let status = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-STA",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                &script.display().to_string(),
-                "-SetupExe",
-                &exe.display().to_string(),
-                "-Version",
-                setup_version(),
-                "-DefaultDir",
-                &default_dir().display().to_string(),
-            ])
-            .status();
+        log_line(&format!("мастер: {}", script.display()));
+
+        let dir = default_dir();
+        let args = [
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-STA".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-WindowStyle".to_string(),
+            "Hidden".to_string(),
+            "-File".to_string(),
+            script.display().to_string(),
+            "-SetupExe".to_string(),
+            exe.display().to_string(),
+            "-Version".to_string(),
+            setup_version().to_string(),
+            "-DefaultDir".to_string(),
+            dir.display().to_string(),
+            "-LogFile".to_string(),
+            log_path().display().to_string(),
+        ];
+
+        /* powershell.exe есть в любой Windows; pwsh — если стоит PowerShell 7.
+           Вывод оболочки забираем себе: иначе ошибка мастера уходит в скрытую
+           консоль и наружу виден только код возврата. */
+        let mut last = String::new();
+        for shell in ["powershell", "pwsh"] {
+            log_line(&format!("запускаю оболочку: {}", shell));
+            let mut command = std::process::Command::new(shell);
+            command
+                .args(&args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
+            match command.output() {
+                Ok(out) if out.status.success() => {
+                    log_line("мастер закрылся нормально");
+                    let _ = std::fs::remove_file(&script);
+                    return Ok(());
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    last = format!("мастер завершился с кодом {:?}", out.status.code());
+                    log_line(&last);
+                    if !stderr.trim().is_empty() {
+                        log_line(&format!("ошибка оболочки: {}", stderr.trim()));
+                    }
+                    if !stdout.trim().is_empty() {
+                        log_line(&format!("вывод оболочки: {}", stdout.trim()));
+                    }
+                }
+                Err(err) => {
+                    last = format!("{} не запустилась: {}", shell, err);
+                    log_line(&last);
+                }
+            }
+        }
         let _ = std::fs::remove_file(&script);
-        return match status {
-            Ok(_) => Ok(()),
-            /* PowerShell почему-то нет — ставим без окна, в папку по умолчанию */
-            Err(_) => install_into(&default_dir(), true, true, true),
-        };
+
+        /* Окно не открылось: не оставляем человека ни с чем. Ставим панель в
+           папку по умолчанию, запускаем и говорим, где журнал. */
+        log_line(&format!("мастер не открылся ({}) — ставлю без окна", last));
+        msgbox(&format!(
+            "Окно установки не открылось.\n\nПоставлю панель в папку по умолчанию:\n{}\n\nЖурнал: {}",
+            dir.display(),
+            log_path().display()
+        ));
+        match install_into(&dir, true, true) {
+            Ok(()) => {
+                log_line("панель установлена без окна и запущена");
+                Ok(())
+            }
+            Err(err) => {
+                log_line(&format!("установка без окна не удалась: {}", err));
+                msgbox(&format!(
+                    "OmniPanel не установился.\n\n{}\n\nЖурнал: {}",
+                    err,
+                    log_path().display()
+                ));
+                Err(err)
+            }
+        }
     }
     #[cfg(not(windows))]
-    install_into(&default_dir(), true, true, true)
+    install_into(&default_dir(), true, true)
 }
 
-/// Имя запускаемого файла панели.
 fn app_exe(dir: &Path) -> PathBuf {
     /* окно на Tauri называется OmniPanel.exe, консольная панель — omnipanel-core */
     let names = if cfg!(windows) {
@@ -399,6 +538,13 @@ fn install_and_run() -> Result<(), String> {
     /* Внутри есть панель — всегда показываем мастер: человек сам говорит,
        куда ставить. Раньше при уже установленной панели установщик молча
        запускал старую версию и ничего не обновлял. */
+    match payload_offset(&exe) {
+        Ok((offset, size)) => log_line(&format!(
+            "панель внутри есть: {} байт со смещения {}",
+            size, offset
+        )),
+        Err(err) => log_line(&format!("панели внутри нет: {}", err)),
+    }
     if payload_offset(&exe).is_ok() {
         return wizard();
     }
