@@ -1,6 +1,6 @@
 [package]
 name = "omnipanel-setup"
-version = "1.33.0"
+version = "1.34.0"
 edition = "2021"
 description = "Установщик OmniPanel на Rust: один exe с панелью внутри"
 
@@ -9,4 +9,12 @@ name = "omnipanel-setup"
 path = "src/main.rs"
 
 [dependencies]
+# Окно установщика рисуем сами (egui/eframe): ни PowerShell, ни WebView2, ни
+# системных диалогов — exe остаётся одним файлом. Так же сделано в OmniSpec.
+eframe = { version = "0.33", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
 omnipanel-core = { path = "../omnipanel-core" }

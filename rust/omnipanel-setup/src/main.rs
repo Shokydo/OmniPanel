@@ -8,7 +8,11 @@
 //! `OMNIUPD1` + размер (8 байт, little-endian) — так же, как в прежнем
 //! установщике на C, поэтому старые сборки и скрипты остаются совместимыми.
 //!
-//! Ничего внешнего не нужно: распаковка своя (модуль `zip` ядра), ярлыки —
+//! Окно установки рисуем сами (egui, `gui.rs`): выбор папки, поле для пути,
+//! список шагов и кнопки — часть exe. Ни PowerShell, ни системных диалогов.
+//! Если окно не открылось, работает запасной путь на Win32 (`mod win`).
+//!
+//! Распаковка своя (модуль `zip` ядра), ярлыки —
 //! через PowerShell, который в Windows есть всегда.
 
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
@@ -16,6 +20,9 @@
 use omnipanel_core::zip;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/* окно установщика рисуем сами (egui) — см. gui.rs */
+mod gui;
 
 /* ───────────── окна Windows своими руками, без PowerShell ───────────── */
 ///
@@ -115,6 +122,29 @@ mod win {
         Some(PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
     }
 
+    /// Сколько свободно на диске, где лежит папка (в байтах).
+    pub fn free_space(path: &Path) -> Option<u64> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                dir: *const u16,
+                free_to_caller: *mut u64,
+                total: *mut u64,
+                total_free: *mut u64,
+            ) -> i32;
+        }
+        let dir = wide(&path.display().to_string());
+        let mut available: u64 = 0;
+        let mut total: u64 = 0;
+        let mut free: u64 = 0;
+        let ok = unsafe { GetDiskFreeSpaceExW(dir.as_ptr(), &mut available, &mut total, &mut free) };
+        if ok == 0 {
+            None
+        } else {
+            Some(available)
+        }
+    }
+
     /// Вопрос с кнопками «Да / Нет».
     pub fn ask(text: &str) -> bool {
         let body = wide(text);
@@ -132,6 +162,41 @@ mod win {
         };
         answer == IDYES
     }
+}
+
+/// Свободное место — короткой строкой для окна установщика.
+pub fn free_space_note(dir: &Path) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(bytes) = win::free_space(dir) {
+            let gb = bytes as f64 / 1073741824.0;
+            return if gb >= 1.0 {
+                format!("свободно {:.0} ГБ", gb)
+            } else {
+                format!("свободно {:.0} МБ", bytes as f64 / 1048576.0)
+            };
+        }
+        "место на диске не определить".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        "место на диске не проверяется".to_string()
+    }
+}
+
+/// Проверка папки ДО распаковки: создать, убедиться, что в неё можно писать.
+/// Возвращает короткую строку для окна, ошибку — если папка не годится.
+pub fn check_dir(dir: &Path) -> Result<String, String> {
+    if dir.as_os_str().is_empty() {
+        return Err("папка не указана".to_string());
+    }
+    std::fs::create_dir_all(dir).map_err(|err| format!("не создать папку: {}", err))?;
+    let probe = dir.join(".omnipanel-проверка");
+    std::fs::write(&probe, b"ok").map_err(|err| format!("в папку нельзя писать: {}", err))?;
+    let _ = std::fs::remove_file(&probe);
+    log_line(&format!("папка проверена: {}", dir.display()));
+    Ok(format!("готова к записи, {}", free_space_note(dir)))
 }
 
 /// Установка обычными окнами Windows: выбрать папку → поставить → предложить запуск.
@@ -186,7 +251,7 @@ fn native_install(reason: &str) -> Result<(), String> {
 }
 
 /// Версия сборки — из Cargo.toml, её пишет скрипт сборки перед компиляцией.
-fn setup_version() -> &'static str {
+pub fn setup_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -371,10 +436,28 @@ fn main() {
                 Err(err) => fail(&err),
             }
         }
-        _ => match install_and_run() {
-            Ok(()) => {}
-            Err(err) => fail(&err),
-        },
+        _ => {
+            /* окно установщика рисуем сами: ни PowerShell, ни системных окон.
+               Если окно не открылось (нет OpenGL, урезанная среда) — работаем
+               обычными окнами Windows, но папку всё равно выбирает человек. */
+            log_line("открываю окно установщика");
+            if let Err(err) = gui::run() {
+                let reason = format!("окно установщика не открылось: {}", err);
+                log_line(&reason);
+                #[cfg(windows)]
+                {
+                    if let Err(err) = native_install(&reason) {
+                        fail(&err);
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    if let Err(err) = install_and_run() {
+                        fail(&err);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -501,7 +584,7 @@ fn registry_value(name: &str) -> Option<String> {
 }
 
 /// Запоминаем папку и версию — для «Программы и компоненты» и для обновлений.
-fn remember_install(dir: &Path) {
+pub fn remember_install(dir: &Path) {
     let exe = std::env::current_exe().unwrap_or_default();
     let pairs = [
         ("InstallDir".to_string(), dir.display().to_string()),
@@ -572,7 +655,7 @@ fn forget_install() {
 
 /// Закрывает уже запущенную панель: иначе Windows не даст перезаписать её файлы
 /// («файл занят другим процессом») и обновление срывалось бы.
-fn stop_running_panel() {
+pub fn stop_running_panel() {
     #[cfg(windows)]
     {
         for name in ["OmniPanel.exe", "omnipanel-core.exe", "omnipanel.exe"] {
@@ -608,92 +691,7 @@ pub fn install_into(dir: &Path, desktop: bool, run: bool) -> Result<(), String> 
 }
 
 /// Окно установщика: раскрывается, только если внутри есть панель.
-fn wizard() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let script = std::env::temp_dir().join("omnipanel-install.ps1");
-        /* UTF-8 с BOM: Windows PowerShell 5.1 иначе читает файл как cp1251 и
-           падает на кириллице в тексте окна */
-        let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(include_str!("../installer.ps1").as_bytes());
-        std::fs::write(&script, &bytes).map_err(|e| format!("не создать мастер: {}", e))?;
-        log_line(&format!("мастер: {}", script.display()));
-
-        let dir = default_dir();
-        let args = [
-            "-NoLogo".to_string(),
-            "-NoProfile".to_string(),
-            "-STA".to_string(),
-            "-ExecutionPolicy".to_string(),
-            "Bypass".to_string(),
-            "-WindowStyle".to_string(),
-            "Hidden".to_string(),
-            "-File".to_string(),
-            script.display().to_string(),
-            "-SetupExe".to_string(),
-            exe.display().to_string(),
-            "-Version".to_string(),
-            setup_version().to_string(),
-            "-DefaultDir".to_string(),
-            dir.display().to_string(),
-            "-LogFile".to_string(),
-            log_path().display().to_string(),
-        ];
-
-        /* powershell.exe есть в любой Windows; pwsh — если стоит PowerShell 7.
-           Вывод оболочки забираем себе: иначе ошибка мастера уходит в скрытую
-           консоль и наружу виден только код возврата. */
-        let mut last = String::new();
-        for shell in ["powershell", "pwsh"] {
-            log_line(&format!("запускаю оболочку: {}", shell));
-            let mut command = std::process::Command::new(shell);
-            command
-                .args(&args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                command.creation_flags(CREATE_NO_WINDOW);
-            }
-            match command.output() {
-                Ok(out) if out.status.success() => {
-                    log_line("мастер закрылся нормально");
-                    let _ = std::fs::remove_file(&script);
-                    return Ok(());
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    last = format!("мастер завершился с кодом {:?}", out.status.code());
-                    log_line(&last);
-                    if !stderr.trim().is_empty() {
-                        log_line(&format!("ошибка оболочки: {}", stderr.trim()));
-                    }
-                    if !stdout.trim().is_empty() {
-                        log_line(&format!("вывод оболочки: {}", stdout.trim()));
-                    }
-                }
-                Err(err) => {
-                    last = format!("{} не запустилась: {}", shell, err);
-                    log_line(&last);
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&script);
-        log_line(&format!("мастер через PowerShell не открылся: {}", last));
-        /* PowerShell недоступен или сценарий упал — работаем обычными окнами
-           Windows: выбор папки и вопрос о запуске. Пользователь всё равно
-           выбирает, куда ставить. */
-        native_install(&last)
-    }
-    #[cfg(not(windows))]
-    install_into(&default_dir(), true, true)
-}
-
-fn app_exe(dir: &Path) -> PathBuf {
+pub fn app_exe(dir: &Path) -> PathBuf {
     /* окно на Tauri называется OmniPanel.exe, консольная панель — omnipanel-core */
     let names = if cfg!(windows) {
         ["OmniPanel.exe", "omnipanel-core.exe", "omnipanel.exe", "omnipanel-core", "omnipanel"]
@@ -712,11 +710,12 @@ fn app_exe(dir: &Path) -> PathBuf {
 fn install_and_run() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
 
-    /* Внутри есть панель — всегда показываем мастер: человек сам говорит,
+    /* Внутри есть панель — открываем окно установки: человек сам говорит,
        куда ставить. Раньше при уже установленной панели установщик молча
        запускал старую версию и ничего не обновлял. */
     if payload_offset(&exe).is_ok() {
-        return wizard();
+        gui::run().map_err(|err| format!("окно установщика не открылось: {}", err))?;
+        return Ok(());
     }
 
     /* это не установщик, а сама панель (или её ярлык) — запускаем её */
@@ -728,7 +727,7 @@ fn install_and_run() -> Result<(), String> {
     launch(&installed, &dir)
 }
 
-fn launch(exe: &Path, dir: &Path) -> Result<(), String> {
+pub fn launch(exe: &Path, dir: &Path) -> Result<(), String> {
     let mut command = std::process::Command::new(exe);
     command.current_dir(dir);
     /* установщик запустил панель — сам он больше не нужен */
@@ -773,7 +772,7 @@ fn uninstall() -> Result<(), String> {
 
 /// Ярлыки на рабочем столе и в меню «Пуск» — через PowerShell, он есть всегда.
 #[cfg(windows)]
-fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
+pub fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
     let exe = app_exe(dir);
     /* меню «Пуск» — всегда, рабочий стол — если переключатель включён */
     let targets = if desktop {
@@ -934,5 +933,28 @@ mod tests {
         let err = payload_offset(&exe).unwrap_err();
         assert!(err.contains("повреждена"), "ошибка: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn пустая_папка_отвергается() {
+        assert!(check_dir(Path::new("")).is_err());
+    }
+
+    #[test]
+    fn папка_создаётся_и_проверяется_на_запись() {
+        let dir = temp("проверка-папки");
+        let _ = std::fs::remove_dir_all(&dir);
+        let note = check_dir(&dir).expect("папка должна приниматься");
+        assert!(note.contains("готова к записи"), "подпись: {note}");
+        assert!(!dir.join(".omnipanel-проверка").exists(), "пробный файл удаляется");
+        /* второй раз тоже без ошибки: папка уже есть */
+        assert!(check_dir(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn свободное_место_описывается_строкой() {
+        let note = free_space_note(&std::env::temp_dir());
+        assert!(!note.is_empty());
     }
 }
