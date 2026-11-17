@@ -86,13 +86,30 @@ const httpApi = {
   async ghSetOauthClientId(id) { const r = await post('/api/gh/setOauthClientId', { id }); return r.result || r || ''; },
   async ghDeviceStart() {
     const res = await post('/api/gh/deviceStart');
+    /* страницу подтверждения открываем в системном браузере: window.open в окне
+       панели заблокирован, и раньше человек оставался с кодом без ссылки */
     if (res && res.ok && res.verificationUri) {
-      try { window.open(res.verificationUri, '_blank'); } catch { /* браузер сам */ }
+      this.ghOpenExternal(res.verificationUri);
     }
     return res;
   },
   async ghDevicePoll(code) { return post('/api/gh/devicePoll', { deviceCode: code }); },
-  async ghOpenExternal(url) { try { window.open(url, '_blank'); } catch { /* браузер сам */ } return true; },
+  /* Ссылку открывает ядро — системным браузером. Обычный window.open в окне
+     панели ничего не делает (всплывающие окна закрыты), поэтому раньше кнопка
+     «Открыть github.com/login/device» молча не работала. */
+  async ghOpenExternal(url) {
+    try {
+      const res = await post('/api/gh/openExternal', { url });
+      if (res && res.ok) return true;
+      if (res && res.error) {
+        try { await navigator.clipboard.writeText(url); } catch { /* без буфера обмена */ }
+        toast(`Ссылка скопирована — открой её в браузере: ${url}`, 'err', 12000);
+        return false;
+      }
+    } catch { /* ядро не ответило — пробуем окно */ }
+    try { window.open(url, '_blank'); } catch { /* и это не вышло */ }
+    return true;
+  },
   async ghDownload(cfg) { return post('/api/gh/download', cfg || {}); },
   async ghCreateRepo(name, isPrivate) { return post('/api/gh/createRepo', { name, private: isPrivate !== false }); },
   async ghCheck(id) { return post(`/api/gh/check?id=${encodeURIComponent(id)}`); },
@@ -176,7 +193,9 @@ const httpApi = {
   async wizardCatalog() { return (await fetch('/api/wizard/catalog')).json(); },
   async wizardVersions(id) { return (await fetch('/api/wizard/versions?id=' + encodeURIComponent(id))).json(); },
   async wizardJava() { return (await fetch('/api/wizard/java')).json(); },
-  async wizardOpenJava() { window.open('https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk', '_blank'); return true; },
+  async wizardOpenJava() {
+    return this.ghOpenExternal('https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk');
+  },
   async wizardPickParent() { return (await fetch('/api/wizard/pickParent', { method: 'POST' })).json(); },
   async wizardSuggestDir(parent, name) {
     const q = new URLSearchParams({ parent: parent || '', name: name || '' }).toString();

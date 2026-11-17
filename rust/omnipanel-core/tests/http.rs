@@ -869,3 +869,39 @@ fn видно_сколько_страниц_слушает_события() {
     let (_, body) = request(panel.port, "GET", "/api/events/info", "");
     assert!(body.contains("\"listeners\":1"), "страница подключилась: {body}");
 }
+
+/* ───────── ссылки из панели открываются системным браузером ───────── */
+
+#[test]
+fn ссылка_на_гитхаб_уходит_в_системный_браузер() {
+    /* Кнопка «Открыть github.com/login/device» ничего не делала: интерфейс звал
+       window.open, а в окне панели всплывающие окна закрыты. Теперь адрес
+       передаётся ядру, и оно открывает системный браузер. */
+    let panel = start_panel();
+    let (status, body) = request(
+        panel.port,
+        "POST",
+        "/api/gh/openExternal",
+        r#"{"url":"https://github.com/login/device"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"ok\""), "нет ответа: {body}");
+    /* ответ либо «открыл», либо — если в системе нечем открывать — понятная
+       причина со ссылкой, чтобы её можно было скопировать вручную */
+    if !body.contains("\"ok\":true") {
+        assert!(body.contains("github.com/login/device"), "нет ссылки в ответе: {body}");
+    }
+}
+
+#[test]
+fn не_ссылка_вместо_адреса_честно_отвергается() {
+    let panel = start_panel();
+    let (_, body) = request(
+        panel.port,
+        "POST",
+        "/api/gh/openExternal",
+        r#"{"url":"file:///C:/Windows/System32/calc.exe"}"#,
+    );
+    assert!(body.contains("\"ok\":false"), "открывать что попало нельзя: {body}");
+    assert!(body.contains("не ссылка"), "причина не объяснена: {body}");
+}

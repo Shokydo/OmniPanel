@@ -1337,12 +1337,19 @@ impl App {
             "devicePoll" => Ok(store.device_poll(&text(args, 0))),
             "openExternal" => {
                 let url = text(args, 0);
-                if !url.to_lowercase().starts_with("https://") {
-                    return Ok(Value::Bool(false));
+                let lower = url.to_lowercase();
+                if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                    return Ok(sync::error_json(format!(
+                        "это не ссылка: «{}»",
+                        url.chars().take(60).collect::<String>()
+                    )));
                 }
                 match open_in_system(&url) {
-                    Ok(_) => Ok(Value::Bool(true)),
-                    Err(_) => Ok(Value::Bool(false)),
+                    Ok(_) => Ok(Value::obj(vec![("ok", Value::Bool(true))])),
+                    Err(err) => Ok(sync::error_json(format!(
+                        "{}. Скопируй адрес и открой его в браузере: {}",
+                        err, url
+                    ))),
                 }
             }
             "download" => {
@@ -2368,7 +2375,16 @@ fn sanitize_name(name: &str) -> Result<String, String> {
 /// Открыть файл или папку тем, чем это делает система.
 fn open_in_system(path: &str) -> Result<(), String> {
     #[cfg(windows)]
-    let result = std::process::Command::new("cmd").args(["/C", "start", "", path]).spawn();
+    let result = {
+        use std::os::windows::process::CommandExt;
+        /* без этого окна Windows на мгновение мигает чёрная консоль cmd —
+           а панель обещает, что консольных окон не будет вовсе */
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+    };
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
