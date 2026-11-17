@@ -775,3 +775,97 @@ fn история_журнала_состоит_из_записей_а_не_из
     assert!(body.contains("\"s\":\"stdout\""), "нет уровня строки: {body}");
     assert!(!body.contains("\"["), "журнал всё ещё массив строк: {body}");
 }
+
+/* ───────── живой поток: разметка кусками, стук, счётчик страниц ───────── */
+
+#[test]
+fn поток_событий_отдаётся_кусками() {
+    /* Ответ без Content-Length и без разметки кусков браузер вправе считать
+       пустым — тогда строки журнала остаются у него в буфере и консоль не
+       обновляется, хотя сервер работает. Проверяем разметку прямо в ответе. */
+    use std::io::{Read, Write};
+    let panel = start_panel();
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", panel.port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(700)))
+        .unwrap();
+    stream
+        .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+        .unwrap();
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 2048];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+    while std::time::Instant::now() < deadline {
+        if let Ok(read) = stream.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).to_string();
+    assert!(text.contains("Content-Type: text/event-stream"), "не тот тип: {text}");
+    assert!(text.contains("Transfer-Encoding: chunked"), "нет разметки кусков: {text}");
+    /* первый кусок — «retry: 2000», перед ним его длина в шестнадцатеричном виде */
+    let after_headers = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let first_line = after_headers.lines().next().unwrap_or("");
+    assert!(
+        first_line.chars().all(|c| c.is_ascii_hexdigit()) && !first_line.is_empty(),
+        "ответ не размечен на куски: {after_headers:?}"
+    );
+    assert!(text.contains("retry: 2000"), "нет указания на повтор: {text}");
+}
+
+#[test]
+fn поток_событий_стучится_пока_молчит() {
+    /* Сервер может долго ничего не печатать. Пустой комментарий раз в
+       несколько секунд показывает, что связь жива, и не даёт прокси с
+       антивирусом закрыть поток. */
+    std::env::set_var("OMNI_SSE_PING", "1");
+    let panel = start_panel();
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", panel.port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+        .unwrap();
+    use std::io::{Read, Write};
+    stream
+        .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 2048];
+    while std::time::Instant::now() < deadline {
+        if let Ok(read) = stream.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+        }
+        if String::from_utf8_lossy(&raw).contains(": keep") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).to_string();
+    assert!(text.contains(": keep"), "стука нет: {text}");
+    std::env::remove_var("OMNI_SSE_PING");
+}
+
+#[test]
+fn видно_сколько_страниц_слушает_события() {
+    /* /api/events/info — короткий ответ для разбора жалоб «консоль не
+       обновляется»: если слушателей ноль, значит страница не подключилась. */
+    let panel = start_panel();
+    let (status, body) = request(panel.port, "GET", "/api/events/info", "");
+    assert_eq!(status, 200);
+    assert!(body.contains("\"ok\":true"), "{body}");
+    assert!(body.contains("\"listeners\":0"), "пока никто не слушает: {body}");
+
+    use std::io::Write;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", panel.port)).unwrap();
+    stream
+        .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (_, body) = request(panel.port, "GET", "/api/events/info", "");
+    assert!(body.contains("\"listeners\":1"), "страница подключилась: {body}");
+}

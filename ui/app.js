@@ -226,12 +226,77 @@ const httpApi = {
       'load:change', 'load:log', 'load:done', 'gh:stage', 'move-progress', 'toast',
       'upd:state', 'upd:available', 'upd:progress', 'upd:ready', 'ui:ask']) {
       es.addEventListener(name, (e) => {
-        const data = JSON.parse(e.data);
+        LIVE.at = Date.now();
+        let data = null;
+        try { data = JSON.parse(e.data); } catch { return; }
         for (const cb of this.subs[name] || []) cb(data);
       });
     }
+    es.onerror = () => { LIVE.errors += 1; };
+    LIVE.es = es;
   },
 };
+
+/* ═════════════════════ живой поток событий ═════════════════════
+   Консоль рисуется по событиям с сервера (/api/events). Если живое
+   соединение почему-то не идёт — старые прокси, антивирус, окно WebView —
+   строки журнала не появлялись вовсе, хотя сервер работал. Поэтому рядом
+   есть страховка: как только события замолкают, интерфейс сам спрашивает
+   журнал и состояние обычными запросами. */
+const LIVE = { at: 0, errors: 0, es: null, pollId: null, polledAt: 0 };
+
+/** Сколько миллисекунд тишины считаем «поток не работает». */
+const LIVE_SILENCE = 6000;
+/** Как часто спрашивать журнал, когда поток молчит. */
+const LIVE_POLL = 1500;
+
+/** Догрузить новые строки журнала обычным запросом (страховка). */
+async function livePollLogs() {
+  const id = S.currentId;
+  if (!id) return;
+  let list = null;
+  try { list = await API.logs(id); } catch { return; }
+  if (!Array.isArray(list) || !list.length) return;
+  const entries = list.filter((e) => e && typeof e === 'object');
+  if (!entries.length) return;
+  const last = S.lastLogLine;
+  let start = 0;
+  if (last) {
+    const at = entries.findIndex((e) => e.t === last.t && e.m === last.m);
+    start = at >= 0 ? at + 1 : Math.max(0, entries.length - 200);
+  }
+  if (start >= entries.length) return;
+  const fresh = entries.slice(start);
+  LOG_CACHE.set(id, entries.slice(-2500));
+  for (const entry of fresh) {
+    playersOnLog(id, entry.m || '');
+    issuesOnLog(id, entry);
+  }
+  if (id !== S.currentId) return;
+  if (S.consoleBusy) S.consolePending.push(...fresh);
+  else consoleAppendBatch(fresh);
+}
+
+/** Страховка: поток молчит — обновляем журнал и состояние сами. */
+function liveWatchdog() {
+  if (Date.now() - LIVE.at < LIVE_SILENCE) {
+    if (LIVE.pollId) { clearInterval(LIVE.pollId); LIVE.pollId = null; }
+    return;
+  }
+  if (LIVE.pollId) return;
+  LIVE.pollId = setInterval(async () => {
+    if (Date.now() - LIVE.at < LIVE_SILENCE) {
+      clearInterval(LIVE.pollId);
+      LIVE.pollId = null;
+      return;
+    }
+    await livePollLogs();
+    if (Date.now() - LIVE.polledAt > 3000) {
+      LIVE.polledAt = Date.now();
+      await refresh().catch(() => {});
+    }
+  }, LIVE_POLL);
+}
 
 async function post(url, body) {
   const r = await fetch(url, {
@@ -8349,6 +8414,10 @@ function bindAddonsPage() {
   bindActions();
   bindEffects();
   bindSubscriptions();
+  /* живой поток мог не подняться (прокси, антивирус, особенности окна) —
+     сторож включит обычные запросы, и консоль всё равно будет обновляться */
+  LIVE.at = Date.now();
+  setInterval(liveWatchdog, 2000);
   bindLoadTab();
   if (API.connect) API.connect();
 
