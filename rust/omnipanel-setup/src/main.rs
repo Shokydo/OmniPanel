@@ -934,6 +934,36 @@ fn schedule_self_cleanup(self_path: Option<&Path>, dir: &Path, keep_dir: bool) {
     }
 }
 
+/// Ярлыки на рабочем столе и в меню «Пуск» — своим кодом, без PowerShell.
+///
+/// Раньше их создавал PowerShell (`WScript.Shell`), и при установке мигало его
+/// окно. Теперь файл .lnk собирается по спецификации MS-SHLLINK (модуль
+/// `shortcut` ядра): окно не появляется вовсе.
+#[cfg(windows)]
+pub fn shortcuts(dir: &Path, desktop: bool) -> Result<(), String> {
+    use omnipanel_core::shortcut;
+    let exe = app_exe(dir);
+    let mut made = 0;
+
+    /* меню «Пуск» — всегда, рабочий стол — если переключатель включён */
+    if desktop {
+        if let Some(desk) = shortcut::desktop_dir() {
+            shortcut::create(&desk.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
+            made += 1;
+        }
+    }
+    if let Some(programs) = shortcut::programs_dir() {
+        let folder = programs.join("OmniPanel");
+        shortcut::create(&folder.join("OmniPanel.lnk"), &exe, dir, "OmniPanel", Some(&exe))?;
+        made += 1;
+    }
+    if made == 0 {
+        return Err("не найти папку рабочего стола и меню «Пуск»".to_string());
+    }
+    log_line(&format!("ярлыков создано: {}", made));
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn shortcuts(_dir: &Path, _desktop: bool) -> Result<(), String> {
     Ok(())

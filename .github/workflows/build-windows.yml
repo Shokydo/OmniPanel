@@ -78,6 +78,10 @@ jobs:
         working-directory: rust/omnipanel-core
         run: cargo test --release
 
+      - name: Проверить код под Windows без Windows
+        shell: pwsh
+        run: python rust/windows-код.py
+
       - name: Проверить эффекты панели
         shell: pwsh
         run: node ui/fx-test.js
