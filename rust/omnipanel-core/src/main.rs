@@ -42,6 +42,8 @@ fn main() {
     info.app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let app = Arc::new(App::with_store(info, store));
+    /* тихая проверка обновлений: сама, без нажатий */
+    app.start_auto_update();
     /* картинки лежат в папке assets рядом с интерфейсом или с программой */
     let mut panel = PanelServer::new(Arc::clone(&app), ui_dir.clone());
     let mut candidates: Vec<PathBuf> = Vec::new();

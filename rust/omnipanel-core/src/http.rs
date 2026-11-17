@@ -165,7 +165,12 @@ impl PanelServer {
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\nretry: 2000\n\n",
             )?;
-            stream.flush()?;
+            /* страница открылась позже тихой проверки — сразу расскажем,
+               что уже известно про обновление */
+            if let Some(state) = self.app.update_state() {
+                let _ = write!(stream, "event: upd:state\ndata: {}\n\n", state.to_json());
+                let _ = stream.flush();
+            }
             self.listeners.lock().unwrap().push(stream);
             return Ok(());
         }

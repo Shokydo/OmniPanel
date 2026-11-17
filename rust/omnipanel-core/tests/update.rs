@@ -376,3 +376,110 @@ fn установщик_не_скачался_и_это_видно() {
     assert!(!ok(&result), "обновление не должно «получиться»: {}", result.to_json());
     assert!(!text(&result, "error").is_empty());
 }
+
+/* ───────── тихая проверка: панель сама узнаёт о новой версии ───────── */
+
+#[test]
+fn тихая_проверка_сама_сообщает_окну_о_новой_версии() {
+    /* Раньше проверку запускал только человек кнопкой в настройках: ядро
+       ни разу не спрашивало GitHub само и не отправляло ни одного события,
+       поэтому плашка «доступно обновление» не появлялась никогда. */
+    let fake = Fake::start(vec![(
+        "Shokydo/OmniPanel/main/update.json",
+        r#"{"version":"1.38.0","notes":"тихая проверка"}"#.as_bytes().to_vec(),
+    )]);
+    let updater = Updater::with_bases(
+        &temp_dir("upd-auto-silent"),
+        &app_dir("upd-auto-silent-app"),
+        "1.37.0",
+        &fake.raw(),
+        &fake.api(),
+    );
+
+    let events: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let result = updater.auto_announce(false, move |channel, payload| {
+        sink.lock().unwrap().push((channel.to_string(), payload.get("latest").map(|v| v.text()).unwrap_or_default()));
+    });
+
+    assert!(ok(&result), "{}", result.to_json());
+    assert!(result.get("hasUpdate").map(|v| v.as_bool()).unwrap_or(false), "{}", result.to_json());
+    let seen = events.lock().unwrap().clone();
+    let names: Vec<&str> = seen.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(names.contains(&"upd:state"), "окно не узнало о проверке: {:?}", names);
+    assert!(names.contains(&"upd:available"), "нет плашки «доступно обновление»: {:?}", names);
+    assert!(seen.iter().any(|(name, latest)| name == "upd:available" && latest == "1.38.0"));
+}
+
+#[test]
+fn тихая_проверка_выключена_и_молчит() {
+    let fake = Fake::start(vec![(
+        "Shokydo/OmniPanel/main/update.json",
+        r#"{"version":"1.38.0"}"#.as_bytes().to_vec(),
+    )]);
+    let data = temp_dir("upd-auto-off");
+    let updater = Updater::with_bases(&data, &app_dir("upd-auto-off-app"), "1.37.0", &fake.raw(), &fake.api());
+    updater.save(&json::Value::obj(vec![("auto", json::Value::Bool(false))]));
+
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let result = updater.auto_announce(false, move |channel, _| {
+        sink.lock().unwrap().push(channel.to_string());
+    });
+
+    assert!(result.get("skipped").map(|v| v.as_bool()).unwrap_or(false), "{}", result.to_json());
+    assert!(events.lock().unwrap().is_empty(), "выключенная проверка не должна ничего слать");
+}
+
+#[test]
+fn новая_сборка_без_архива_кода_сама_не_ставится() {
+    /* В сборке с установщиком релиз несёт только его. Запускать установщик
+       молча нельзя — панель перезапустится без спроса. Ждём плашку, а ставит
+       человек кнопкой «Обновить и перезапустить». */
+    let release = r#"{"tag_name":"v1.38.0","body":"","assets":[
+        {"name":"OmniPanel-Setup-1.38.0.exe","browser_download_url":"http://127.0.0.1:1/s.exe","size":100}
+    ]}"#.as_bytes().to_vec();
+    let fake = Fake::start(vec![("api/repos/Shokydo/OmniPanel/releases/latest", release)]);
+    let updater = Updater::with_bases(
+        &temp_dir("upd-auto-setup"),
+        &app_dir("upd-auto-setup-app"),
+        "1.37.0",
+        &fake.raw(),
+        &fake.api(),
+    );
+
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let result = updater.auto_announce(false, move |channel, _| {
+        sink.lock().unwrap().push(channel.to_string());
+    });
+
+    assert!(result.get("hasUpdate").map(|v| v.as_bool()).unwrap_or(false), "{}", result.to_json());
+    let names = events.lock().unwrap().clone();
+    assert!(names.iter().any(|n| n == "upd:available"), "{:?}", names);
+    assert!(!names.iter().any(|n| n == "upd:ready"), "установщик запустился сам: {:?}", names);
+}
+
+#[test]
+fn тихая_проверка_не_мешает_работающим_серверам() {
+    /* Есть архив кода и автоустановка включена, но сервер работает —
+       обновление ждёт, файлы панели не трогаем. */
+    let archive = code_zip("новая версия панели");
+    let files = vec![
+        ("Shokydo/OmniPanel/main/update.json", manifest("1.38.0", &sha256::hex(&archive))),
+        ("Shokydo/OmniPanel/main/OmniPanel-code.zip", archive),
+    ];
+    let fake = Fake::start(files);
+    let app = app_dir("upd-auto-busy-app");
+    let updater = Updater::with_bases(&temp_dir("upd-auto-busy"), &app, "1.37.0", &fake.raw(), &fake.api());
+
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let waiting = updater.auto_announce(true, move |channel, _| {
+        sink.lock().unwrap().push(channel.to_string());
+    });
+
+    assert!(waiting.get("deferred").map(|v| v.as_bool()).unwrap_or(false), "{}", waiting.to_json());
+    assert_eq!(std::fs::read_to_string(app.join("main.js")).unwrap(), "старая версия");
+    assert!(events.lock().unwrap().iter().any(|n| n == "upd:ready"));
+}

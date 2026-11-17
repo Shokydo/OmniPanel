@@ -24,7 +24,7 @@ use crate::scan::{self, Scanner};
 use crate::files::{kind_of, Entry, FileError, Files, READ_LIMIT, WRITE_LIMIT};
 use crate::ports;
 use crate::sync::{self, Options, Provider, Sync};
-use crate::update::Updater;
+use crate::update::{self, Updater};
 use crate::window::{WindowBridge, WindowCommand};
 use crate::json::Value;
 use crate::servers::{Manager, ServerConfig, ServerState, Store};
@@ -94,6 +94,9 @@ pub struct App {
     load_test: Arc<Mutex<Option<Arc<Mutex<Load>>>>> ,
     /// Чей это тест — чтобы события знали, к какому серверу они относятся.
     load_owner: Mutex<Option<String>>,
+    /// Последний результат тихой проверки обновлений: его отдаём странице,
+    /// которая открылась уже после проверки — иначе плашка не появится.
+    update_state: Mutex<Option<Value>>,
 }
 
 /// Один получатель событий панели.
@@ -273,7 +276,45 @@ impl App {
             ask: Ask::new(),
             load_test: Arc::new(Mutex::new(None)),
             load_owner: Mutex::new(None),
+            update_state: Mutex::new(None),
         }
+    }
+
+    /// Тихая проверка обновлений: сразу после запуска и дальше раз в 20 минут.
+    ///
+    /// Раньше проверку запускал только человек кнопкой в настройках, поэтому
+    /// «автообновление» не работало вовсе: панель сама никогда не спрашивала
+    /// GitHub и не сообщала окну о новой версии. Теперь спрашивает — и говорит
+    /// событиями `upd:state` / `upd:available` / `upd:ready`.
+    pub fn start_auto_update(self: &Arc<Self>) {
+        /* в тестах и при отладке проверку можно выключить одной переменной */
+        if std::env::var("OMNI_NO_AUTO_UPDATE").is_ok() {
+            return;
+        }
+        let app = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(update::FIRST_CHECK));
+            loop {
+                let sinks = app.publisher();
+                let running = app.manager().servers().iter().any(|server| {
+                    matches!(
+                        app.manager().state(&server.id),
+                        ServerState::Running | ServerState::Stopping
+                    )
+                });
+                let updater = app.updater();
+                let keeper = Arc::clone(&app);
+                updater.auto_announce(running, move |channel, payload| {
+                    /* проверку запоминаем: страница, открытая позже, тоже
+                       увидит плашку «доступно обновление» */
+                    if channel == "upd:state" {
+                        keeper.set_update_state(payload.clone());
+                    }
+                    sinks.send(channel, payload);
+                });
+                std::thread::sleep(std::time::Duration::from_secs(update::CHECK_EVERY));
+            }
+        });
     }
 
     /// Подписка на события панели (окно, поток событий для браузера).
@@ -287,6 +328,16 @@ impl App {
     /// Отправитель событий для фонового потока: можно звать из любого потока.
     pub fn publisher(&self) -> Publisher {
         Publisher(Arc::clone(&self.event_sinks))
+    }
+
+    /// Запомнить последнюю проверку обновлений (её повторим новой странице).
+    pub fn set_update_state(&self, value: Value) {
+        *self.update_state.lock().unwrap() = Some(value);
+    }
+
+    /// Последняя проверка обновлений, если она уже была.
+    pub fn update_state(&self) -> Option<Value> {
+        self.update_state.lock().unwrap().clone()
     }
 
     /// Отправить событие в интерфейс: `scan-progress`, `gh:stage`, `move-progress`…

@@ -95,6 +95,8 @@ fn main() {
             let app = App::with_store(info, store);
             app.attach_window(bridge.clone());
             let app_state = Arc::new(app);
+            /* тихая проверка обновлений: панель сама узнаёт о новой версии */
+            app_state.start_auto_update();
             let mut panel_server = PanelServer::new(Arc::clone(&app_state), ui_dir(tauri_app));
             for dir in asset_dirs {
                 panel_server = panel_server.with_assets(dir);

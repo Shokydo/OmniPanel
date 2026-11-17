@@ -24,6 +24,12 @@ pub const CODE_ROOTS: [&str; 12] = [
     "main.js", "preload.js", "web.js", "package.json", "README.md", "ЧИТАЙ-МЕНЯ.txt",
     "servers.example.json", "ui", "core", "assets", "tools", "demo",
 ];
+/// Как часто панель сама спрашивает GitHub о новой версии: раз в 20 минут,
+/// как было на Electron. Без этого «автообновление» — просто надпись.
+pub const CHECK_EVERY: u64 = 20 * 60;
+/// Первая тихая проверка — не мгновенно: окну надо успеть открыться.
+pub const FIRST_CHECK: u64 = 10;
+
 /// Данные пользователя: обновление их не касается.
 const PROTECTED_DIRS: [&str; 6] = ["omnipaneldata", "data", "backups", "tps", "logs", "updates"];
 const PROTECTED_FILES: [&str; 2] = ["servers.json", "panel.json"];
@@ -530,14 +536,45 @@ impl Updater {
 
     /// Автообновление: проверка и, если разрешено, установка кода.
     pub fn auto(&self, servers_running: bool) -> Value {
+        self.auto_announce(servers_running, |_, _| {})
+    }
+
+    /// Та же тихая проверка, но с рассказом интерфейсу.
+    ///
+    /// События — те, что ждёт окно панели: `upd:state` (что вообще вышло),
+    /// `upd:available` (доступна версия — плашка в шапке и уведомление) и
+    /// `upd:ready` (код уже поставлен). Раньше ядро не отправляло ни одного
+    /// из них, поэтому окно никогда и не узнавало о новой версии.
+    pub fn auto_announce<F>(&self, servers_running: bool, announce: F) -> Value
+    where
+        F: Fn(&str, &Value),
+    {
         let cfg = self.config();
+        if !cfg.get("auto").map(|v| v.as_bool()).unwrap_or(false) {
+            return Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("skipped", Value::Bool(true)),
+                ("reason", Value::str("авто-проверка выключена в настройках")),
+            ]);
+        }
         let check = self.check();
-        let has_update = check.get("hasUpdate").map(|v| v.as_bool()).unwrap_or(false);
-        if !has_update {
+        announce("upd:state", &check);
+        if !check.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+            /* нет связи — молчим: тревожить человека из-за сети не за что */
             return check;
         }
+        if !check.get("hasUpdate").map(|v| v.as_bool()).unwrap_or(false) {
+            return check;
+        }
+        /* есть новая версия: плашка и уведомление в окне */
+        announce("upd:available", &check);
+
         let auto_install = cfg.get("autoInstall").map(|v| v.as_bool()).unwrap_or(true);
-        if !auto_install {
+        let has_code = !check.get("code").map(|v| v.is_null()).unwrap_or(true);
+        /* В сборке с установщиком релиз несёт только его: полную сборку
+           ставит человек кнопкой «Обновить и перезапустить». Молча
+           запускать установщик нельзя — это перезапуск панели без спроса. */
+        if !auto_install || !has_code {
             return check;
         }
         /* код ставим только когда серверы не работают: обновление не должно
@@ -546,11 +583,19 @@ impl Updater {
             let mut value = check;
             if let Value::Obj(fields) = &mut value {
                 fields.push(("deferred".to_string(), Value::Bool(true)));
-                fields.push(("reason".to_string(), Value::str("Серверы работают — обновление поставлю после остановки")));
+                fields.push((
+                    "reason".to_string(),
+                    Value::str("Серверы работают — обновление поставлю после остановки"),
+                ));
             }
+            announce("upd:ready", &value);
             return value;
         }
-        self.apply()
+        let applied = self.apply();
+        if applied.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+            announce("upd:ready", &applied);
+        }
+        applied
     }
 
     /// «Обновить и перезапустить» для сборки, поставленной установщиком.

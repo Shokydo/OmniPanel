@@ -14,6 +14,8 @@ use std::time::Duration;
 struct Panel {
     port: u16,
     dir: PathBuf,
+    /// Само ядро панели: тесты проверяют и его состояние, не только ответы.
+    app: Arc<App>,
 }
 
 impl Drop for Panel {
@@ -44,7 +46,7 @@ fn start_panel_with_assets(with_assets: bool) -> Panel {
     info.data_dir = dir.clone();
     info.config_path = dir.join("servers.json");
     let app = Arc::new(App::new(info));
-    let mut panel_server = PanelServer::new(app, ui);
+    let mut panel_server = PanelServer::new(Arc::clone(&app), ui);
     if with_assets {
         let assets = dir.join("assets");
         fs::create_dir_all(assets.join("wallpapers")).unwrap();
@@ -68,7 +70,7 @@ fn start_panel_with_assets(with_assets: bool) -> Panel {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Panel { port, dir }
+    Panel { port, dir, app }
 }
 
 fn request(port: u16, method: &str, path: &str, body: &str) -> (u16, String) {
@@ -622,4 +624,39 @@ fn архивы_открываются_и_распаковываются_чер�
     assert!(body.contains("\"ok\":true"), "распаковка не прошла: {body}");
     assert!(work.join("plugins/config.yml").exists(), "файл не появился на диске");
     assert!(fs::read_to_string(work.join("plugins/config.yml")).unwrap().contains("a: 1"));
+}
+
+#[test]
+fn страница_узнаёт_о_проверке_обновлений_при_подключении() {
+    /* Тихая проверка идёт в ядре раз в 20 минут. Если страница открылась
+       после неё, событие уже улетело — поэтому при подключении отдаём
+       последний результат сразу, иначе плашка «доступно обновление»
+       не появится до следующей проверки. */
+    let panel = start_panel();
+    panel.app.set_update_state(omnipanel_core::json::Value::obj(vec![
+        ("ok", omnipanel_core::json::Value::Bool(true)),
+        ("latest", omnipanel_core::json::Value::str("1.38.0")),
+        ("hasUpdate", omnipanel_core::json::Value::Bool(true)),
+    ]));
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", panel.port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    use std::io::{Read, Write};
+    stream
+        .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n")
+        .unwrap();
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !String::from_utf8_lossy(&buffer).contains("event: upd:state\ndata: {") {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&buffer).to_string();
+    assert!(text.contains("event: upd:state"), "нет события проверки: {text}");
+    assert!(text.contains("1.38.0"), "версия не передана: {text}");
 }

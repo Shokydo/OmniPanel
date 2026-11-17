@@ -7019,10 +7019,20 @@ function bindUpdates() {
 
   if (API.onUpdReady) {
     API.onUpdReady((info) => {
-      const note = info && info.when === 'exit'
+      const when = info && info.when === 'exit';
+      const note = when
         ? 'Обновление скачано и встанет, когда закроешь панель.'
         : 'Обновление готово к установке.';
-      $('updState').textContent = note;
+      if ($('updState')) $('updState').textContent = note;
+      /* код уже поставлен сам — человеку об этом надо сказать */
+      if (info && info.version && !when) {
+        notify({
+          title: `Обновлено до ${info.version}`,
+          text: 'Панель перезапустится сама. Серверы и настройки на месте.',
+          kind: 'ok',
+          ms: 9000,
+        });
+      }
     });
   }
 
