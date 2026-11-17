@@ -58,7 +58,7 @@ fn новые_каналы_объявлены() {
     for channel in ["wall:pick", "wall:remove", "wall:palette", "ui:ready", "ui:answer", "notify:desktop"] {
         assert!(READY_CHANNELS.contains(&channel), "канала нет: {channel}");
     }
-    assert_eq!(READY_CHANNELS.len(), 133, "каналов в Rust: {}", READY_CHANNELS.len());
+    assert_eq!(READY_CHANNELS.len(), 134, "каналов в Rust: {}", READY_CHANNELS.len());
 }
 
 #[test]
@@ -228,11 +228,12 @@ fn вопрос_без_ответа_возвращает_основную_кно
 }
 
 #[test]
-fn уведомление_собирается_без_лишних_кавычек() {
-    let script = notify::powershell_script("Сервер упал", "Мир «Кактус» остановился\nсмотри лог");
-    assert!(script.contains("BalloonTipTitle = 'Сервер упал'"), "{script}");
-    /* апостроф в тексте удваивается — иначе PowerShell сломается */
-    let quoted = notify::powershell_script("Чат", "это 'важно'");
-    assert!(quoted.contains("''важно''"), "{quoted}");
-    assert!(!quoted.contains("\\\\'"), "кавычки экранированы по-линуксовому: {quoted}");
+fn уведомление_идёт_без_оболочки_и_без_скриптов() {
+    /* Раньше шар в области уведомлений показывал PowerShell: мигало окно
+       консоли, а там, где PowerShell порезан политикой, уведомление просто
+       не появлялось. Теперь это родной Shell_NotifyIconW (модуль win32), а на
+       Linux — notify-send. Проверяем главное: скрипт больше не собирается, а
+       слишком длинный текст обрезается, чтобы шар не разъезжался. */
+    let long = "я".repeat(400);
+    assert!(!notify::show("Сервер упал", &long) || cfg!(any(unix, windows)));
 }

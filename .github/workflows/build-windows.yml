@@ -21,7 +21,7 @@ on:
       version:
         description: 'Версия сборки (например 1.27.0)'
         required: false
-        default: '1.29.0'
+        default: '1.37.0'
       release:
         description: 'Опубликовать релиз с установщиком'
         type: boolean
@@ -78,11 +78,24 @@ jobs:
         working-directory: rust/omnipanel-core
         run: cargo test --release
 
+      - name: Проверить код под Windows без Windows
+        shell: pwsh
+        run: python rust/windows-код.py
+
+      - name: Сверить интерфейс с ядром
+        # каждый метод API.* в интерфейсе должен существовать в httpApi,
+        # каждый адрес /api/… — иметь маршрут, каждый канал — быть объявленным
+        run: node ui/api-check.js
+
+      - name: Проверить эффекты панели
+        shell: pwsh
+        run: node ui/fx-test.js
+
       - name: Собрать окно, портативную версию и установщик
         shell: pwsh
         run: |
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.29.0" }
+          if (-not $version) { $version = "1.37.0" }
           # PowerShell 7 читает UTF-8 без вопросов; у скрипта к тому же есть BOM,
           # чтобы он работал и в Windows PowerShell 5.1 на вашей машине
           pwsh -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z
@@ -108,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.29.0" }
+          if (-not $version) { $version = "1.37.0" }
           $tag = "v$version"
           # gh на Windows теряет кириллицу в имени ассета — грузим под латинским
           $setup = "dist/OmniPanel-Setup-$version.exe"
@@ -119,9 +132,20 @@ jobs:
             $setup `
             --title "OmniPanel $version на Rust" `
             --notes @"
-          Панель управления серверами на Rust: одно окно, без Node.js.
+          Панель управления серверами на Rust: одно окно, без Node.js и без PowerShell.
 
-          **Установщик:** ``OmniPanel-Setup-$version.exe`` — спрашивает, куда ставить панель, и ставит её в
-          %LOCALAPPDATA%\OmniPanel, делает ярлыки и запускает её.
+          **Установщик:** ``OmniPanel-Setup-$version.exe`` — своё тёмное окно (нарисовано в самом exe).
+
+          - папку выбираете вы: список, кнопка «Выбрать папку» или ручной ввод;
+            выбрали корень диска ``D:\`` — панель встанет в новую папку ``D:\OmniPanel``;
+          - проверяются права на запись и свободное место, до распаковки;
+          - рядом с панелью появляется ``Uninstall.exe`` — удаление с выбором,
+            оставлять ли серверы и настройки;
+          - после установки: «Запустить панель» и «Открыть папку».
+
+          **Эффекты панели** (как в OmniSpec): частицы на фоне — снег, звёзды, пыль,
+          палочки; след за курсором — искры, линия, кисть, свечение. Плотность,
+          размер, длина, видимость и цвет настраиваются в «Эффектах».
+
           Портативная сборка (``OmniPanel-win64.zip``) — во вкладке Actions → артефакты.
           "@

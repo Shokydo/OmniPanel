@@ -553,6 +553,78 @@ impl Updater {
         self.apply()
     }
 
+    /// «Обновить и перезапустить» для сборки, поставленной установщиком.
+    ///
+    /// Устанавливать код поверх папки здесь нечего (в папке лежит готовый exe),
+    /// поэтому путь такой: скачать установщик новой версии и запустить его на
+    /// ту же папку. Установщик подменит файлы, сам поднимет панель — и окно
+    /// откроется уже новой версией. Серверы до этого останавливаются мягко.
+    pub fn apply_setup(&self) -> Value {
+        let fresh = self.check();
+        if !fresh.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+            return fresh;
+        }
+        if !fresh.get("hasUpdate").map(|v| v.as_bool()).unwrap_or(false) {
+            return error("Уже стоит самая свежая версия");
+        }
+        let setup = fresh.get("setup").cloned().unwrap_or(Value::Null);
+        if setup.is_null() {
+            return error("В релизе нет установщика — скачай установщик вручную");
+        }
+        let url = setup.get("url").map(|v| v.text()).unwrap_or_default();
+        if url.is_empty() {
+            return error("У установщика нет ссылки на файл");
+        }
+        let version = fresh.get("latest").map(|v| v.text()).unwrap_or_default();
+        let name = format!("OmniPanel-Setup-{}.exe", if version.is_empty() { "new" } else { &version });
+        let dest = self.updates_dir().join(&name);
+        if let Err(err) = std::fs::create_dir_all(self.updates_dir()) {
+            return error(format!("не создать папку обновлений: {}", err));
+        }
+        let size = match net::download(&url, &dest, Some(&self.token)) {
+            Ok(bytes) => bytes,
+            Err(message) => return error(message),
+        };
+        /* запускаем установщик на ту же папку: он подменит файлы и поднимет панель */
+        match launch_setup(&dest, &self.app_dir) {
+            Ok(()) => Value::obj(vec![
+                ("ok", Value::Bool(true)),
+                ("setup", Value::Bool(true)),
+                ("restart", Value::Bool(true)),
+                ("version", Value::str(&version)),
+                ("file", Value::str(dest.display().to_string())),
+                ("size", Value::Num(size as f64)),
+                ("files", Value::Num(0.0)),
+            ]),
+            Err(message) => error(message),
+        }
+    }
+
+    /// Скачать установщик и открыть его — без установки (человек сам нажмёт
+    /// «Установить» в мастере).
+    pub fn run_setup(&self) -> Value {
+        let downloaded = self.download_full();
+        if !downloaded.get("ok").map(|v| v.as_bool()).unwrap_or(false) {
+            return downloaded;
+        }
+        if downloaded.get("setup").map(|v| v.as_bool()).unwrap_or(false) {
+            let file = downloaded.get("file").map(|v| v.text()).unwrap_or_default();
+            if !file.is_empty() {
+                let mut command = std::process::Command::new(&file);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const DETACHED_PROCESS: u32 = 0x0000_0008;
+                    command.creation_flags(DETACHED_PROCESS);
+                }
+                if let Err(err) = command.spawn() {
+                    return error(format!("не удалось открыть установщик: {}", err));
+                }
+            }
+        }
+        downloaded
+    }
+
     /// Скачать полную сборку (ставится не здесь, а отдельным установщиком).
     pub fn download_full(&self) -> Value {
         let fresh = self.check();
@@ -573,9 +645,12 @@ impl Updater {
             return error("У обновления нет ссылки на файл");
         }
         let dest = self.updates_dir().join(&name);
+        let is_setup = !fresh.get("setup").map(|v| v.is_null()).unwrap_or(true);
         match net::download(&url, &dest, Some(&self.token)) {
             Ok(bytes) => Value::obj(vec![
                 ("ok", Value::Bool(true)),
+                ("setup", Value::Bool(is_setup)),
+                ("archive", Value::str(dest.display().to_string())),
                 ("file", Value::str(dest.display().to_string())),
                 ("size", Value::Num(bytes as f64)),
                 ("version", fresh.get("latest").cloned().unwrap_or(Value::Null)),
@@ -635,4 +710,31 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Запускает скачанный установщик на нашу папку — отдельным процессом, чтобы он
+/// пережил закрытие панели. Без прав администратора: ставим туда же, где стоим.
+fn launch_setup(setup: &Path, app_dir: &Path) -> Result<(), String> {
+    if !setup.exists() {
+        return Err("установщик не скачался".to_string());
+    }
+    let mut command = std::process::Command::new(setup);
+    command
+        .arg("--install-dir")
+        .arg(app_dir)
+        .arg("--no-desktop")
+        /* панель закроется сама — установщику не нужно её убивать */
+        .arg("--no-kill");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("не удалось запустить установщик: {}", e))
 }

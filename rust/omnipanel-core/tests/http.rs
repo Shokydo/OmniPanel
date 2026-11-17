@@ -511,3 +511,115 @@ fn картинки_ищутся_и_в_соседней_папке() {
     assert_eq!(status, 200, "берём вторую папку из списка");
     assert!(body.contains("PNG-иконка"));
 }
+
+/* ───────────── перенос файлов и архивы через HTTP ───────────── */
+
+/// Добавляет сервер с рабочей папкой и возвращает его id.
+fn server_with_dir(port: u16, cwd: &std::path::Path) -> String {
+    let body = format!(
+        r#"{{"name":"Тест","command":"echo hi","cwd":"{}"}}"#,
+        cwd.display().to_string().replace('\\', "\\\\")
+    );
+    let (_, answer) = request(port, "POST", "/api/servers", &body);
+    answer
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("сервер создан")
+        .to_string()
+}
+
+#[test]
+fn перенос_файла_перетаскиванием_работает() {
+    /* Так делает интерфейс: API.filesMove → POST /api/files/move {from, toDir} */
+    let panel = start_panel();
+    let work = panel.dir.join("сервер");
+    fs::create_dir_all(work.join("plugins")).unwrap();
+    fs::create_dir_all(work.join("mods")).unwrap();
+    fs::write(work.join("plugins/a.jar"), "данные").unwrap();
+    let id = server_with_dir(panel.port, &work);
+
+    let (status, body) = request(
+        panel.port,
+        "POST",
+        &format!("/api/files/move?id={id}"),
+        r#"{"from":"plugins/a.jar","toDir":"mods"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"ok\":true"), "перенос не прошёл: {body}");
+    assert!(body.contains("mods/a.jar"), "не тот путь в ответе: {body}");
+    assert!(work.join("mods/a.jar").exists(), "файл не переехал");
+    assert!(!work.join("plugins/a.jar").exists(), "исходник остался");
+}
+
+#[test]
+fn перенос_папки_и_запрет_вложить_в_себя() {
+    let panel = start_panel();
+    let work = panel.dir.join("сервер");
+    fs::create_dir_all(work.join("plugins/внутри")).unwrap();
+    fs::create_dir_all(work.join("mods")).unwrap();
+    let id = server_with_dir(panel.port, &work);
+
+    let (_, body) = request(
+        panel.port,
+        "POST",
+        &format!("/api/files/move?id={id}"),
+        r#"{"from":"plugins","toDir":"mods"}"#,
+    );
+    assert!(body.contains("mods/plugins"), "папка не переехала: {body}");
+    assert!(work.join("mods/plugins/внутри").exists());
+
+    let (_, body) = request(
+        panel.port,
+        "POST",
+        &format!("/api/files/move?id={id}"),
+        r#"{"from":"mods","toDir":"mods/plugins"}"#,
+    );
+    assert!(body.contains("\"ok\":false"), "папку внутрь себя переносить нельзя: {body}");
+    assert!(body.contains("внутрь себя"), "причина не объяснена: {body}");
+}
+
+#[test]
+fn архивы_открываются_и_распаковываются_через_http() {
+    let panel = start_panel();
+    let work = panel.dir.join("сервер");
+    fs::create_dir_all(work.join("plugins")).unwrap();
+    let id = server_with_dir(panel.port, &work);
+
+    /* крошечный zip собираем тем же кодом ядра, что и бэкапы */
+    let zip = omnipanel_core::zip::create(&[
+        omnipanel_core::zip::NewEntry {
+            name: "config.yml".to_string(),
+            data: "a: 1\n".as_bytes().to_vec(),
+        },
+        omnipanel_core::zip::NewEntry {
+            name: "plugin.jar".to_string(),
+            data: "JARDATA".as_bytes().to_vec(),
+        },
+    ]);
+    fs::write(work.join("сборка.zip"), &zip).unwrap();
+    let rel = "%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0.zip"; /* «сборка.zip» */
+
+    let (status, body) = request(panel.port, "GET", &format!("/api/archive/open?id={id}&rel={rel}"), "");
+    assert_eq!(status, 200);
+    assert!(body.contains("config.yml"), "список архива пуст: {body}");
+    assert!(body.contains("\"total\":2"), "не все файлы видны: {body}");
+
+    let (_, body) = request(
+        panel.port,
+        "GET",
+        &format!("/api/archive/read?id={id}&rel={rel}&name=config.yml"),
+        "",
+    );
+    assert!(body.contains("a: 1"), "файл из архива не прочитался: {body}");
+
+    let (_, body) = request(
+        panel.port,
+        "POST",
+        &format!("/api/archive/extract?id={id}"),
+        r#"{"rel":"сборка.zip","dest":"plugins","only":"config.yml"}"#,
+    );
+    assert!(body.contains("\"ok\":true"), "распаковка не прошла: {body}");
+    assert!(work.join("plugins/config.yml").exists(), "файл не появился на диске");
+    assert!(fs::read_to_string(work.join("plugins/config.yml")).unwrap().contains("a: 1"));
+}

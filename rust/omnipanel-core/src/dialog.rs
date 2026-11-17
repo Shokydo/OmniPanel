@@ -2,11 +2,12 @@
 //!
 //! Панель показывает свои окна в собственном дизайне, но выбор файла на диске
 //! система умеет лучше: там диски, избранное, поиск. Поэтому здесь зовём
-//! штатный диалог своей платформы: на Windows — PowerShell с WinForms
-//! (ничего ставить не надо), на Linux — zenity или kdialog, на macOS — osascript.
+//! штатный диалог своей платформы. На Windows — родные окна (`win32`:
+//! `SHBrowseForFolderW` и `GetOpenFileNameW`); раньше их рисовал PowerShell со
+//! WinForms, из-за чего при каждом выборе мигало окно консоли.
 //!
 //! Если ни одного способа нет (например, панель открыта в браузере на сервере
-//! без графики), отвечаем `null` — интерфейс тогда просто не меняет поле.
+//! без графики), отвечаем пустым списком — интерфейс тогда просто не меняет поле.
 
 use std::path::PathBuf;
 
@@ -20,8 +21,13 @@ pub enum Pick {
 
 /// Итог выбора: пути. Пусто — пользователь отказался.
 pub fn pick(kind: Pick, title: &str) -> Vec<String> {
+    pick_in(kind, title, None)
+}
+
+/// То же, но окно откроется в указанном месте (папка сервера, папка модов).
+pub fn pick_in(kind: Pick, title: &str, start: Option<&std::path::Path>) -> Vec<String> {
     match std::env::consts::OS {
-        "windows" => pick_windows(kind, title),
+        "windows" => pick_windows(kind, title, start),
         "macos" => pick_macos(kind, title),
         _ => pick_linux(kind, title),
     }
@@ -29,61 +35,31 @@ pub fn pick(kind: Pick, title: &str) -> Vec<String> {
 
 /* ───────────────────────────── Windows ───────────────────────────── */
 
-/// Скрипт PowerShell для диалога. Собирается отдельно, чтобы его можно было
-/// проверить тестом: ошибка в кавычках здесь означает «кнопка молчит».
-pub fn powershell_script(kind: Pick, title: &str) -> String {
-    let safe = title.replace('\'', "''");
-    let head = concat!(
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ",
-        "Add-Type -AssemblyName System.Windows.Forms; ",
-        "$owner = New-Object System.Windows.Forms.Form; ",
-        "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; ",
-        "$owner.WindowState = 'Minimized'; $owner.Show(); $owner.Hide(); ",
-    );
+#[cfg(windows)]
+fn pick_windows(kind: Pick, title: &str, start: Option<&std::path::Path>) -> Vec<String> {
+    use crate::win32;
     match kind {
-        Pick::Folder => format!(
-            "{}$f = New-Object System.Windows.Forms.FolderBrowserDialog; \
-             $f.Description = '{}'; $f.ShowNewFolderButton = $true; \
-             if ($f.ShowDialog($owner) -eq 'OK') {{ 'OMNI:' + $f.SelectedPath }}; \
-             $owner.Dispose()",
-            head, safe
-        ),
-        Pick::File => format!(
-            "{}$f = New-Object System.Windows.Forms.OpenFileDialog; \
-             $f.Title = '{}'; $f.CheckFileExists = $true; $f.Multiselect = $false; \
-             if ($f.ShowDialog($owner) -eq 'OK') {{ 'OMNI:' + $f.FileName }}; \
-             $owner.Dispose()",
-            head, safe
-        ),
-        Pick::Folders => {
-            /* WinForms не умеет выбирать несколько папок — берём одну за раз */
-            format!(
-                "{}$f = New-Object System.Windows.Forms.FolderBrowserDialog; \
-                 $f.Description = '{}'; $f.ShowNewFolderButton = $false; \
-                 if ($f.ShowDialog($owner) -eq 'OK') {{ 'OMNI:' + $f.SelectedPath }}; \
-                 $owner.Dispose()",
-                head, safe
-            )
-        }
+        /* «выбрать несколько папок» система одним окном не умеет — берём одну */
+        Pick::Folder | Pick::Folders => win32::pick_folder(title, start)
+            .map(|path| vec![path.display().to_string()])
+            .unwrap_or_default(),
+        Pick::File => win32::pick_file(title)
+            .map(|path| vec![path.display().to_string()])
+            .unwrap_or_default(),
     }
 }
 
-fn pick_windows(kind: Pick, title: &str) -> Vec<String> {
-    let script = powershell_script(kind, title);
-    let output = run(
-        "powershell",
-        &["-NoProfile", "-STA", "-Command", &script],
-    );
-    parse_powershell(&output)
+#[cfg(not(windows))]
+fn pick_windows(_kind: Pick, _title: &str, _start: Option<&std::path::Path>) -> Vec<String> {
+    Vec::new()
 }
 
-/// Из вывода PowerShell берём только строки с меткой: остальное — служебный шум.
-pub fn parse_powershell(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("OMNI:"))
-        .map(|path| path.trim().to_string())
-        .filter(|path| !path.is_empty())
+/// Оставляем только реально существующие пути: окно могло закрыться отменой.
+pub fn parse_paths(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
         .collect()
 }
 

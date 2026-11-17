@@ -488,6 +488,69 @@ impl PanelServer {
                             )
                         }
                     }
+                } else if let Some(action) = path.strip_prefix("/api/archive/") {
+                    /* архивы: список содержимого, файл из архива, распаковка */
+                    let channel = format!("archive:{}", action);
+                    let id = Value::str(arg("id"));
+                    let rel = Value::Str(
+                        body_json
+                            .get("rel")
+                            .map(|v| v.text())
+                            .unwrap_or_else(|| arg("rel")),
+                    );
+                    let args = match action {
+                        "open" => vec![id, rel],
+                        "read" => vec![
+                            id,
+                            rel,
+                            Value::Str(
+                                body_json
+                                    .get("name")
+                                    .map(|v| v.text())
+                                    .unwrap_or_else(|| arg("name")),
+                            ),
+                        ],
+                        "extract" => vec![
+                            id,
+                            rel,
+                            Value::Str(
+                                body_json
+                                    .get("dest")
+                                    .map(|v| v.text())
+                                    .unwrap_or_else(|| arg("dest")),
+                            ),
+                            Value::Str(
+                                body_json
+                                    .get("only")
+                                    .map(|v| v.text())
+                                    .unwrap_or_else(|| arg("only")),
+                            ),
+                        ],
+                        _ => {
+                            return Response::json(
+                                200,
+                                &Value::obj(vec![
+                                    ("ok", Value::Bool(false)),
+                                    (
+                                        "error",
+                                        Value::str(format!("архивное действие «{}» неизвестно", action)),
+                                    ),
+                                ])
+                                .to_json(),
+                            )
+                        }
+                    };
+                    return match self.app.invoke(&channel, &args) {
+                        Ok(value) => Response::json(200, &value.to_json()),
+                        Err(err) => Response::json(
+                            200,
+                            &Value::obj(vec![
+                                ("ok", Value::Bool(false)),
+                                ("error", Value::str(err)),
+                            ])
+                            .to_json(),
+                        ),
+                    };
                 } else if let Some(action) = path.strip_prefix("/api/files/") {
                     let channel = match action {
                         "list" | "read" | "search" => format!("files:{}", action),

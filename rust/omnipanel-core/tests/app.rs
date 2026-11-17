@@ -132,15 +132,44 @@ fn изменение_порядка_и_удаление_через_каналы
 #[test]
 fn запуск_и_логи_через_каналы() {
     let dir = temp_dir("run");
-    let script = dir.join("run.sh");
-    fs::write(&script, "#!/bin/sh\necho 'Done (1.0s)!'\nwhile read -r l; do echo \"эхо: $l\"; done\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
+    /*
+     * Подставной «сервер» должен уметь две вещи: напечатать строку и отвечать
+     * на команды, приходящие в stdin. На Linux это sh-сценарий, на Windows —
+     * PowerShell: панель там запускает команду через `cmd /c`, а cmd не умеет
+     * читать stdin построчно и уходит в бесконечный цикл на конце файла.
+     */
+    let (script, command_text) = if cfg!(windows) {
+        let script = dir.join("run.ps1");
+        fs::write(
+            &script,
+            "Write-Output 'Done (1.0s)!'\n\
+             while ($null -ne ($line = [Console]::In.ReadLine())) { Write-Output \"эхо: $line\" }\n",
+        )
+        .unwrap();
+        (
+            script.clone(),
+            format!(
+                "powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+                script.display()
+            ),
+        )
+    } else {
+        let script = dir.join("run.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\necho 'Done (1.0s)!'\nwhile read -r l; do echo \"эхо: $l\"; done\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+        (script.clone(), script.to_string_lossy().to_string())
+    };
+    let _ = script;
 
     let app = app_with_servers(&dir);
     let created = app
@@ -148,7 +177,7 @@ fn запуск_и_логи_через_каналы() {
             "servers:add",
             &[Value::obj(vec![
                 ("name", Value::str("Тест")),
-                ("command", Value::str(script.to_string_lossy())),
+                ("command", Value::str(command_text.clone())),
                 ("cwd", Value::str(dir.to_string_lossy())),
             ])],
         )

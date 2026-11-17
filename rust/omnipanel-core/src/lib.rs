@@ -28,12 +28,14 @@ pub mod image;
 pub mod props_schema;
 pub mod scan;
 pub mod servers;
+pub mod shortcut;
 pub mod sha1;
 pub mod sha256;
 pub mod http;
 pub mod sync;
 pub mod update;
 pub mod wall;
+pub mod win32;
 pub mod window;
 pub mod zip;
 

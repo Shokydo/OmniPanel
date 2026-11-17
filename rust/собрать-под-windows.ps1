@@ -117,6 +117,9 @@ if ($windowed) {
 
 Write-Step "собираю установщик"
 Push-Location (Join-Path $Rust "omnipanel-setup")
+# тот же приём, что и с окном: кэш сборки на GitHub отдаёт готовый exe как «свежий»,
+# и в установщик попадала старая версия — чистим пакет перед сборкой
+cargo clean --release -p omnipanel-setup 2>$null
 cargo build --release
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "установщик не собрался (см. ошибки cargo выше)" }
 Pop-Location
@@ -131,11 +134,17 @@ foreach ($file in @($panelExe, $setupExe)) {
   if (-not (Test-Path $file)) { throw "не собралось: $file" }
 }
 
-# проверка, что окно собралось именно этой версией
-$panelText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($panelExe))
-if ($panelText -notmatch [regex]::Escape("OmniPanel/$Version")) {
-  throw "панель собралась со старым номером версии — нужен $Version. Удалите target и запустите снова."
+# проверка, что собралось именно этой версией: в обоих exe должен быть её номер.
+# Если номер старый — значит cargo взял готовый файл из кэша, и в релиз уйдёт
+# прошлая версия (так уже случалось).
+function Assert-Version([string]$file, [string]$needle, [string]$what) {
+  $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($file))
+  if ($text -notmatch [regex]::Escape($needle)) {
+    throw "$what собрался со старым номером версии — нужен $Version. Удалите target и запустите снова."
+  }
 }
+Assert-Version $panelExe "OmniPanel/$Version" "окно панели"
+Assert-Version $setupExe $Version "установщик"
 
 # ── 3. Портативная сборка ──────────────────────────────────────────────────
 Write-Step "складываю портативную сборку"

@@ -125,6 +125,14 @@ const httpApi = {
   async filesMkdir(id, rel) { return post(`/api/files/mkdir?id=${encodeURIComponent(id)}`, { rel }); },
   async filesRemove(id, rel) { return post(`/api/files/remove?id=${encodeURIComponent(id)}`, { rel }); },
   async filesRename(id, rel, name) { return post(`/api/files/rename?id=${encodeURIComponent(id)}`, { rel, name }); },
+  /* перенос файла или папки: перетаскиванием в дереве */
+  async filesMove(id, from, toDir) { return post(`/api/files/move?id=${encodeURIComponent(id)}`, { from, toDir }); },
+  /* картинка для просмотра: байты приходят base64, чтобы не ломать JSON */
+  async filesImage(id, rel) { return (await fetch(`/api/files/image?id=${encodeURIComponent(id)}&rel=${encodeURIComponent(rel || '')}`)).json(); },
+  /* архивы: список, один файл из архива, распаковка */
+  async archiveOpen(id, rel) { return (await fetch(`/api/archive/open?id=${encodeURIComponent(id)}&rel=${encodeURIComponent(rel || '')}`)).json(); },
+  async archiveRead(id, rel, name) { return (await fetch(`/api/archive/read?id=${encodeURIComponent(id)}&rel=${encodeURIComponent(rel || '')}&name=${encodeURIComponent(name || '')}`)).json(); },
+  async archiveExtract(id, rel, dest, only) { return post(`/api/archive/extract?id=${encodeURIComponent(id)}`, { rel, dest, only: only || '' }); },
   async filesSearch(id, q) { return (await fetch(`/api/files/search?id=${encodeURIComponent(id)}&q=${encodeURIComponent(q)}`)).json(); },
   async filesOpenExternal() { return { ok: false, error: 'Только в exe-версии' }; },
   async filesEditor(id, rel) { return post('/api/files/editor', { id, rel }); },
@@ -296,6 +304,19 @@ const prefs = {
   desktopNotif: localStorage.getItem('lsp.desktopNotif') !== '0',
   // вид эффекта от клика: wave | dot | ring | cross | off
   clickFx: localStorage.getItem('lsp.clickFx') || 'wave',
+  /* частицы на фоне: snow | stars | dust | sticks | off — как в OmniSpec */
+  ambient: localStorage.getItem('lsp.ambient') || 'snow',
+  ambientDensity: Number(localStorage.getItem('lsp.ambientDensity') || 100),
+  ambientOpacity: Number(localStorage.getItem('lsp.ambientOpacity') || 80),
+  ambientColor: localStorage.getItem('lsp.ambientColor') || '',
+  effectSize: Number(localStorage.getItem('lsp.effectSize') || 100),
+  /* след за курсором: sparks | line | brush | glow, выключен — off */
+  trail: localStorage.getItem('lsp.trail') !== '0',
+  trailStyle: localStorage.getItem('lsp.trailStyle') || 'sparks',
+  trailSize: Number(localStorage.getItem('lsp.trailSize') || 60),
+  trailLength: Number(localStorage.getItem('lsp.trailLength') || 40),
+  trailOpacity: Number(localStorage.getItem('lsp.trailOpacity') || 35),
+  trailColor: localStorage.getItem('lsp.trailColor') || '',
   // набор звуков интерфейса: soft | mech | bell | deep | pop
   soundPack: localStorage.getItem('lsp.soundPack') || 'soft',
   custom: JSON.parse(localStorage.getItem('lsp.custom') || 'null') || {
@@ -329,6 +350,17 @@ const prefs = {
     localStorage.setItem('lsp.notif', this.notif ? '1' : '0');
     localStorage.setItem('lsp.desktopNotif', this.desktopNotif ? '1' : '0');
     localStorage.setItem('lsp.clickFx', this.clickFx);
+    localStorage.setItem('lsp.ambient', this.ambient);
+    localStorage.setItem('lsp.ambientDensity', String(this.ambientDensity));
+    localStorage.setItem('lsp.ambientOpacity', String(this.ambientOpacity));
+    localStorage.setItem('lsp.ambientColor', this.ambientColor || '');
+    localStorage.setItem('lsp.effectSize', String(this.effectSize));
+    localStorage.setItem('lsp.trail', this.trail ? '1' : '0');
+    localStorage.setItem('lsp.trailStyle', this.trailStyle);
+    localStorage.setItem('lsp.trailSize', String(this.trailSize));
+    localStorage.setItem('lsp.trailLength', String(this.trailLength));
+    localStorage.setItem('lsp.trailOpacity', String(this.trailOpacity));
+    localStorage.setItem('lsp.trailColor', this.trailColor || '');
     localStorage.setItem('lsp.soundPack', this.soundPack);
     localStorage.setItem('lsp.custom', JSON.stringify(this.custom));
   },
@@ -733,6 +765,352 @@ function clickFxAt(x, y, kind) {
   el.style.top = y + 'px';
   fxLayer().appendChild(el);
   setTimeout(() => el.remove(), 640);
+}
+
+/* ═════════════════════ частицы и след за курсором ═════════════════════ */
+
+/*
+ * Как в OmniSpec: на фоне падают частицы (снег, звёзды, пыль, палочки), а за
+ * курсором тянется след (искры, линия, кисть, свечение). Всё рисуется на одном
+ * canvas поверх панели и не ловит мышь. Настройки — те же, что у OmniSpec:
+ * вид, плотность, размер, длина, видимость и свой цвет.
+ */
+
+const fxCanvasState = {
+  canvas: null,
+  ctx: null,
+  w: 0,
+  h: 0,
+  parts: [],
+  trail: [],
+  sparks: [],
+  raf: 0,
+  last: 0,
+  started: false,
+};
+
+/** Цвет из текущей темы: текст или акцент. */
+function fxThemeColor(kind) {
+  const theme = prefs.theme === 'custom' && prefs.custom
+    ? prefs.custom
+    : (THEMES[prefs.theme] || THEMES.dark);
+  if (kind === 'accent') return theme.accent || '#8ab4ff';
+  return theme.text || '#ececee';
+}
+
+function fxAmbientColor() {
+  return prefs.ambientColor || mix(fxThemeColor('text'), fxThemeColor('accent'), 0.5);
+}
+
+function fxTrailColor() {
+  return prefs.trailColor || fxThemeColor('accent');
+}
+
+function fxCanvas() {
+  if (fxCanvasState.canvas && fxCanvasState.canvas.isConnected) return fxCanvasState.canvas;
+  let canvas = document.getElementById('fxCanvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.id = 'fxCanvas';
+    canvas.className = 'fx-canvas';
+    document.body.appendChild(canvas);
+  }
+  fxCanvasState.canvas = canvas;
+  fxCanvasState.ctx = canvas.getContext('2d');
+  fxResize();
+  return canvas;
+}
+
+function fxResize() {
+  const { canvas } = fxCanvasState;
+  if (!canvas) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  const ctx = fxCanvasState.ctx;
+  if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  fxCanvasState.w = w;
+  fxCanvasState.h = h;
+}
+
+/** Сколько частиц нужно: плотность 30–200 % от обычного. */
+function fxParticleCount() {
+  const density = Math.max(30, Math.min(200, Number(prefs.ambientDensity) || 100)) / 100;
+  return Math.round(70 * density);
+}
+
+function fxMakeParticle(kind, fresh) {
+  const { w, h } = fxCanvasState;
+  const size = Math.max(60, Math.min(220, Number(prefs.effectSize) || 100)) / 100;
+  const base = {
+    x: Math.random() * w,
+    /* при запуске частицы уже разбросаны по экрану, а не падают сверху кучей */
+    y: fresh ? Math.random() * h : -20 - Math.random() * 80,
+    phase: Math.random() * Math.PI * 2,
+    alpha: 0.35 + Math.random() * 0.65,
+  };
+  if (kind === 'stars') {
+    return { ...base, r: (0.7 + Math.random() * 1.1) * size, vy: 2 + Math.random() * 6, vx: 0, kind };
+  }
+  if (kind === 'dust') {
+    return {
+      ...base,
+      r: (0.6 + Math.random() * 1.4) * size,
+      vy: -4 + Math.random() * 8,
+      vx: -6 + Math.random() * 12,
+      kind,
+    };
+  }
+  if (kind === 'sticks') {
+    return {
+      ...base,
+      r: (7 + Math.random() * 11) * size,
+      vy: 55 + Math.random() * 70,
+      vx: -8 + Math.random() * 16,
+      kind,
+    };
+  }
+  /* снег по умолчанию */
+  return {
+    ...base,
+    r: (1.1 + Math.random() * 1.7) * size,
+    vy: 12 + Math.random() * 26,
+    vx: -8 + Math.random() * 16,
+    kind: 'snow',
+  };
+}
+
+function fxSeed() {
+  const kind = prefs.ambient;
+  fxCanvasState.parts = [];
+  if (kind === 'off' || !prefs.fx) return;
+  const count = fxParticleCount();
+  for (let i = 0; i < count; i += 1) fxCanvasState.parts.push(fxMakeParticle(kind, true));
+}
+
+function fxReset() {
+  fxSeed();
+  fxCanvasState.trail = [];
+  fxCanvasState.sparks = [];
+}
+
+function fxFits() {
+  return !!prefs.fx && !document.hidden;
+}
+
+function fxTick(now) {
+  const state = fxCanvasState;
+  const ctx = state.ctx;
+  if (!ctx) {
+    state.raf = 0;
+    return;
+  }
+  const dt = Math.min(0.05, (now - (state.last || now)) / 1000);
+  state.last = now;
+  ctx.clearRect(0, 0, state.w, state.h);
+  /* эффекты выключены — кадры не крутим вхолостую: перезапустит startFx */
+  if (!fxFits()) {
+    state.raf = 0;
+    return;
+  }
+  state.raf = requestAnimationFrame(fxTick);
+
+  const { w, h } = state;
+  const ambient = prefs.ambient;
+  const ambientAlpha = Math.max(5, Math.min(100, Number(prefs.ambientOpacity) || 80)) / 100;
+  const color = fxAmbientColor();
+
+  /* ── частицы на фоне ── */
+  if (ambient !== 'off') {
+    if (!state.parts.length) fxSeed();
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    for (let i = 0; i < state.parts.length; i += 1) {
+      const p = state.parts[i];
+      p.phase += dt * (p.kind === 'stars' ? 1.4 : 0.8);
+      p.x += (p.vx + (p.kind === 'snow' ? Math.sin(p.phase) * 12 : 0)) * dt;
+      p.y += p.vy * dt;
+      /* вышла за край — возвращаем сверху, чтобы поток не кончался */
+      if (p.y > h + 30 || p.y < -40 || p.x < -40 || p.x > w + 40) {
+        state.parts[i] = fxMakeParticle(ambient, false);
+        continue;
+      }
+      let alpha = ambientAlpha * p.alpha;
+      if (p.kind === 'stars') alpha *= 0.5 + 0.5 * Math.abs(Math.sin(p.phase));
+      ctx.globalAlpha = Math.min(1, alpha);
+      if (p.kind === 'sticks') {
+        ctx.lineWidth = Math.max(1, 1.1 * (p.r / 12));
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x + 1.5, p.y + p.r);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* ── след за курсором ── */
+  const trailOn = prefs.trail && prefs.trailStyle !== 'off';
+  const trailColor = fxTrailColor();
+  const size = Math.max(40, Math.min(300, Number(prefs.trailSize) || 60)) / 100;
+  const length = Math.max(40, Math.min(300, Number(prefs.trailLength) || 40)) / 100;
+  const trailAlpha = Math.max(5, Math.min(100, Number(prefs.trailOpacity) || 35)) / 100;
+
+  if (trailOn) {
+    /* точки старше нужного времени забываем: длина следа в секундах */
+    const life = 0.25 + length * 0.55;
+    state.trail = state.trail.filter((point) => now - point.t <= life * 1000);
+  } else {
+    state.trail = [];
+  }
+
+  if (trailOn && state.trail.length > 1) {
+    ctx.save();
+    ctx.strokeStyle = trailColor;
+    ctx.fillStyle = trailColor;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const style = prefs.trailStyle;
+    const points = state.trail;
+    for (let i = 1; i < points.length; i += 1) {
+      const point = points[i];
+      const prev = points[i - 1];
+      const age = 1 - Math.min(1, (now - point.t) / ((0.25 + length * 0.55) * 1000));
+      if (style === 'sparks') continue; /* искры рисуются ниже */
+      if (style === 'line') {
+        ctx.globalAlpha = trailAlpha * age;
+        ctx.lineWidth = Math.max(1, 2.4 * size * age);
+        ctx.beginPath();
+        ctx.moveTo(prev.x, prev.y);
+        ctx.lineTo(point.x, point.y);
+        ctx.stroke();
+      } else if (style === 'brush') {
+        ctx.globalAlpha = trailAlpha * age;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, Math.max(1, 7 * size * age), 0, Math.PI * 2);
+        ctx.fill();
+      } else if (style === 'glow') {
+        ctx.globalAlpha = trailAlpha * age * 0.55;
+        ctx.shadowColor = trailColor;
+        ctx.shadowBlur = 18 * size;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, Math.max(1.5, 5 * size * age), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* ── искры: живут сами, короткая жизнь ── */
+  if (trailOn && prefs.trailStyle === 'sparks') {
+    ctx.save();
+    ctx.fillStyle = trailColor;
+    state.sparks = state.sparks.filter((s) => {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 26 * dt;
+      s.life -= dt;
+      if (s.life <= 0) return false;
+      ctx.globalAlpha = Math.max(0, Math.min(1, trailAlpha * (s.life / s.max)));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+      return true;
+    });
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Держит эффекты в согласии с настройками, не пересоздавая частицы зря. */
+function fxEnsure() {
+  if (!fxCanvasState.started) {
+    startFx();
+    return;
+  }
+  if (!prefs.fx) {
+    const ctx = fxCanvasState.ctx;
+    if (ctx) ctx.clearRect(0, 0, fxCanvasState.w, fxCanvasState.h);
+    fxCanvasState.parts = [];
+    fxCanvasState.trail = [];
+    fxCanvasState.sparks = [];
+    return;
+  }
+  if (prefs.ambient === 'off') {
+    fxCanvasState.parts = [];
+  } else if (!fxCanvasState.parts.length) {
+    fxSeed();
+  }
+}
+
+/** Подписи новых ползунков: проценты рядом с полосой. */
+function fxLabels() {
+  const pairs = [
+    ['fxDensity', 'fxDensityVal', prefs.ambientDensity + '%'],
+    ['fxAmbientOp', 'fxAmbientOpVal', prefs.ambientOpacity + '%'],
+    ['fxSize', 'fxSizeVal', prefs.effectSize + '%'],
+    ['fxTrailSize', 'fxTrailSizeVal', prefs.trailSize + '%'],
+    ['fxTrailLen', 'fxTrailLenVal', prefs.trailLength + '%'],
+    ['fxTrailOp', 'fxTrailOpVal', prefs.trailOpacity + '%'],
+  ];
+  for (const [id, labelId, text] of pairs) {
+    const label = $(labelId);
+    if (label) label.textContent = text;
+  }
+}
+
+/** Запуск: canvas, частицы, слежение за курсором. Повторный вызов безопасен. */
+function startFx() {
+  fxCanvas();
+  fxReset();
+  if (!fxCanvasState.started) {
+    fxCanvasState.started = true;
+    window.addEventListener('resize', fxResize);
+    window.addEventListener('pointermove', (event) => {
+      if (!prefs.fx || !prefs.trail || prefs.trailStyle === 'off') return;
+      const now = performance.now();
+      fxCanvasState.trail.push({ x: event.clientX, y: event.clientY, t: now });
+      /* хвост не резиновый: держим не больше 160 точек */
+      if (fxCanvasState.trail.length > 160) fxCanvasState.trail.shift();
+      if (prefs.trailStyle === 'sparks') {
+        const size = Math.max(40, Math.min(300, Number(prefs.trailSize) || 60)) / 100;
+        for (let i = 0; i < 2; i += 1) {
+          fxCanvasState.sparks.push({
+            x: event.clientX,
+            y: event.clientY,
+            vx: (Math.random() - 0.5) * 90,
+            vy: (Math.random() - 0.5) * 90 - 15,
+            r: (0.8 + Math.random() * 1.6) * size,
+            life: 0.35 + Math.random() * 0.45,
+            max: 0.8,
+          });
+        }
+      }
+    }, { passive: true });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fxCanvasState.last = 0;
+    });
+  }
+  if (!fxCanvasState.raf) {
+    fxCanvasState.raf = requestAnimationFrame(fxTick);
+  }
+  /* выключили эффекты — стираем всё, что нарисовано */
+  if (!prefs.fx) {
+    const ctx = fxCanvasState.ctx;
+    if (ctx) ctx.clearRect(0, 0, fxCanvasState.w, fxCanvasState.h);
+    fxCanvasState.parts = [];
+    fxCanvasState.trail = [];
+    fxCanvasState.sparks = [];
+  }
 }
 
 /* ═════════════════════ звуки (WebAudio, без файлов) ═════════════════════ */
@@ -1232,7 +1610,12 @@ function fmBindDrag() {
     ev.stopPropagation();
     const { toDir } = fmDropSpot(ev);
     fmClearDropMarks();
-    await fmMoveInto(toDir);
+    /* любая ошибка переноса должна быть видна, а не проглочена промисом */
+    try {
+      await fmMoveInto(toDir);
+    } catch (err) {
+      toast(`Не удалось перенести: ${err && err.message ? err.message : err}`, 'err', 6000);
+    }
   });
 }
 
@@ -4654,6 +5037,7 @@ function applyPrefs() {
   applyBackground();
   applyLook();
   document.body.classList.toggle('no-fx', !prefs.fx);
+  fxEnsure();
   document.body.classList.toggle('color-log', prefs.colors);
   $('tglColors').checked = prefs.colors;
   el.autoscroll.checked = prefs.autoscroll;
@@ -4667,6 +5051,87 @@ function applyPrefs() {
   for (const cell of document.querySelectorAll('.theme-cell')) {
     cell.classList.toggle('active', cell.dataset.theme === prefs.theme);
   }
+  // частицы на фоне — вид
+  const fxRestart = () => {
+    fxSeed();
+    fxCanvasState.trail = [];
+    fxCanvasState.sparks = [];
+  };
+  for (const chip of document.querySelectorAll('#ambientGrid .chip')) {
+    chip.onclick = () => {
+      prefs.ambient = chip.dataset.ambient;
+      prefs.save();
+      applyPrefs();
+      fxRestart();
+      Sound.play('click');
+    };
+  }
+  // след за курсором — вид
+  for (const chip of document.querySelectorAll('#trailGrid .chip')) {
+    chip.onclick = () => {
+      const value = chip.dataset.trail;
+      prefs.trail = value !== 'off';
+      if (value !== 'off') prefs.trailStyle = value;
+      prefs.save();
+      applyPrefs();
+      fxRestart();
+      Sound.play('click');
+    };
+  }
+  if ($('pTrail')) {
+    $('pTrail').onchange = (e) => {
+      prefs.trail = e.target.checked;
+      prefs.save();
+      applyPrefs();
+      Sound.play('click');
+    };
+  }
+  // ползунки: числа меняются сразу, частицы пересобираются с задержкой
+  let fxTimer = null;
+  const fxSlider = (id, key) => {
+    const input = $(id);
+    if (!input) return;
+    input.oninput = (e) => {
+      prefs[key] = Number(e.target.value);
+      prefs.save();
+      fxLabels();
+      clearTimeout(fxTimer);
+      fxTimer = setTimeout(fxRestart, 140);
+    };
+  };
+  fxSlider('fxDensity', 'ambientDensity');
+  fxSlider('fxAmbientOp', 'ambientOpacity');
+  fxSlider('fxSize', 'effectSize');
+  fxSlider('fxTrailSize', 'trailSize');
+  fxSlider('fxTrailLen', 'trailLength');
+  fxSlider('fxTrailOp', 'trailOpacity');
+  // свои цвета частиц и следа
+  if ($('fxAmbientColor')) {
+    $('fxAmbientColor').oninput = (e) => {
+      prefs.ambientColor = e.target.value;
+      prefs.save();
+    };
+  }
+  if ($('fxAmbientColorReset')) {
+    $('fxAmbientColorReset').onclick = () => {
+      prefs.ambientColor = '';
+      prefs.save();
+      applyPrefs();
+    };
+  }
+  if ($('fxTrailColor')) {
+    $('fxTrailColor').oninput = (e) => {
+      prefs.trailColor = e.target.value;
+      prefs.save();
+    };
+  }
+  if ($('fxTrailColorReset')) {
+    $('fxTrailColorReset').onclick = () => {
+      prefs.trailColor = '';
+      prefs.save();
+      applyPrefs();
+    };
+  }
   for (const chip of document.querySelectorAll('#radiusGrid .chip')) {
     chip.classList.toggle('active', chip.dataset.radius === prefs.radius);
   }
@@ -4676,6 +5141,27 @@ function applyPrefs() {
   for (const chip of document.querySelectorAll('#clickFxGrid .chip')) {
     chip.classList.toggle('active', chip.dataset.clickfx === prefs.clickFx);
   }
+  for (const chip of document.querySelectorAll('#ambientGrid .chip')) {
+    chip.classList.toggle('active', chip.dataset.ambient === prefs.ambient);
+  }
+  for (const chip of document.querySelectorAll('#trailGrid .chip')) {
+    chip.classList.toggle('active', chip.dataset.trail === (prefs.trail ? prefs.trailStyle : 'off'));
+  }
+  if ($('pTrail')) $('pTrail').checked = !!prefs.trail;
+  const fxSliders = [
+    ['fxDensity', prefs.ambientDensity],
+    ['fxAmbientOp', prefs.ambientOpacity],
+    ['fxSize', prefs.effectSize],
+    ['fxTrailSize', prefs.trailSize],
+    ['fxTrailLen', prefs.trailLength],
+    ['fxTrailOp', prefs.trailOpacity],
+  ];
+  for (const [id, value] of fxSliders) {
+    if ($(id)) $(id).value = value;
+  }
+  if ($('fxAmbientColor')) $('fxAmbientColor').value = prefs.ambientColor || fxAmbientColor();
+  if ($('fxTrailColor')) $('fxTrailColor').value = prefs.trailColor || fxTrailColor();
+  fxLabels();
   const customBox = $('customBox');
   if (customBox) customBox.classList.toggle('hidden', prefs.theme !== 'custom');
   for (const chip of document.querySelectorAll('#startGrid .chip')) {
@@ -5494,8 +5980,14 @@ function bindActions() {
   };
   $('fxResetFx').onclick = () => {
     prefs.hue = 0; prefs.sat = 100; prefs.bright = 100; prefs.contrast = 100; prefs.alpha = 1; prefs.glass = 0;
+    prefs.ambient = 'snow'; prefs.ambientDensity = 100; prefs.ambientOpacity = 80; prefs.ambientColor = '';
+    prefs.effectSize = 100;
+    prefs.trail = true; prefs.trailStyle = 'sparks'; prefs.trailSize = 60; prefs.trailLength = 40;
+    prefs.trailOpacity = 35; prefs.trailColor = '';
     prefs.save();
     applyPrefs();
+    fxSeed();
+    fxCanvasState.trail = [];
     notify({ title: 'Эффекты сброшены', text: 'Цвет, прозрачность и размытие вернулись к обычным.', kind: 'ok' });
   };
 
@@ -6326,7 +6818,8 @@ function updRenderState(res, extra = '') {
   }
   notes.textContent = res.notes ? res.notes : '';
   if (res.ok && res.hasUpdate) {
-    $('updApplyBtn').disabled = !res.code;
+    /* в сборке на Rust обновляемся установщиком: кода в релизе нет */
+    $('updApplyBtn').disabled = !res.code && !res.setup;
     $('updFullBtn').disabled = !(res.setup || res.full);
   } else {
     $('updApplyBtn').disabled = true;
@@ -6384,17 +6877,46 @@ async function updCheckFlow() {
 
 async function updApplyFlow() {
   if (UPD.busy) return;
-  const res = await API.updApply();
-  if (!res.ok) { notify({ title: 'Обновление не встало', text: res.error, kind: 'err' }); return; }
-  $('updState').textContent = `обновлено до ${res.version}, перезапускаюсь…`;
-  const kept = (res.kept || []).length;
-  const extra = kept ? ' Настройки и серверы на месте.' : '';
-  notify({
-    title: 'Обновлено до ' + res.version,
-    text: `Файлов: ${res.files}.${extra} Панель перезапустится сама.`,
-    kind: 'ok',
-    ms: 7000,
-  });
+  UPD.busy = true;
+  const btn = $('updApplyBtn');
+  if (btn) btn.disabled = true;
+  $('updState').textContent = 'скачиваю обновление…';
+  try {
+    const res = await API.updApply();
+    if (!res.ok) {
+      $('updState').textContent = res.error || 'обновление не встало';
+      $('updState').classList.add('err');
+      notify({ title: 'Обновление не встало', text: res.error, kind: 'err', ms: 9000 });
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (res.setup) {
+      /* новая версия ставится установщиком: он подменит файлы и поднимет панель */
+      $('updState').textContent = `ставлю ${res.version} и перезапускаюсь…`;
+      notify({
+        title: 'Ставлю ' + res.version,
+        text: 'Установщик заменит файлы панели и запустит её сам. Настройки и серверы на месте.',
+        kind: 'ok',
+        ms: 12000,
+      });
+      return;
+    }
+    $('updState').textContent = `обновлено до ${res.version}, перезапускаюсь…`;
+    const kept = (res.kept || []).length;
+    const extra = kept ? ' Настройки и серверы на месте.' : '';
+    notify({
+      title: 'Обновлено до ' + res.version,
+      text: `Файлов: ${res.files}.${extra} Панель перезапустится сама.`,
+      kind: 'ok',
+      ms: 7000,
+    });
+  } catch (err) {
+    $('updState').textContent = 'обновление не удалось';
+    notify({ title: 'Обновление не встало', text: String(err && err.message ? err.message : err), kind: 'err' });
+    if (btn) btn.disabled = false;
+  } finally {
+    UPD.busy = false;
+  }
 }
 
 async function updFullFlow() {
