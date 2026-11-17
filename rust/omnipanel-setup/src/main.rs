@@ -399,7 +399,9 @@ fn main() {
 
     /* этот же exe работает деинсталлятором: так «Uninstall.exe» рядом с
        панелью — маленькая копия установщика без встроенной панели */
-    if is_uninstaller(&command) {
+    /* двойной клик по Uninstall.exe: окно удаления. С флагами (--uninstall,
+       --diagnose и т.д.) работаем как обычно — это не «запуск без аргументов» */
+    if command.is_empty() && is_uninstaller(&command) {
         let dir = args
             .iter()
             .skip(1)
@@ -533,10 +535,7 @@ fn main() {
 }
 
 /// Запущен ли этот exe как деинсталлятор: по имени файла или по флагу.
-fn is_uninstaller(command: &str) -> bool {
-    if command == "--uninstall-window" {
-        return true;
-    }
+fn is_uninstaller(_command: &str) -> bool {
     let name = std::env::current_exe()
         .ok()
         .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().to_lowercase()))
