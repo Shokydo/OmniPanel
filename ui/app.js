@@ -3701,7 +3701,10 @@ async function wizSelectKernel(id) {
   for (const v of WIZ.versions) {
     const o = document.createElement('option');
     o.value = v.id;
-    o.textContent = v.id + (v.java ? ` (Java ${v.java}+)` : '');
+    /* за старыми версиями PaperMC уже не следит, но сборки под них есть —
+       честно помечаем, чтобы человек понимал, что выбирает */
+    const mark = v.unsupported ? ' — без обновлений' : '';
+    o.textContent = v.id + mark + (v.java ? ` (Java ${v.java}+)` : '');
     sel.appendChild(o);
   }
   WIZ.version = WIZ.versions[0].id;

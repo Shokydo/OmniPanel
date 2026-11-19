@@ -56,7 +56,7 @@ fn handle(mut stream: TcpStream, seen: &Arc<Mutex<Vec<String>>>, port: u16) -> s
     let (content_type, body): (&str, String) = if target.ends_with("/paper/versions") {
         ("application/json", paper_versions())
     } else if target.contains("/paper/versions/") && target.ends_with("/builds") {
-        ("application/json", paper_builds(port))
+        ("application/json", paper_builds(port, &target))
     } else if target.starts_with("/purpur/purpur") {
         ("application/json", r#"{"versions":["1.19.4","1.20.1","1.20.4"]}"#.to_string())
     } else if target.ends_with("/fabric/versions/game") {
@@ -112,15 +112,23 @@ fn handle(mut stream: TcpStream, seen: &Arc<Mutex<Vec<String>>>, port: u16) -> s
     stream.flush()
 }
 
+/// Ответ PaperMC такой же, как живой: `SUPPORTED` только у самой свежей
+/// версии, у рабочих старых — `UNSUPPORTED`, плюс предварительные сборки.
 fn paper_versions() -> String {
     r#"{"versions":[
-      {"version":{"id":"1.20.4","support":{"status":"SUPPORTED"},"java":{"version":{"minimum":17}}}},
-      {"version":{"id":"1.21.1","support":{"status":"SUPPORTED"},"java":{"version":{"minimum":21}}}},
+      {"version":{"id":"26.3","support":{"status":"SUPPORTED"},"java":{"version":{"minimum":25}}}},
+      {"version":{"id":"26.3-rc-3","support":{"status":"UNSUPPORTED"},"java":{"version":{"minimum":25}}}},
+      {"version":{"id":"1.21.1","support":{"status":"UNSUPPORTED"},"java":{"version":{"minimum":21}}}},
+      {"version":{"id":"1.20.4","support":{"status":"UNSUPPORTED"},"java":{"version":{"minimum":17}}}},
       {"version":{"id":"1.7.10","support":{"status":"UNSUPPORTED"}}}]}"#
         .to_string()
 }
 
-fn paper_builds(port: u16) -> String {
+fn paper_builds(port: u16, target: &str) -> String {
+    /* у 1.7.10 сборок нет (Paper её больше не собирает) — версия должна исчезнуть */
+    if target.contains("/1.7.10/") {
+        return "[]".to_string();
+    }
     format!(
         r#"[{{"id":"499","channel":"BETA","downloads":{{"server:default":{{"url":"http://127.0.0.1:{0}/files/paper.jar","name":"paper-1.20.4-499.jar","size":42,"checksums":{{"sha256":"ff"}}}}}}}},
         {{"id":"500","channel":"STABLE","downloads":{{"server:default":{{"url":"http://127.0.0.1:{0}/files/paper.jar","name":"paper-1.20.4-500.jar","size":100,"checksums":{{"sha256":"ee"}}}}}}}}]"#,
@@ -188,11 +196,19 @@ fn версии_берутся_из_источников() {
     let fake = Fake::start();
     let bases = fake.bases();
 
-    /* PaperMC: неподдерживаемые версии не предлагаем */
+    /* PaperMC: список не обрезается до самой свежей версии — раньше в мастере
+       оставалась ровно одна (26.3), потому что PaperMC держит в SUPPORTED
+       только её. Теперь версия остаётся, пока под неё есть стабильные сборки. */
     let paper = kernels::versions(&bases, "paper").expect("версии Paper");
     let ids: Vec<String> = paper.iter().map(|v| text(v, "id")).collect();
-    assert_eq!(ids, vec!["1.20.4", "1.21.1"], "версии Paper: {:?}", ids);
-    assert_eq!(paper[1].get("java").and_then(|v| v.as_f64()), Some(21.0));
+    assert_eq!(ids, vec!["26.3", "1.21.1", "1.20.4"], "версии Paper: {:?}", ids);
+    /* предварительные и те, под которые нет сборок, отсеяны */
+    assert!(!ids.iter().any(|id| id.contains("rc")), "rc попал в список: {:?}", ids);
+    assert!(!ids.iter().any(|id| id == "1.7.10"), "нет сборок, а версия есть: {:?}", ids);
+    /* поддержка помечена честно */
+    assert_eq!(paper[0].get("unsupported").map(|v| v.as_bool()), Some(false));
+    assert_eq!(paper[1].get("unsupported").map(|v| v.as_bool()), Some(true));
+    assert_eq!(paper[0].get("java").and_then(|v| v.as_f64()), Some(25.0));
 
     /* Purpur: новые сверху */
     let purpur = kernels::versions(&bases, "purpur").expect("версии Purpur");
@@ -223,6 +239,17 @@ fn версии_берутся_из_источников() {
 
     /* неизвестное ядро — понятная ошибка */
     assert!(kernels::versions(&bases, "нет-такого").is_err());
+}
+
+#[test]
+fn предварительные_версии_отсеиваются() {
+    /* в мастере нужны версии для игры, а не тестовые сборки */
+    for id in ["26.3-rc-3", "1.21.11-pre5", "24w14a", "1.20.5-Snapshot", "26.4-snapshot-10"] {
+        assert!(kernels::is_prerelease(id), "{id} должен считаться предварительным");
+    }
+    for id in ["26.3", "1.21.11", "1.20.4", "1.7.10", "4.3.1"] {
+        assert!(!kernels::is_prerelease(id), "{id} — обычная версия");
+    }
 }
 
 #[test]

@@ -293,27 +293,90 @@ fn text_of(value: &Value, name: &str) -> String {
 }
 
 /// Разбирает ответ PaperMC/Folia/Velocity/Waterfall: список версий.
+/// Это предварительная версия (снапшот, pre, rc)? Такие в мастере не нужны:
+/// человек выбирает версию для игры, а не тестовую сборку.
+pub fn is_prerelease(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    if lower.contains("snapshot") || lower.contains("-pre") || lower.contains("-rc") {
+        return true;
+    }
+    /* старые снапшоты Mojang: 24w14a */
+    let bytes = lower.as_bytes();
+    bytes.len() > 3 && bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2] == b'w'
+}
+
+/// Сборка годится в установку: канал стабильный (по умолчанию так и есть).
+fn paper_build_is_stable(build: &Value) -> bool {
+    let channel = build
+        .get("channel")
+        .map(|c| c.text())
+        .unwrap_or_else(|| "STABLE".to_string())
+        .to_uppercase();
+    channel == "STABLE" || channel.is_empty()
+}
+
+/// Есть ли у версии хоть одна стабильная сборка.
+///
+/// PaperMC помечает старыми версии, которые больше не обновляет, но сборки под
+/// них остаются и работают: сервер на 1.21.8 или 1.20.4 собирается без
+/// проблем. Поэтому вместо статуса из списка версий смотрим на сами сборки.
+/// Ответ запоминается до конца работы панели — список версий открывают часто.
+fn paper_builds_available(bases: &Bases, project: &str, version: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = format!("{}/{}/{}", bases.papermc, project, version);
+    if let Some(hit) = cache.lock().ok().and_then(|map| map.get(&key).copied()) {
+        return hit;
+    }
+    let ok = match get_json(&format!(
+        "{}/{}/versions/{}/builds",
+        bases.papermc,
+        project,
+        encode(version)
+    )) {
+        Ok(builds) => {
+            let list = if builds.as_arr().is_empty() {
+                builds.get("builds").map(|v| v.as_arr().to_vec()).unwrap_or_default()
+            } else {
+                builds.as_arr().to_vec()
+            };
+            list.iter().any(paper_build_is_stable)
+        }
+        /* источник не ответил — версию не выкидываем, пусть решает человек */
+        Err(_) => true,
+    };
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key, ok);
+    }
+    ok
+}
+
+/// Список версий PaperMC: все, под которые есть стабильные сборки.
+///
+/// Раньше список обрезался по статусу поддержки, а PaperMC держит в
+/// `SUPPORTED` только самую свежую версию — на 14 ноября 2026 это 26.3. Из-за
+/// этого в мастере создания сервера был ровно один вариант. Теперь версия
+/// остаётся в списке, пока под неё есть сборки, а предварительные
+/// (rc/pre/снапшоты) отсеиваются.
 fn paper_versions(bases: &Bases, project: &str) -> Result<Vec<Value>, String> {
     let data = get_json(&format!("{}/{}/versions", bases.papermc, project))?;
     let mut out = Vec::new();
     for item in data.get("versions").map(|v| v.as_arr().to_vec()).unwrap_or_default() {
         let version = item.get("version").cloned().unwrap_or(Value::Null);
         let id = text_of(&version, "id");
-        if id.is_empty() {
+        if id.is_empty() || is_prerelease(&id) {
             continue;
         }
-        /* неподдерживаемые версии не предлагаем: за них никто не отвечает */
+        /* следит ли PaperMC ещё за этой версией — оставляем пометку человеку */
         let status = version
             .get("support")
             .and_then(|s| s.get("status"))
             .map(|s| s.text())
-            .unwrap_or_default();
-        /* статус сравниваем целиком: «UNSUPPORTED» содержит «SUPPORTED»,
-           и по вхождению старые версии просачивались в список */
-        let status = status.to_uppercase();
-        if !status.is_empty() && status != "SUPPORTED" && status != "SUPPORT" && status != "MAINTENANCE" {
-            continue;
-        }
+            .unwrap_or_default()
+            .to_uppercase();
+        let supported = status.is_empty() || status == "SUPPORTED" || status == "SUPPORT";
         let java = version
             .get("java")
             .and_then(|j| j.get("version"))
@@ -327,8 +390,41 @@ fn paper_versions(bases: &Bases, project: &str) -> Result<Vec<Value>, String> {
                     _ => Value::Null,
                 },
             ),
+            ("supported", Value::Bool(supported)),
+            ("unsupported", Value::Bool(!supported)),
         ]));
     }
+
+    /* Версии без стабильных сборок не предлагаем. Сборки проверяем пачками
+       по восемь штук: версий десятки, а каждый ответ — отдельный запрос. */
+    let unchecked: Vec<Value> = out
+        .iter()
+        .filter(|item| !item.get("supported").map(|v| v.as_bool()).unwrap_or(false))
+        .cloned()
+        .collect();
+    if !unchecked.is_empty() {
+        let mut drop: Vec<String> = Vec::new();
+        for chunk in unchecked.chunks(8) {
+            let mut threads = Vec::new();
+            for item in chunk {
+                let id = text_of(item, "id");
+                let probe = id.clone();
+                let bases = bases.clone();
+                let project = project.to_string();
+                threads.push((
+                    id,
+                    std::thread::spawn(move || paper_builds_available(&bases, &project, &probe)),
+                ));
+            }
+            for (id, handle) in threads {
+                if !handle.join().unwrap_or(true) {
+                    drop.push(id);
+                }
+            }
+        }
+        out.retain(|item| !drop.contains(&text_of(item, "id")));
+    }
+
     Ok(out)
 }
 
