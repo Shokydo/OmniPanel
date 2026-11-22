@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Версия сборки (например 1.27.0)'
+        description: 'Версия сборки (по умолчанию — из rust/omnipanel-core/Cargo.toml)'
         required: false
-        default: '1.44.0'
+        default: ''
       release:
         description: 'Опубликовать релиз с установщиком'
         type: boolean
@@ -95,7 +95,12 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.43.0" }
+          if (-not $version) {
+            # версию берём из самого кода: одна правда, а не две
+            $line = Select-String -Path rust\omnipanel-core\Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            $version = $line.Matches[0].Groups[1].Value
+          }
+          Write-Host "версия сборки: $version"
           # PowerShell 7 читает UTF-8 без вопросов; у скрипта к тому же есть BOM,
           # чтобы он работал и в Windows PowerShell 5.1 на вашей машине
           pwsh -ExecutionPolicy Bypass -File rust\собрать-под-windows.ps1 -Version $version -With7z

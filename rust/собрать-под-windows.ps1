@@ -12,7 +12,8 @@
 # Rust под Windows сам берёт нужный компоновщик.
 
 param(
-  [string]$Version = "1.27.0",
+  # версия по умолчанию — из самого кода, чтобы номер не расходился
+  [string]$Version = "",
   [switch]$SkipInstall,
   # Заодно скачать 7-Zip (7zr.exe, 590 КБ) — тогда бэкапы делаются плотным .7z
   # и панель открывает чужие .7z-архивы. Без него панель работает, но бэкапы
@@ -27,6 +28,19 @@ $Dist = Join-Path $Root "dist"
 $Work = Join-Path $env:TEMP "omnipanel-build"
 
 function Write-Step($text) { Write-Host "── $text ──" -ForegroundColor Cyan }
+
+# Версия: если не передали — берём из rust/omnipanel-core/Cargo.toml.
+# Так номер в exe, в установщике и в коде не может разойтись.
+if (-not $Version) {
+  $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+  $cargoToml = Join-Path (Split-Path -Parent $root) "rust\omnipanel-core\Cargo.toml"
+  if (Test-Path $cargoToml) {
+    $match = Select-String -Path $cargoToml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($match) { $Version = $match.Matches[0].Groups[1].Value }
+  }
+  if (-not $Version) { throw "не удалось определить версию: укажите -Version" }
+}
+Write-Host "версия: $Version"
 
 # ── 1. Rust ────────────────────────────────────────────────────────────────
 Write-Step "проверяю Rust"
