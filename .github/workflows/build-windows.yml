@@ -21,7 +21,7 @@ on:
       version:
         description: 'Версия сборки (например 1.27.0)'
         required: false
-        default: '1.43.0'
+        default: '1.44.0'
       release:
         description: 'Опубликовать релиз с установщиком'
         type: boolean
