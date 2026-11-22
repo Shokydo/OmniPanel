@@ -182,6 +182,7 @@
         <button class="tab" data-tab="addons">Плагины</button>
         <button class="tab" data-tab="players">Игроки</button>
         <button class="tab" data-tab="bans">Блокировки<span id="bansBadge" class="tab-badge hidden">0</span></button>
+        <button class="tab" data-tab="share">Передача</button>
         <button class="tab tab-alert" data-tab="issues">Ошибки<span id="issuesBadge" class="tab-badge hidden">0</span></button>
       </nav>
 
@@ -547,6 +548,95 @@
       </section>
 
       <!-- ошибки при запуске -->
+      <section id="tab-share" class="pane tab-pane hidden">
+        <div class="pane-head">
+          <div>
+            <div class="ph-title">Передача</div>
+            <div class="ph-sub" id="shareSub">Сервер другому человеку — одной строкой</div>
+          </div>
+        </div>
+
+        <div class="share-wrap">
+          <div class="share-box">
+            <div class="share-hero">
+              <div>
+                <div class="ph-title">Токен вместо файлов</div>
+                <div class="ph-sub">Панель упакует весь сервер в архив, зашифрует его и выложит на файлообменник. Вы получите одну строку — передайте её получателю любым способом.</div>
+              </div>
+            </div>
+
+            <div class="share-grid">
+              <label class="mini-field">Сервер
+                <select id="shareServer"></select>
+              </label>
+              <div class="share-lean">
+                <label class="switch">
+                  <input id="shareLean" type="checkbox" /><span class="box"></span>только настройки, без миров
+                </label>
+              </div>
+            </div>
+
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button id="shareMake" class="btn btn-primary btn-mini">Создать токен</button>
+              <button id="shareCancel" class="btn btn-mini btn-ghost hidden">Отменить</button>
+            </div>
+
+            <div id="shareProgress" class="share-progress hidden">
+              <div class="upd-prog"><i id="shareBar"></i></div>
+              <div id="shareStage" class="ph-sub">—</div>
+            </div>
+
+            <div id="shareResult" class="share-result hidden">
+              <div class="share-token-row">
+                <input id="shareToken" type="text" class="mini-input" readonly spellcheck="false" />
+                <button id="shareCopy" class="btn btn-mini">Скопировать</button>
+              </div>
+              <div id="shareResultInfo" class="ph-sub">—</div>
+            </div>
+          </div>
+
+          <div class="share-box">
+            <div class="share-hero">
+              <div>
+                <div class="ph-title">Вставьте токен</div>
+                <div class="ph-sub">Строка начинается с OMNISHARE1. Панель скачает архив, проверит контрольную сумму и распакует сервер в выбранную папку. Ключ есть только в токене — на файлообменнике лежит нечитаемый архив.</div>
+              </div>
+            </div>
+
+            <label class="mini-field mini-field-wide share-wide">Токен
+              <input id="shareInput" type="text" class="mini-input" placeholder="OMNISHARE1:…" spellcheck="false" autocomplete="off" />
+            </label>
+
+            <div class="share-grid">
+              <label class="mini-field">Куда положить
+                <div class="share-pick">
+                  <input id="shareDest" type="text" class="mini-input" placeholder="папка" spellcheck="false" />
+                  <button id="sharePickDir" class="btn btn-mini">Выбрать</button>
+                </div>
+              </label>
+              <label class="mini-field">Имя папки сервера
+                <input id="shareName" type="text" class="mini-input" placeholder="Полученный сервер" spellcheck="false" />
+              </label>
+            </div>
+
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button id="shareTake" class="btn btn-primary btn-mini">Скачать и добавить</button>
+              <button id="shareTakeCancel" class="btn btn-mini btn-ghost hidden">Отменить</button>
+            </div>
+
+            <div id="shareTakeProgress" class="share-progress hidden">
+              <div class="upd-prog"><i id="shareTakeBar"></i></div>
+              <div id="shareTakeStage" class="ph-sub">—</div>
+            </div>
+          </div>
+
+          <div class="share-box">
+            <div class="ph-title">Выданные токены</div>
+            <div id="shareList" class="share-list"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-issues" class="pane tab-pane hidden">
         <div class="pane-head">
           <div>

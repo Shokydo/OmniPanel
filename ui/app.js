@@ -194,6 +194,11 @@ const httpApi = {
   async iconToServer(cwd, dataUrl) { return post('/api/icon/toServer?cwd=' + encodeURIComponent(cwd || ''), { dataUrl }); },
   async wizardCatalog() { return (await fetch('/api/wizard/catalog')).json(); },
   async wizardVersions(id) { return (await fetch('/api/wizard/versions?id=' + encodeURIComponent(id))).json(); },
+  /* передача сервера по токену */
+  async shareCreate(id, lean) { return post('/api/share/create', { id, lean }); },
+  async shareReceive(token, dir, name) { return post('/api/share/receive', { token, dir, name }); },
+  async shareList() { return (await fetch('/api/share/list')).json(); },
+  async shareRevoke(token) { return post('/api/share/revoke', { token }); },
   async wizardJava() { return (await fetch('/api/wizard/java')).json(); },
   async wizardOpenJava() {
     return this.ghOpenExternal('https://adoptium.net/temurin/releases/?os=windows&arch=x64&package=jdk');
@@ -239,13 +244,14 @@ const httpApi = {
   onUpdAvailable(cb) { (this.subs['upd:available'] ||= []).push(cb); },
   onUpdProgress(cb) { (this.subs['upd:progress'] ||= []).push(cb); },
   onUpdReady(cb) { (this.subs['upd:ready'] ||= []).push(cb); },
+  onShareProgress(cb) { (this.subs['share-progress'] ||= []).push(cb); },
   onScanFound(cb) { (this.subs['scan-found'] ||= []).push(cb); },
   onScanProgress(cb) { (this.subs['scan-progress'] ||= []).push(cb); },
   connect() {
     const es = new EventSource('/api/events');
     for (const name of ['log', 'state', 'servers', 'logs-cleared', 'tps', 'metrics', 'scan-found', 'scan-progress', 'wizard-progress',
       'load:change', 'load:log', 'load:done', 'gh:stage', 'move-progress', 'toast',
-      'upd:state', 'upd:available', 'upd:progress', 'upd:ready', 'ui:ask']) {
+      'upd:state', 'upd:available', 'upd:progress', 'upd:ready', 'ui:ask', 'share-progress']) {
       es.addEventListener(name, (e) => {
         LIVE.at = Date.now();
         let data = null;
@@ -2943,6 +2949,7 @@ function setTab(name) {
   if (name === 'files') fmLoadTree();
   if (name === 'players') { renderPlayers(); playersAutoStart(); }
   if (name === 'bans') loadBans();
+  if (name === 'share') shareOpen();
   if (name === 'addons') {
     addonsLoadInfo().then(() => { addonsCategories(); if (!S.addons.hits.length) addonsSearch(true); });
   }
@@ -3528,6 +3535,231 @@ function avatar(s, cls) {
 
 /* ═════════════════════ мастер создания сервера ═════════════════════ */
 
+/* ═════════════════════ передача сервера по токену ═════════════════════
+   «Отдать сервер»: панель упаковывает папку сервера, шифрует архив, кладёт
+   его на файлообменник и выдаёт одну строку-токен. «Получить» — обратный
+   путь: токен → загрузка → проверка суммы → распаковка в новую папку. */
+
+const SHARE = { busy: false, token: '' };
+
+/** Открыть вкладку: заполнить список серверов, папку и выданные токены. */
+function shareOpen() {
+  const servers = (S.servers || []);
+  const sel = $('shareServer');
+  if (sel) {
+    const current = sel.value || (S.currentId || '');
+    sel.innerHTML = '';
+    for (const s of servers) {
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = s.name || s.id;
+      sel.appendChild(o);
+    }
+    if (current && servers.some((s) => s.id === current)) sel.value = current;
+  }
+  if ($('shareDest') && !$('shareDest').value) {
+    const home = (S.info && (S.info.home || S.info.dataDir)) || '';
+    $('shareDest').value = home ? home.replace(/[\\/]+$/, '') : '';
+  }
+  if ($('shareName') && !$('shareName').value) $('shareName').value = 'Полученный сервер';
+  shareLoadList();
+}
+
+/** Список выданных токенов. */
+async function shareLoadList() {
+  const host = $('shareList');
+  if (!host) return;
+  let list = [];
+  try { list = await API.shareList(); } catch { list = []; }
+  if (!Array.isArray(list) || !list.length) {
+    host.innerHTML = '<div class="share-empty">Пока ничего не выдано</div>';
+    return;
+  }
+  host.innerHTML = '';
+  for (const item of list) {
+    const row = document.createElement('div');
+    row.className = 'share-row';
+
+    const left = document.createElement('div');
+    left.className = 'share-row-text';
+    const title = document.createElement('div');
+    title.className = 'share-row-title';
+    title.textContent = item.server || 'сервер';
+    const sub = document.createElement('div');
+    sub.className = 'share-row-sub';
+    const state = item.revoked ? 'отозван'
+      : item.used ? 'скачали'
+      : item.expired || item.leftHours === 0 ? 'срок истёк'
+      : `осталось ${item.leftHours} ч`;
+    sub.textContent = `${item.sizeText} · ${state}`;
+    left.appendChild(title);
+    left.appendChild(sub);
+
+    const token = document.createElement('div');
+    token.className = 'share-row-token';
+    token.textContent = item.short || '';
+
+    const copy = document.createElement('button');
+    copy.className = 'btn btn-mini btn-ghost';
+    copy.textContent = 'Скопировать';
+    copy.onclick = () => { copyText(item.token); toast('Токен скопирован'); };
+
+    const drop = document.createElement('button');
+    drop.className = 'btn btn-mini btn-ghost';
+    drop.textContent = item.revoked ? 'Отозван' : 'Отозвать';
+    drop.disabled = !!item.revoked;
+    drop.onclick = async () => {
+      await API.shareRevoke(item.token).catch(() => null);
+      toast('Токен отозван — по нему больше не скачать');
+      shareLoadList();
+    };
+
+    row.appendChild(left);
+    row.appendChild(token);
+    row.appendChild(copy);
+    row.appendChild(drop);
+    host.appendChild(row);
+  }
+}
+
+/** Прогресс приходит событиями с сервера. */
+let shareProgressTarget = null;
+
+API.onShareProgress((data) => {
+  if (!shareProgressTarget) return;
+  const { bar, stage } = shareProgressTarget;
+  if (bar && data.percent !== null && data.percent !== undefined) {
+    bar.style.width = `${Math.min(100, data.percent || 0)}%`;
+  }
+  if (stage && data.text) stage.textContent = data.text;
+});
+
+/** Скопировать текст (и не упасть, если буфер недоступен). */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement('textarea');
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); } catch { /* ignore */ }
+    document.body.removeChild(area);
+    return true;
+  }
+}
+
+/** Создать токен на выбранный сервер. */
+async function shareMake() {
+  if (SHARE.busy) return;
+  const id = $('shareServer').value;
+  if (!id) { toast('Сначала выберите сервер', 'err'); return; }
+  const lean = $('shareLean').checked;
+
+  SHARE.busy = true;
+  $('shareMake').disabled = true;
+  $('shareCancel').classList.remove('hidden');
+  $('shareResult').classList.add('hidden');
+  $('shareProgress').classList.remove('hidden');
+  $('shareBar').style.width = '0%';
+  $('shareStage').textContent = 'Готовлю архив…';
+  shareProgressTarget = { bar: $('shareBar'), stage: $('shareStage') };
+  Sound.play('start');
+
+  let res = null;
+  try {
+    res = await API.shareCreate(id, lean);
+  } catch (e) {
+    res = { ok: false, error: e.message };
+  }
+
+  SHARE.busy = false;
+  $('shareMake').disabled = false;
+  $('shareCancel').classList.add('hidden');
+  shareProgressTarget = null;
+
+  if (!res || !res.ok) {
+    $('shareStage').textContent = 'Не получилось: ' + ((res && res.error) || 'неизвестно');
+    notify({ title: 'Токен не создан', text: (res && res.error) || 'неизвестная ошибка', kind: 'err' });
+    return;
+  }
+
+  SHARE.token = res.token || '';
+  $('shareToken').value = SHARE.token;
+  $('shareResult').classList.remove('hidden');
+  $('shareResultInfo').textContent =
+    `${res.files} файлов · ${res.sizeText} · ${res.host} · живёт ${res.ttlHours || 24} ч`;
+  $('shareBar').style.width = '100%';
+  $('shareStage').textContent = 'Токен готов';
+  Sound.play('ok');
+  shareLoadList();
+}
+
+/** Выбрать папку для полученного сервера. */
+async function sharePickDir() {
+  let chosen = '';
+  try { chosen = await API.wizardPickParent(); } catch { chosen = ''; }
+  if (chosen) $('shareDest').value = chosen;
+}
+
+/** Скачать сервер по токену и добавить его в панель. */
+async function shareTake() {
+  if (SHARE.busy) return;
+  const token = ($('shareInput').value || '').trim();
+  const dir = ($('shareDest').value || '').trim();
+  const name = ($('shareName').value || '').trim();
+  if (!token) { toast('Вставьте токен', 'err'); return; }
+  if (!dir) { toast('Выберите папку, куда положить сервер', 'err'); return; }
+
+  SHARE.busy = true;
+  $('shareTake').disabled = true;
+  $('shareTakeCancel').classList.remove('hidden');
+  $('shareTakeProgress').classList.remove('hidden');
+  $('shareTakeBar').style.width = '0%';
+  $('shareTakeStage').textContent = 'Начинаю загрузку…';
+  shareProgressTarget = { bar: $('shareTakeBar'), stage: $('shareTakeStage') };
+  Sound.play('start');
+
+  let res = null;
+  try {
+    res = await API.shareReceive(token, dir, name);
+  } catch (e) {
+    res = { ok: false, error: e.message };
+  }
+
+  SHARE.busy = false;
+  $('shareTake').disabled = false;
+  $('shareTakeCancel').classList.add('hidden');
+  shareProgressTarget = null;
+
+  if (!res || !res.ok) {
+    $('shareTakeStage').textContent = 'Не получилось: ' + ((res && res.error) || 'неизвестно');
+    notify({ title: 'Сервер не получен', text: (res && res.error) || 'неизвестная ошибка', kind: 'err' });
+    return;
+  }
+
+  $('shareTakeBar').style.width = '100%';
+  $('shareTakeStage').textContent = `Готово: ${res.files} файлов в ${res.dir}`;
+  Sound.play('ok');
+
+  /* сразу добавляем сервер в панель, чтобы он появился в списке слева */
+  await API.add({
+    name: name || 'Полученный сервер',
+    command: 'start.bat',
+    cwd: res.dir,
+    stopCommand: 'stop',
+    encoding: 'auto',
+    tpsCommand: 'tps',
+    tpsInterval: 10,
+    autoStart: false,
+    javaPath: 'java',
+    memoryMb: 4096,
+  }).catch(() => null);
+  await refresh().catch(() => null);
+  toast('Сервер получен и добавлен в панель');
+}
+
 const WIZ = {
   lastLog: '',
   catalog: [],
@@ -3747,6 +3979,20 @@ function wizBind() {
   $('wizClose').onclick = wizClose;
   $('wizCancel').onclick = wizClose;
   $('wizModal').addEventListener('click', (e) => { if (e.target.id === 'wizModal') wizClose(); });
+
+  /* передача сервера по токену */
+  const shareBind = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+  shareBind('shareMake', shareMake);
+  shareBind('shareTake', shareTake);
+  shareBind('sharePickDir', sharePickDir);
+  shareBind('shareCopy', () => {
+    if (!SHARE.token) return;
+    copyText(SHARE.token);
+    toast('Токен скопирован');
+    Sound.play('click');
+  });
+  shareBind('shareCancel', () => { SHARE.busy = false; });
+  shareBind('shareTakeCancel', () => { SHARE.busy = false; });
 
   $('wizJava').onchange = wizCheckJavaVersion;
   $('wizJavaDownload').onclick = () => API.wizardOpenJava();

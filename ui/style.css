@@ -2075,3 +2075,41 @@ html[data-density="large"] { --d-font: 13.6px; --d-row: 4px; }
 .load-log .ll-line { padding: 1px 0; border-bottom: 1px solid var(--line); }
 .load-log .ll-line:last-child { border-bottom: none; }
 .load-log .ll-t { color: var(--dim-2); margin-right: 7px; }
+
+/* ───────────── передача сервера по токену ───────────── */
+/* Вкладка держит вид остальных: та же рамка, тот же ч/б, те же скругления. */
+.share-wrap { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 10px; }
+.share-box {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--bg-2, transparent);
+}
+.share-hero { display: flex; gap: 12px; align-items: flex-start; }
+.share-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
+.share-lean { align-self: center; }
+.share-wide { grid-column: 1 / -1; }
+/* в колонке поля не должны растягиваться на всю высоту */
+.share-box .mini-field { flex: 0 0 auto; }
+.share-box .mini-input { flex: 0 0 auto; height: 32px; min-height: 32px; }
+.share-progress { display: flex; flex-direction: column; gap: 6px; }
+.share-result { display: flex; flex-direction: column; gap: 7px; padding-top: 8px; border-top: 1px solid var(--line); }
+.share-token-row { display: flex; gap: 6px; align-items: center; }
+.share-token-row .mini-input { flex: 1 1 auto; min-width: 0; font-family: Consolas, monospace; font-size: 11px; }
+.share-pick { display: flex; gap: 6px; align-items: center; }
+.share-pick .mini-input { flex: 1 1 auto; min-width: 0; }
+.share-pick .btn { flex: 0 0 auto; }
+.share-list { display: flex; flex-direction: column; gap: 6px; }
+.share-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--bg-2, transparent);
+}
+.share-row-text { flex: 1 1 auto; min-width: 0; }
+.share-row-title { font-size: 12px; font-weight: 600; }
+.share-row-sub { font-size: 11px; color: var(--dim); }
+.share-row-token {
+  font-family: Consolas, monospace; font-size: 11px; color: var(--dim);
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.share-empty { font-size: 11.5px; color: var(--dim); padding: 6px 2px; }
+@media (max-width: 760px) { .share-grid { grid-template-columns: 1fr; } }

@@ -27,6 +27,7 @@ pub mod props;
 pub mod image;
 pub mod props_schema;
 pub mod scan;
+pub mod share;
 pub mod servers;
 pub mod shortcut;
 pub mod sha1;

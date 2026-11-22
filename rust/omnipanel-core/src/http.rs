@@ -372,6 +372,27 @@ impl PanelServer {
                 vec![Value::str(arg("parent")), Value::str(arg("name"))],
             ),
             ("POST", "/api/wizard/create") => ("wizard:create", vec![body_json.clone()]),
+            /* ── передача сервера по токену ── */
+            ("POST", "/api/share/create") => (
+                "share:create",
+                vec![
+                    body_json.get("id").cloned().unwrap_or(Value::Null),
+                    body_json.get("lean").cloned().unwrap_or(Value::Null),
+                ],
+            ),
+            ("POST", "/api/share/receive") => (
+                "share:receive",
+                vec![
+                    body_json.get("token").cloned().unwrap_or(Value::Null),
+                    body_json.get("dir").cloned().unwrap_or(Value::Null),
+                    body_json.get("name").cloned().unwrap_or(Value::Null),
+                ],
+            ),
+            ("GET", "/api/share/list") => ("share:list", vec![]),
+            ("POST", "/api/share/revoke") => (
+                "share:revoke",
+                vec![body_json.get("token").cloned().unwrap_or(Value::Null)],
+            ),
             /* ── аддоны панели ── */
             ("GET", "/api/addons/list") => ("addons:list", vec![]),
             ("GET", "/api/addons/dirs") => ("addons:dirs", vec![]),

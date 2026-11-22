@@ -157,6 +157,10 @@ pub const READY_CHANNELS: &[&str] = &[
     "archive:open",
     "archive:read",
     "archive:extract",
+    "share:create",
+    "share:receive",
+    "share:list",
+    "share:revoke",
     "ports:own",
     "ports:check",
     "ports:free",
@@ -428,6 +432,7 @@ impl App {
             "backup" => self.backup(action, args),
             "modrinth" => self.modrinth(action, args),
             "wizard" => self.wizard(action, args),
+            "share" => self.share(action, args),
             "load" => self.load(action, args),
             "addons" => Ok(self.addons(action, args)),
             "wall" => self.wall(action, args),
@@ -2180,6 +2185,290 @@ impl App {
         Some(PathBuf::from(cwd))
     }
 
+    /* ─────────────────────── передача сервера по токену ─────────────────────── */
+
+    /// Папка для временных архивов передачи.
+    fn share_dir(&self) -> PathBuf {
+        self.info.data_dir.join("share")
+    }
+
+    fn share(&self, action: &str, args: &[Value]) -> Result<Value, String> {
+        match action {
+            "create" => {
+                let id = text(args, 0);
+                let dir = match self.manager.find(&id) {
+                    Some(server) => {
+                        let cwd = server.work_dir();
+                        if cwd.trim().is_empty() {
+                            return Err("У сервера не указана папка".to_string());
+                        }
+                        PathBuf::from(cwd)
+                    }
+                    None => return Err("Сервер не найден".to_string()),
+                };
+                let lean = args.get(1).map(|v| v.as_bool()).unwrap_or(false);
+                let progress = |stage: &str, message: String, percent: Option<u32>| {
+                    self.publish(
+                        "share-progress",
+                        &Value::obj(vec![
+                            ("stage", Value::str(stage)),
+                            ("text", Value::str(message)),
+                            (
+                                "percent",
+                                match percent {
+                                    Some(value) => Value::Num(value as f64),
+                                    None => Value::Null,
+                                },
+                            ),
+                        ]),
+                    );
+                };
+                /* имя сервера для записи: список приходит массивом */
+                let name = self
+                    .manager
+                    .list_json()
+                    .as_arr()
+                    .iter()
+                    .find(|s| s.get("id").map(|v| v.text()) == Some(id.clone()))
+                    .and_then(|s| s.get("name").map(|v| v.text()))
+                    .unwrap_or_default();
+                let result = self.share_create(&dir, &name, lean, &progress);
+                Ok(match result {
+                    Ok(fields) => fields_json(fields),
+                    Err(err) => Value::obj(vec![
+                        ("ok", Value::Bool(false)),
+                        ("error", Value::str(err)),
+                    ]),
+                })
+            }
+            "receive" => {
+                let line = text(args, 0);
+                let dest = text(args, 1);
+                let name = text(args, 2);
+                let progress = |stage: &str, message: String, percent: Option<u32>| {
+                    self.publish(
+                        "share-progress",
+                        &Value::obj(vec![
+                            ("stage", Value::str(stage)),
+                            ("text", Value::str(message)),
+                            (
+                                "percent",
+                                match percent {
+                                    Some(value) => Value::Num(value as f64),
+                                    None => Value::Null,
+                                },
+                            ),
+                        ]),
+                    );
+                };
+                let result = self.share_receive(&line, &dest, &name, &progress);
+                Ok(match result {
+                    Ok(fields) => fields_json(fields),
+                    Err(err) => Value::obj(vec![
+                        ("ok", Value::Bool(false)),
+                        ("error", Value::str(err)),
+                    ]),
+                })
+            }
+            "list" => Ok(crate::share::list_json(&self.info.data_dir)),
+            "revoke" => {
+                let token = text(args, 0);
+                Ok(Value::obj(vec![(
+                    "ok",
+                    Value::Bool(crate::share::revoke(&self.info.data_dir, &token)),
+                )]))
+            }
+            other => Err(not_migrated("share", other)),
+        }
+    }
+
+    /// Упаковка, шифрование, выгрузка и выдача токена.
+    fn share_create(
+        &self,
+        dir: &Path,
+        server: &str,
+        lean: bool,
+        progress: &dyn Fn(&str, String, Option<u32>),
+    ) -> Result<Vec<(String, Value)>, String> {
+        progress("pack", "Собираю архив сервера…".to_string(), None);
+        /* запуск подбираем так же, как «Добавить существующий» */
+        let guessed = crate::sync::guess_command(dir);
+        let launch = if guessed.trim().is_empty() {
+            "start.bat".to_string()
+        } else {
+            guessed
+        };
+        let entries = crate::share::collect(dir, lean, false)?;
+        let total: u64 = entries
+            .iter()
+            .map(|e| std::fs::metadata(&e.path).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        let (key, nonce) = crate::share::new_key();
+        std::fs::create_dir_all(self.share_dir())
+            .map_err(|e| format!("не создать папку передачи: {}", e))?;
+        let archive = self
+            .share_dir()
+            .join(format!("отправка-{}.oms", crate::share::now()));
+        let count = entries.len();
+        let size = crate::share::pack(&entries, &archive, &key, &nonce, &mut |done, all| {
+            let percent = ((done * 100) / all.max(1)) as u32;
+            progress(
+                "pack",
+                format!("Собираю архив: {} из {} файлов", done, all),
+                Some(percent / 4),
+            );
+        })?;
+
+        let host = crate::share::pick_host(size)?;
+        progress(
+            "upload",
+            format!(
+                "Выкладываю {} на {}…",
+                crate::share::human_size(size),
+                host.name
+            ),
+            Some(30),
+        );
+        let link = crate::share::upload(&host, &archive, size, &mut |done, all| {
+            let percent = if all > 0 { ((done * 100) / all) as u32 } else { 0 };
+            progress(
+                "upload",
+                format!(
+                    "Выкладываю: {} из {}",
+                    crate::share::human_size(done),
+                    crate::share::human_size(all)
+                ),
+                Some(30 + percent * 5 / 10),
+            );
+        })?;
+        /* на файлообменнике лежит шифротекст; сумма нужна получателю */
+        let sum = crate::sha256::file_hex(&archive)?;
+        let token = crate::share::Token {
+            url: link,
+            key: crate::share::encode_key(&key, &nonce),
+            sum,
+            size,
+        };
+        let line = token.to_line();
+        let created = crate::share::now();
+        let expires = created + crate::share::DEFAULT_TTL_HOURS * 3600;
+        /* чистим старые записи теми же правилами, что и список: использованные
+           должны остаться, иначе повтор по тому же токену пройдёт */
+        let mut records = crate::share::tidy_records(&self.info.data_dir);
+        records.push(crate::share::ShareRecord {
+            token: line.clone(),
+            server: server.to_string(),
+            created,
+            expires,
+            size,
+            used: false,
+            revoked: false,
+        });
+        crate::share::save_records(&self.info.data_dir, &records)?;
+        /* архив больше не нужен: он лежит на файлообменнике */
+        let _ = std::fs::remove_file(&archive);
+        progress("done", "Токен готов — передайте его получателю".to_string(), Some(100));
+        Ok(vec![
+            ("ok".to_string(), Value::Bool(true)),
+            ("token".to_string(), Value::str(line)),
+            ("link".to_string(), Value::str(&token.url)),
+            ("host".to_string(), Value::str(host.name)),
+            ("size".to_string(), Value::from(size)),
+            ("sizeText".to_string(), Value::str(crate::share::human_size(size))),
+            ("files".to_string(), Value::from(count as u64)),
+            ("source".to_string(), Value::str(crate::share::human_size(total))),
+            ("expires".to_string(), Value::from(expires)),
+            ("ttlHours".to_string(), Value::from(crate::share::DEFAULT_TTL_HOURS)),
+            ("command".to_string(), Value::str(launch)),
+        ])
+    }
+
+    /// Скачивание по токену и распаковка.
+    fn share_receive(
+        &self,
+        line: &str,
+        dest: &str,
+        name: &str,
+        progress: &dyn Fn(&str, String, Option<u32>),
+    ) -> Result<Vec<(String, Value)>, String> {
+        let token = crate::share::Token::parse(line)?;
+        /* одноразовый токен, отзыв и срок проверяются до скачивания */
+        if let Some(record) = crate::share::find_record(&self.info.data_dir, line.trim()) {
+            if record.revoked {
+                return Err("Токен отозван отправителем. Попросите выдать новый.".to_string());
+            }
+            if record.used {
+                return Err(
+                    "Токен уже использовали — он одноразовый. Попросите отправителя выдать новый."
+                        .to_string(),
+                );
+            }
+            if record.expires > 0 && record.expires < crate::share::now() {
+                return Err(
+                    "Срок жизни токена истёк (24 часа). Попросите отправителя выдать новый."
+                        .to_string(),
+                );
+            }
+        }
+        let (key, nonce) = token.key_bytes()?;
+        let dir = PathBuf::from(dest);
+        let target = if name.trim().is_empty() {
+            dir.clone()
+        } else {
+            dir.join(name.trim())
+        };
+        progress(
+            "download",
+            format!("Скачиваю {}…", crate::share::human_size(token.size)),
+            Some(0),
+        );
+        std::fs::create_dir_all(self.share_dir())
+            .map_err(|e| format!("не создать папку передачи: {}", e))?;
+        let archive = self
+            .share_dir()
+            .join(format!("получение-{}.oms", crate::share::now()));
+        crate::share::fetch(&token.url, &archive, &mut |done, all| {
+            let percent = match all {
+                Some(all) if all > 0 => ((done * 100) / all) as u32,
+                _ => 0,
+            };
+            progress(
+                "download",
+                format!(
+                    "Скачано {} из {}",
+                    crate::share::human_size(done),
+                    crate::share::human_size(all.unwrap_or(token.size))
+                ),
+                Some(percent / 2),
+            );
+        })?;
+        progress("check", "Проверяю контрольную сумму…".to_string(), Some(55));
+        let sum = crate::sha256::file_hex(&archive)?;
+        if !token.sum.is_empty() && sum != token.sum {
+            let _ = std::fs::remove_file(&archive);
+            return Err(
+                "файл скачался с ошибкой — сумма не сошлась. Попробуйте ещё раз".to_string(),
+            );
+        }
+        progress("unpack", "Распаковываю…".to_string(), Some(60));
+        let count = crate::share::unpack(&archive, &key, &nonce, &target, &mut |done, all| {
+            let percent = 60 + ((done * 40) / all.max(1)) as u32;
+            progress(
+                "unpack",
+                format!("Распаковываю: {} из {} файлов", done, all),
+                Some(percent),
+            );
+        })?;
+        let _ = std::fs::remove_file(&archive);
+        crate::share::mark_used(&self.info.data_dir, line.trim());
+        progress("done", "Сервер получен".to_string(), Some(100));
+        Ok(vec![
+            ("ok".to_string(), Value::Bool(true)),
+            ("dir".to_string(), Value::str(target.display().to_string())),
+            ("files".to_string(), Value::from(count as u64)),
+        ])
+    }
+
     fn backup(&self, action: &str, args: &[Value]) -> Result<Value, String> {
         let id = text(args, 0);
         match action {
@@ -2422,6 +2711,11 @@ fn not_migrated(module: &str, action: &str) -> String {
         "команда «{}:{}» ещё не перенесена в Rust — она появится в следующем шаге",
         module, action
     )
+}
+
+/// Пары «имя → значение» в объект JSON (имена приходят строками).
+fn fields_json(fields: Vec<(String, Value)>) -> Value {
+    Value::Obj(fields)
 }
 
 fn text(args: &[Value], index: usize) -> String {

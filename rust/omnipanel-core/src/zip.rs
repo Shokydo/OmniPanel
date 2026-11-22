@@ -315,11 +315,48 @@ fn decode_name(bytes: &[u8], utf8: bool) -> String {
     }
 }
 
+/// Помещается ли оглавление из `count` записей ровно до EOCD.
+///
+/// Смещение оглавления, объявленное в EOCD, может врать (наш собственный
+/// писатель когда-то ошибался на 6 байт). Поэтому кандидатов проверяем
+/// по факту: список должен кончиться ровно там, где начинается EOCD.
+fn central_fits(data: &[u8], mut offset: usize, count: usize, eocd: usize) -> bool {
+    for _ in 0..count {
+        if offset + 46 > data.len() || u32_at(data, offset) != 0x0201_4b50 {
+            return false;
+        }
+        let name_len = u16_at(data, offset + 28) as usize;
+        let extra_len = u16_at(data, offset + 30) as usize;
+        let comment_len = u16_at(data, offset + 32) as usize;
+        offset += 46 + name_len + extra_len + comment_len;
+    }
+    offset == eocd
+}
+
+/// Где на самом деле начинается оглавление: объявленное смещение, поиск
+/// подписи `PK\x01\x02` или признание, что архив повреждён.
+fn find_central(data: &[u8], eocd: usize, count: usize) -> Option<usize> {
+    let declared = u32_at(data, eocd + 16) as usize;
+    if central_fits(data, declared, count, eocd) {
+        return Some(declared);
+    }
+    /* ищем подпись первой записи: она не должна оказаться внутри данных файла */
+    let mut at = 0usize;
+    while at + 4 <= data.len() {
+        if u32_at(data, at) == 0x0201_4b50 && central_fits(data, at, count, eocd) {
+            return Some(at);
+        }
+        at += 1;
+    }
+    None
+}
+
 /// Список файлов архива. Папки не попадают — панель показывает только файлы.
 pub fn list(data: &[u8]) -> Result<Vec<ZipEntry>, String> {
     let eocd = find_eocd(data).ok_or_else(|| "файл не похож на zip-архив".to_string())?;
     let count = u16_at(data, eocd + 10) as usize;
-    let mut offset = u32_at(data, eocd + 16) as usize;
+    let mut offset = find_central(data, eocd, count)
+        .ok_or_else(|| "список файлов архива повреждён".to_string())?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 46 > data.len() || u32_at(data, offset) != 0x0201_4b50 {

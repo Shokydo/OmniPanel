@@ -24,6 +24,25 @@ pub fn hex(data: &[u8]) -> String {
     out
 }
 
+/// Считает SHA-256 кусками: большой архив не нужно держать в памяти целиком.
+pub struct Hasher {
+    data: Vec<u8>,
+}
+
+impl Hasher {
+    pub fn new() -> Hasher {
+        Hasher { data: Vec::new() }
+    }
+
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.data.extend_from_slice(chunk);
+    }
+
+    pub fn finish(self) -> [u8; 32] {
+        digest(&self.data)
+    }
+}
+
 /// SHA-256 в виде 32 байт.
 pub fn digest(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
@@ -88,16 +107,26 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
 
 /// SHA-256 файла по частям — чтобы не держать в памяти большой архив.
 pub fn file_hex(path: &std::path::Path) -> Result<String, String> {
+    let digest = file_digest(path)?;
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    Ok(out)
+}
+
+/// SHA-256 файла в виде 32 байт — без чтения файла целиком.
+pub fn file_digest(path: &std::path::Path) -> Result<[u8; 32], String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| format!("не открыть файл: {}", e))?;
     let mut buffer = vec![0u8; 65536];
-    let mut all = Vec::new();
+    let mut hasher = Hasher::new();
     loop {
         let read = file.read(&mut buffer).map_err(|e| format!("не прочитать файл: {}", e))?;
         if read == 0 {
             break;
         }
-        all.extend_from_slice(&buffer[..read]);
+        hasher.update(&buffer[..read]);
     }
-    Ok(hex(&all))
+    Ok(hasher.finish())
 }
