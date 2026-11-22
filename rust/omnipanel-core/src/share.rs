@@ -102,7 +102,12 @@ fn quarter(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     state[b] = (state[b] ^ state[c]).rotate_left(7);
 }
 
-/// Случайные байты: /dev/urandom там, где он есть, иначе время и адрес кучи.
+/// Случайные байты для ключа.
+///
+/// На Linux и macOS берём `/dev/urandom`. В Windows его нет, а ключ обязан
+/// быть настоящим: `RandomState` в стандартной библиотеке засевается
+/// операционной системой, поэтому из него и строим — плюс счётчик, чтобы два
+/// вызова подряд ни за что не совпали (на этом ловился тест `чужой_ключ`).
 pub fn random_bytes(count: usize) -> Vec<u8> {
     if let Ok(mut file) = File::open("/dev/urandom") {
         let mut out = vec![0u8; count];
@@ -110,15 +115,35 @@ pub fn random_bytes(count: usize) -> Vec<u8> {
             return out;
         }
     }
-    let mut out = Vec::with_capacity(count);
-    let mut seed = now()
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add((&out as *const _ as u64) ^ std::process::id() as u64);
+
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    let mut out = Vec::with_capacity(count + 32);
     while out.len() < count {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        out.extend_from_slice(&seed.to_le_bytes());
+        /* засев берётся у ОС, счётчик и время делают каждый запрос уникальным */
+        let state = std::collections::hash_map::RandomState::new();
+        let mut hasher = state.build_hasher();
+        let step = COUNTER.fetch_add(1, Ordering::Relaxed);
+        hasher.write_u64(step);
+        hasher.write_u64(nanos);
+        hasher.write_u64(std::process::id() as u64);
+        let first = hasher.finish();
+        out.extend_from_slice(&first.to_le_bytes());
+
+        let mut mix = first ^ step.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..3 {
+            mix ^= mix << 13;
+            mix ^= mix >> 7;
+            mix ^= mix << 17;
+            out.extend_from_slice(&mix.to_le_bytes());
+        }
     }
     out.truncate(count);
     out
@@ -1013,6 +1038,15 @@ mod tests {
         unseal(&sealed, &out, &key, &nonce).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), payload);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn два_ключа_подряд_разные() {
+        /* на Windows /dev/urandom нет: ключи не имеют права совпасть */
+        let (first_key, first_nonce) = new_key();
+        let (second_key, second_nonce) = new_key();
+        assert_ne!(first_key, second_key, "ключи совпали — токен станет предсказуемым");
+        assert_ne!(first_nonce, second_nonce, "nonce совпал");
     }
 
     #[test]

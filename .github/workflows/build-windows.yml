@@ -125,8 +125,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # версию берём из кода, чтобы имя ассета точно совпало с собранным
           $version = "${{ inputs.version }}"
-          if (-not $version) { $version = "1.41.0" }
+          if (-not $version) {
+            $line = Select-String -Path rust\omnipanel-core\Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            $version = $line.Matches[0].Groups[1].Value
+          }
           $tag = "v$version"
           # gh на Windows теряет кириллицу в имени ассета — грузим под латинским
           $setup = "dist/OmniPanel-Setup-$version.exe"
